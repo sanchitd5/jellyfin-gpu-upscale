@@ -58,7 +58,12 @@ namespace Jellyfin.Plugin.GpuUpscale
                 merged["default_target_height"] = cfg.TargetHeight;
 
                 string json = JsonSerializer.Serialize(merged, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(ConfigPath, json);
+
+                // The shim reads this file on every transcode, so it must never be observed
+                // half-written: write beside it and rename, which is atomic on the same filesystem.
+                string temp = ConfigPath + ".tmp";
+                File.WriteAllText(temp, json);
+                File.Move(temp, ConfigPath, true);
                 LastResult = "synced (shim standing down: " + patchActive + ")";
             }
             catch (Exception ex)

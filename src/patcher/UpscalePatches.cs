@@ -405,7 +405,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     return;
                 }
 
-                bool explicitlyAsked = plan.ClientOptIn || plan.DeblurApplied || plan.DenoiseApplied;
+                // Every axis a session can ask for by itself belongs here. An axis left out is an
+                // axis that silently does nothing whenever Jellyfin would otherwise stream-copy:
+                // the encoder stays copy, ffmpeg never applies -vf, and the panel still shows the
+                // level the viewer picked.
+                bool explicitlyAsked = plan.ClientOptIn
+                    || plan.DeblurApplied
+                    || plan.DenoiseApplied
+                    || plan.NeuralApplied
+                    || plan.GameApplied
+                    || plan.RefineApplied
+                    || plan.ChromaApplied;
                 if (!explicitlyAsked && !cfg.ForceTranscode)
                 {
                     return;

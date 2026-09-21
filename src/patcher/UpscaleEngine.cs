@@ -20,6 +20,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         public string PlaySessionId { get; set; }
 
+        /// <summary>
+        /// The viewer this transcode was started for, so the per-session endpoint can refuse to
+        /// describe someone else's playback. Empty when the request carried nothing to identify
+        /// one; see <see cref="UserKey"/>.
+        /// </summary>
+        public string UserId { get; set; }
+
         public string Source { get; set; }
 
         public int SourceWidth { get; set; }
@@ -313,12 +320,68 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
         }
 
+        /// <summary>
+        /// The viewer this transcode belongs to, as a lowercase "N"-format GUID, or null when the
+        /// request carried nothing to identify one.
+        ///
+        /// Found by reflection rather than by a typed property on purpose: which member carries the
+        /// user differs between the request DTO and the job state across Jellyfin versions, and this
+        /// assembly is loaded beside a server it was not compiled against. A miss here is not fatal
+        /// - it yields null, and the endpoint then falls back to the behaviour it had before, which
+        /// is to answer anyone. It must never throw into the transcode path.
+        /// </summary>
+        public static string UserKey(EncodingJobInfo state)
+        {
+            try
+            {
+                object[] roots = { state?.BaseRequest, state };
+                foreach (var root in roots)
+                {
+                    if (root == null)
+                    {
+                        continue;
+                    }
+
+                    var type = root.GetType();
+                    object value = type.GetProperty("UserId")?.GetValue(root);
+                    if (value == null)
+                    {
+                        object user = type.GetProperty("User")?.GetValue(root);
+                        value = user?.GetType().GetProperty("Id")?.GetValue(user);
+                    }
+
+                    if (value is Guid guid)
+                    {
+                        if (guid != Guid.Empty)
+                        {
+                            return guid.ToString("N", CultureInfo.InvariantCulture);
+                        }
+
+                        continue;
+                    }
+
+                    string text = value?.ToString();
+                    if (!string.IsNullOrEmpty(text) && Guid.TryParse(text, out var parsed) && parsed != Guid.Empty)
+                    {
+                        return parsed.ToString("N", CultureInfo.InvariantCulture);
+                    }
+                }
+
+                return null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         public static SessionRecord Describe(EncodingJobInfo state, Plan plan, string status, string reason)
         {
             var record = new SessionRecord
             {
                 Timestamp = DateTime.UtcNow.ToString("u", CultureInfo.InvariantCulture),
                 PlaySessionId = SessionKey(state),
+                UserId = UserKey(state),
                 Source = state?.MediaPath,
                 SourceWidth = plan.SourceWidth,
                 SourceHeight = plan.SourceHeight,
@@ -703,15 +766,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // everything else. Neither is an SR level: the refinement hooks POSTKERNEL and the
                 // chroma pass hooks CHROMA, so both compose with whatever SR level is in force
                 // rather than replacing it. See ShaderLibrary._refineFiles / _chromaFiles.
+                // Both gated the same way as neural and game: with the master switch off the
+                // session's own parameter is not read at all, so the dashboard decides.
                 string refineDefault = clientSaidOff ? "off" : cfg.RefineLevel;
-                string refineLevel = Option(state, "refine") ?? refineDefault;
+                string refineLevel = cfg.RefineAllowed ? (Option(state, "refine") ?? refineDefault) : "off";
                 if (!ShaderLibrary.IsRefineLevel(refineLevel))
                 {
                     refineLevel = ShaderLibrary.IsRefineLevel(cfg.RefineLevel) ? cfg.RefineLevel : "off";
                 }
 
                 string chromaDefault = clientSaidOff ? "off" : cfg.ChromaLevel;
-                string chromaLevel = Option(state, "chroma") ?? chromaDefault;
+                string chromaLevel = cfg.ChromaAllowed ? (Option(state, "chroma") ?? chromaDefault) : "off";
                 if (!ShaderLibrary.IsChromaLevel(chromaLevel))
                 {
                     chromaLevel = ShaderLibrary.IsChromaLevel(cfg.ChromaLevel) ? cfg.ChromaLevel : "off";
@@ -849,9 +914,20 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 bool wantDeband = cfg.Deband;
                 if (debandOption != null)
                 {
-                    wantDeband = !(string.Equals(debandOption, "off", StringComparison.OrdinalIgnoreCase)
+                    // Whitelisted both ways, like every other axis: an unrecognised value falls back
+                    // to the dashboard default rather than being read as "on".
+                    if (string.Equals(debandOption, "off", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(debandOption, "0", StringComparison.Ordinal)
-                        || string.Equals(debandOption, "false", StringComparison.OrdinalIgnoreCase));
+                        || string.Equals(debandOption, "false", StringComparison.OrdinalIgnoreCase))
+                    {
+                        wantDeband = false;
+                    }
+                    else if (string.Equals(debandOption, "on", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(debandOption, "1", StringComparison.Ordinal)
+                        || string.Equals(debandOption, "true", StringComparison.OrdinalIgnoreCase))
+                    {
+                        wantDeband = true;
+                    }
                 }
 
                 plan.Upscaler = ShaderLibrary.CanonicalUpscaler(Option(state, "kernel"))

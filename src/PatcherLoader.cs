@@ -24,12 +24,30 @@ namespace Jellyfin.Plugin.GpuUpscale
 
         private static Type _host;
 
-        public static string Status { get; private set; } = "patcher not loaded";
+        // Written on the load path and read from request threads serving the dashboard, so the
+        // backing fields are volatile: a property cannot be.
+        private static volatile string _status = "patcher not loaded";
 
-        public static bool Active { get; private set; }
+        private static volatile bool _active;
+
+        private static ILogger _logger;
+
+        public static string Status
+        {
+            get => _status;
+            private set => _status = value;
+        }
+
+        public static bool Active
+        {
+            get => _active;
+            private set => _active = value;
+        }
 
         public static void Load(ILogger logger, PluginConfiguration configuration)
         {
+            _logger = logger ?? _logger;
+
             if (_host != null)
             {
                 Configure(configuration);
@@ -76,19 +94,32 @@ namespace Jellyfin.Plugin.GpuUpscale
                 _host?.GetMethod("Configure", BindingFlags.Public | BindingFlags.Static)
                     .Invoke(null, new object[] { Serialize(configuration) });
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // the running patches simply keep their previous settings
+                // The running patches keep their previous settings, which means the dashboard is
+                // now reporting settings the patcher never received. Say so rather than leaving
+                // that divergence invisible.
+                _logger?.LogWarning(ex, "GpuUpscale: pushing the configuration to the patcher failed; the running patches keep their previous settings.");
             }
         }
 
-        public static string SessionJson(string playSessionId)
+        public static string SessionJson(string playSessionId, string requestingUserId)
         {
             try
             {
                 if (_host != null)
                 {
-                    return (string)_host.GetMethod("SessionJson", BindingFlags.Public | BindingFlags.Static)
+                    // Prefer the 2-arg overload that can refuse another viewer's session; fall back
+                    // to the 1-arg one when the loaded patcher predates it, so a half-applied deploy
+                    // (new plugin DLL, old patcher assembly still on disk) degrades to the old
+                    // behaviour instead of throwing.
+                    MethodInfo method = _host.GetMethod("SessionJson", new[] { typeof(string), typeof(string) });
+                    if (method != null)
+                    {
+                        return (string)method.Invoke(null, new object[] { playSessionId, requestingUserId });
+                    }
+
+                    return (string)_host.GetMethod("SessionJson", new[] { typeof(string) })
                         .Invoke(null, new object[] { playSessionId });
                 }
             }
