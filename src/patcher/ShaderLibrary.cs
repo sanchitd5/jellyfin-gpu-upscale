@@ -353,6 +353,63 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         private static readonly string[] _denoiseMenu = { "off", "light", "strong", "max", "oidn", "optix", "optix-temporal" };
 
+        /// <summary>
+        /// Where the ONNX super-resolution weights live. Beside the patched binary rather than in
+        /// the shader directory, because they are not shaders and they belong to that build: a
+        /// server without the patched ffmpeg has no use for them.
+        /// </summary>
+        public const string NeuralModelDirectory = "/usr/lib/jellyfin-ffmpeg-oidn/models";
+
+        /// <summary>
+        /// NEURAL SUPER-RESOLUTION: a CPU-side network pass that enlarges the frame BEFORE
+        /// hwupload, run by the "ort" filter - ONNX Runtime on its CUDA execution provider,
+        /// carried by the SAME patched binary as oidn and optix.
+        ///
+        /// It is a separate axis from SrLevel and not a rung of anything. SrLevel is a libplacebo
+        /// custom shader that runs inside the scaling pass; these are ONNX graphs that cannot be
+        /// expressed as one, so they run ahead of it and libplacebo then scales whatever comes out
+        /// to the requested size. Both can be on at once; the network runs first.
+        ///
+        /// WHAT THESE COST, measured once each in the deployed chain on a 960x540 source at a
+        /// 1080p target, purely so the cost hint is not invented (stock binary, network off: 265
+        /// fps):
+        ///
+        ///     realesr-anime-x2     24 fps   0.56x realtime
+        ///     realesr-anime-x4     15 fps   0.34x realtime
+        ///     realesr-general-x4   10 fps   0.24x realtime
+        ///
+        /// Read that plainly: NONE of them sustains realtime for a single session on this
+        /// hardware, and they are roughly an order of magnitude more expensive than the shader
+        /// that ships as the default. They are here because they are reachable by name and by the
+        /// Advanced row, exactly as oidn and optix are, and for no other reason. Nothing selects
+        /// them automatically and they are not costed into the generated quality ladder.
+        ///
+        /// The weights are NOT distributed with this plugin. They are exported from the official
+        /// Real-ESRGAN checkpoints; see NEURAL.md. A level whose .onnx file is not present is not
+        /// listed and not offered, and if the patched binary is missing the shim strips the node
+        /// so the session plays unenhanced instead of failing.
+        /// </summary>
+        private static readonly Dictionary<string, string> _neuralModels =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["off"] = null,
+
+            // SRVGGNetCompact, 64 feat / 16 conv, native x2. The cheapest of the three and the
+            // only one whose scale matches a 540p source at a 1080p target exactly.
+            ["realesr-anime-x2"] = "realesr-animevideo-x2-fp16.onnx",
+
+            // SRVGGNetCompact, 64 feat / 16 conv, x4. Trained for anime video.
+            ["realesr-anime-x4"] = "realesr-animevideov3-x4-fp16.onnx",
+
+            // SRVGGNetCompact, 64 feat / 32 conv, x4. The general-purpose weight, twice the
+            // convolutions of the other two and the slowest thing this plugin can be asked to run.
+            ["realesr-general-x4"] = "realesr-general-x4v3-fp16.onnx",
+        };
+
+        /// <summary>The neural levels offered, cheapest first. "off" is always first.</summary>
+        private static readonly string[] _neuralMenu =
+            { "off", "realesr-anime-x2", "realesr-anime-x4", "realesr-general-x4" };
+
         /// <summary>The names offered as real levels, in ladder order. Aliases are accepted but not listed.</summary>
         public static IEnumerable<string> SrLevels => _srFiles.Keys;
 
@@ -506,6 +563,85 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public static bool IsDeblurLevel(string level) => level != null && _deblurFiles.ContainsKey(level.Trim());
 
         public static bool IsDenoiseLevel(string level) => level != null && _denoiseFilters.ContainsKey(level.Trim());
+
+        /// <summary>The full path to a neural level's weights, or null when there is no such level.</summary>
+        public static string NeuralModelPath(string level)
+        {
+            if (string.IsNullOrWhiteSpace(level)
+                || !_neuralModels.TryGetValue(level.Trim(), out string file)
+                || file == null)
+            {
+                return null;
+            }
+
+            return Path.Combine(NeuralModelDirectory, file);
+        }
+
+        public static bool IsNeuralLevel(string level) => level != null && _neuralModels.ContainsKey(level.Trim());
+
+        /// <summary>
+        /// Only the levels whose weights are actually on disk. The weights are not shipped with the
+        /// plugin, so on a server where nobody exported them this list is just "off" and the
+        /// control disappears rather than offering something that would fail.
+        /// </summary>
+        public static List<string> AvailableNeuralLevels()
+        {
+            var list = new List<string>();
+            foreach (string level in _neuralMenu)
+            {
+                string path = NeuralModelPath(level);
+                if (path == null)
+                {
+                    list.Add(level);        // "off"
+                    continue;
+                }
+
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        list.Add(level);
+                    }
+                }
+                catch (Exception)
+                {
+                    // An unreadable model directory means the level is not offered, not a crash.
+                }
+            }
+
+            return list;
+        }
+
+        /// <summary>
+        /// The ffmpeg filter node for a neural level, or null for none. Always CPU-side: the
+        /// "ort" filter takes planar float RGB, so it carries its own format conversions and
+        /// therefore never has "_vulkan" in it, which is what puts it before hwupload under the
+        /// same routing invariant the denoise levels obey.
+        /// </summary>
+        public static string NeuralFilter(string level, out string levelUsed)
+        {
+            levelUsed = "off";
+            string path = NeuralModelPath(level);
+            if (path == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    return null;
+                }
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            levelUsed = level.Trim().ToLowerInvariant();
+            return "format=gbrpf32le,ort=model=" + path + ",format=yuv420p";
+        }
 
         /// <summary>
         /// The ffmpeg filter node for a denoise level, or null for none. Also reports whether the

@@ -59,6 +59,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["Deblur"] = ShaderLibrary.AvailableDeblurLevels(cfg),
                 ["Denoise"] = ShaderLibrary.AvailableDenoiseLevels(),
 
+                // Neural super-resolution: an axis of its own, and one that can be EMPTY. The
+                // weights are not shipped, so on a server where they were never exported this
+                // list is just "off" and the menu renders no choice rather than one that fails.
+                ["Neural"] = ShaderLibrary.AvailableNeuralLevels(),
+
                 // Two axes of their own, not extra rungs of the SR list: the refinement pass
                 // hooks POSTKERNEL and the chroma pass hooks CHROMA, so each composes with
                 // whatever SR level is chosen. They are listed separately so the menu can
@@ -105,6 +110,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ["DeblurApplied"] = false,
                     ["DenoiseApplied"] = false,
                     ["DenoiseLevel"] = "off",
+                    ["NeuralLevel"] = "off",
                     ["DebandApplied"] = false,
                     ["SrLevel"] = "off",
                     ["RefineLevel"] = "off",
@@ -126,6 +132,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["DeblurApplied"] = record.DeblurApplied,
                 ["DenoiseApplied"] = record.DenoiseApplied,
                 ["DenoiseLevel"] = record.DenoiseLevel ?? "off",
+                ["NeuralLevel"] = record.NeuralLevel ?? "off",
                 ["DebandApplied"] = record.DebandApplied,
                 ["SrLevel"] = record.SrLevel ?? "off",
                 ["RefineLevel"] = record.RefineLevel ?? "off",

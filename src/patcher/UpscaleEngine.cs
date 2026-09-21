@@ -39,6 +39,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// <summary>True only when a denoise filter node really went into the command.</summary>
         public bool DenoiseApplied { get; set; }
 
+        /// <summary>True only when a neural super-resolution network really went into the command.</summary>
+        public bool NeuralApplied { get; set; }
+
         /// <summary>True only when libplacebo debanding really went into the command.</summary>
         public bool DebandApplied { get; set; }
 
@@ -78,6 +81,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public string SrRequested { get; set; }
 
         public string DenoiseLevel { get; set; }
+
+        /// <summary>The neural super-resolution level that ran, or "off".</summary>
+        public string NeuralLevel { get; set; }
 
         /// <summary>The video encoder that went into the command, when this plugin chose it.</summary>
         public string Encoder { get; set; }
@@ -175,6 +181,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             /// <summary>True when the denoise node needs Vulkan frames, i.e. goes after hwupload.</summary>
             public bool DenoiseWantsHwFrames { get; set; }
+
+            public string NeuralLevel { get; set; } = "off";
+
+            /// <summary>The ffmpeg filter node for the neural super-resolution level, or null.</summary>
+            public string NeuralFilter { get; set; }
+
+            public bool NeuralApplied { get; set; }
 
             public string ShaderPath { get; set; }
 
@@ -276,6 +289,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 UpscaleApplied = plan.Act && plan.UpscaleApplied,
                 DeblurApplied = plan.Act && plan.DeblurApplied,
                 DenoiseApplied = plan.Act && plan.DenoiseApplied,
+                NeuralApplied = plan.Act && plan.NeuralApplied,
                 DebandApplied = plan.Act && plan.DebandApplied,
                 DeblurLevel = plan.Act && plan.DeblurApplied ? plan.DeblurLevel : "off",
                 SrLevel = plan.Act && plan.UpscaleApplied ? plan.SrLevel : "off",
@@ -288,6 +302,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 SrOwnsSharpening = plan.Act && plan.SrOwnsSharpening,
                 Upscaler = plan.Act ? plan.Upscaler : null,
                 DenoiseLevel = plan.Act && plan.DenoiseApplied ? plan.DenoiseLevel : "off",
+                NeuralLevel = plan.Act && plan.NeuralApplied ? plan.NeuralLevel : "off",
                 Status = status,
                 Reason = reason,
             };
@@ -322,6 +337,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return level.StartsWith("nvsharpen", StringComparison.OrdinalIgnoreCase)
                 ? "NVIDIA Image Sharpening"
                 : "RCAS";
+        }
+
+        /// <summary>
+        /// Which network a neural level actually is, for the honest report. The level name says
+        /// the family and the factor; this names the weights file that ran and the engine that
+        /// ran it, so the record names the model rather than an opaque level.
+        /// </summary>
+        private static string NeuralName(string level)
+        {
+            string path = ShaderLibrary.NeuralModelPath(level);
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return "none";
+            }
+
+            return System.IO.Path.GetFileName(path)
+                + ", Real-ESRGAN compact (SRVGGNetCompact), ONNX Runtime CUDA";
         }
 
         /// <summary>
@@ -399,6 +431,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (r.DenoiseApplied)
             {
                 parts.Add("Denoise " + r.DenoiseLevel + " (" + DenoiserName(r.DenoiseLevel) + ")");
+            }
+
+            if (r.NeuralApplied)
+            {
+                parts.Add("Neural SR " + r.NeuralLevel + " (" + NeuralName(r.NeuralLevel) + ")");
             }
 
             if (r.UpscaleApplied)
@@ -675,10 +712,27 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.DenoiseWantsHwFrames = denoiseHw;
                 plan.DenoiseApplied = plan.DenoiseFilter != null;
 
+                // ---- neural super-resolution ----------------------------------------------
+                // Its own axis, same carrier as the rest. Never inferred from anything: a session
+                // gets a network only if it or the dashboard named one, because every level here
+                // is well below realtime and choosing one for a viewer would be a decision this
+                // plugin has no business making.
+                string neuralDefault = clientSaidOff ? "off" : cfg.NeuralLevel;
+                string neuralLevel = cfg.NeuralAllowed ? (Option(state, "neural") ?? neuralDefault) : "off";
+                if (!ShaderLibrary.IsNeuralLevel(neuralLevel))
+                {
+                    neuralLevel = ShaderLibrary.IsNeuralLevel(cfg.NeuralLevel) ? cfg.NeuralLevel : "off";
+                }
+
+                plan.NeuralFilter = ShaderLibrary.NeuralFilter(neuralLevel, out string neuralUsed);
+                plan.NeuralLevel = neuralUsed;
+                plan.NeuralApplied = plan.NeuralFilter != null;
+
                 bool wantDeblur = !string.Equals(deblurLevel, "off", StringComparison.OrdinalIgnoreCase);
                 bool wantRefine = !string.Equals(refineLevel, "off", StringComparison.OrdinalIgnoreCase);
                 bool wantChroma = !string.Equals(chromaLevel, "off", StringComparison.OrdinalIgnoreCase);
-                if (!plan.UpscaleApplied && !wantDeblur && !wantRefine && !wantChroma && !plan.DenoiseApplied)
+                if (!plan.UpscaleApplied && !wantDeblur && !wantRefine && !wantChroma
+                    && !plan.DenoiseApplied && !plan.NeuralApplied)
                 {
                     return clientSaidOff
                         ? Plan.No("off-by-client", "the viewer selected Off")
@@ -729,7 +783,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.DebandApplied = wantDeband;
 
                 if (!plan.UpscaleApplied && !plan.DeblurApplied && !plan.RefineApplied
-                    && !plan.ChromaApplied && !plan.DenoiseApplied)
+                    && !plan.ChromaApplied && !plan.DenoiseApplied && !plan.NeuralApplied)
                 {
                     // Sharpening was asked for but its shader is missing: nothing left to do.
                     return Plan.No("not-requested", "requested shaders unavailable");
@@ -1162,6 +1216,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (plan.DenoiseApplied && !plan.DenoiseWantsHwFrames)
             {
                 sb.Append(',').Append(plan.DenoiseFilter);
+            }
+
+            // Neural super-resolution runs AFTER denoise and BEFORE hwupload. After denoise for
+            // the reason denoise runs first at all - a network handed noise turns it into
+            // structure. Before hwupload because the "ort" filter takes planar float RGB on the
+            // CPU, exactly as oidn does; libplacebo then scales whatever the network produced to
+            // the size the session actually asked for, so the network's own factor never has to
+            // match the target ratio.
+            if (plan.NeuralApplied)
+            {
+                sb.Append(',').Append(plan.NeuralFilter);
             }
 
             sb.Append(",hwupload");

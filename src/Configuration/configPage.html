@@ -166,6 +166,52 @@
                 </div>
 
                 <div class="selectContainer">
+                    <select is="emby-select" id="NeuralLevel" label="Neural super-resolution (default)">
+                        <option value="off">Off</option>
+                        <option value="realesr-anime-x2">Real-ESRGAN compact x2, anime video (advanced, far below realtime)</option>
+                        <option value="realesr-anime-x4">Real-ESRGAN compact x4, anime video v3 (advanced, far below realtime)</option>
+                        <option value="realesr-general-x4">Real-ESRGAN compact x4, general v3 (advanced, slowest thing here)</option>
+                    </select>
+                    <div class="fieldDescription">
+                        <strong>A separate thing from Detail below, and it is slow.</strong> These are ONNX
+                        networks run by ONNX Runtime on the CUDA execution provider, through the
+                        <code>ort</code> filter in the same separate patched ffmpeg build that carries
+                        <code>oidn</code> and <code>optix</code>. They run on the CPU side of the chain
+                        <em>before</em> the libplacebo scaling pass, so they compose with whatever Detail
+                        shader is selected rather than replacing it.
+                    </div>
+                    <div class="fieldDescription">
+                        <strong>Measured once each, in the deployed chain, on a 960x540 source at a 1080p
+                        target</strong> - purely so the cost hint is not invented. With this off: 265 fps.
+                        <code>realesr-anime-x2</code> 24 fps (0.56x realtime),
+                        <code>realesr-anime-x4</code> 15 fps (0.34x),
+                        <code>realesr-general-x4</code> 10 fps (0.24x).
+                        <strong>None of them sustains realtime for a single session</strong>, and all three
+                        are about an order of magnitude more expensive than the shader that ships as the
+                        default. They are offered because they are worth having available, not because they
+                        are better; no quality stage will ever select one.
+                    </div>
+                    <div class="fieldDescription">
+                        The weights are <strong>not shipped with this plugin</strong>. A level whose
+                        <code>.onnx</code> file is not present in
+                        <code>/usr/lib/jellyfin-ffmpeg-oidn/models</code> is not listed and not offered.
+                        See <code>NEURAL.md</code> for how to export them from the official Real-ESRGAN
+                        checkpoints. If the patched binary is missing entirely the shim strips the node and
+                        the session plays without the network instead of failing.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="NeuralAllowed" />
+                        <span>Allow neural super-resolution</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn a network on.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
                     <select is="emby-select" id="DenoiseLevel" label="Denoise (default)">
                         <option value="off">Off</option>
                         <option value="light">Light - atadenoise (temporal, cheap)</option>
@@ -385,6 +431,8 @@
                     page.querySelector('#DeblurAllowed').checked = config.DeblurAllowed !== false;
                     page.querySelector('#RefineLevel').value = config.RefineLevel || 'off';
                     page.querySelector('#ChromaLevel').value = config.ChromaLevel || 'off';
+                    page.querySelector('#NeuralLevel').value = config.NeuralLevel || 'off';
+                    page.querySelector('#NeuralAllowed').checked = config.NeuralAllowed !== false;
                     page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
                     page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
                     page.querySelector('#Deband').checked = config.Deband !== false;
@@ -419,6 +467,8 @@
                     config.DeblurAllowed = page.querySelector('#DeblurAllowed').checked;
                     config.RefineLevel = page.querySelector('#RefineLevel').value;
                     config.ChromaLevel = page.querySelector('#ChromaLevel').value;
+                    config.NeuralLevel = page.querySelector('#NeuralLevel').value;
+                    config.NeuralAllowed = page.querySelector('#NeuralAllowed').checked;
                     config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
                     config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
                     config.Deband = page.querySelector('#Deband').checked;

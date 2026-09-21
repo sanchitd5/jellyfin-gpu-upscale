@@ -225,6 +225,40 @@ order-sensitive.
 rather than being a fixed-2x network whose result gets shrunk back, which is the whole reason
 `SrMinScaleFactor` exists.
 
+## Neural models (`neural=`)
+
+A fourth axis: ONNX super-resolution models running through ONNX Runtime with the CUDA execution
+provider, via [`ffmpeg/vf_ort.c`](ffmpeg/vf_ort.c). They are **not** `sr` levels — `sr` shaders run
+inside libplacebo's scaling pass, while these are ONNX graphs applied CPU-side before `hwupload`, so
+they **compose with** an `sr` level rather than replacing one. See [NEURAL.md](NEURAL.md).
+
+| Level | Model | fps (960x540 -> 1080p) | realtime |
+|---|---|---|---|
+| `realesr-anime-x2` | `realesr-animevideo-x2-fp16` | 24 | 0.56x |
+| `realesr-anime-x4` | `realesr-animevideov3-x4-fp16` | 15 | 0.34x |
+| `realesr-general-x4` | `realesr-general-x4v3-fp16` | 10 | 0.24x |
+
+**None reaches realtime for even one session** — roughly an order of magnitude dearer than the default
+FSRCNNX shader, which runs at 265 fps on the same source. They ship anyway, labelled with their real
+speed, because the option is worth having. No quality comparison was run and none is claimed.
+
+**Why ONNX Runtime rather than TensorRT.** Both were sized before either was downloaded (236 MB
+against 4.39 GB), but size did not decide it: ORT has a C API and libavfilter is C, where TensorRT is
+C++ only; ORT needs no engine build step, where TensorRT compiles a plan per GPU, driver and library
+version — a 30–120 s stall on first use, a cache to invalidate, and a third thing a driver upgrade
+breaks; and a `.onnx` stays a portable file you can swap. TensorRT remains reachable without a
+rewrite, since ORT ships a TensorRT execution provider in the same package.
+
+**Weights are not vendored.** Export them from official Real-ESRGAN checkpoints (BSD-3-Clause);
+NEURAL.md carries the URLs and sha256 sums. A level whose `.onnx` is absent is not listed anywhere and
+cannot be selected.
+
+Three traps found and recorded, all in NEURAL.md: no ONNX graph states an SR model's scale factor, so
+the filter probes with a 32x32 frame at config time; ORT's default thread pool pins threads with
+`pthread_setaffinity_np`, which fails inside an unprivileged LXC, so intra-op threads are always set
+explicitly; and `convert_float_to_float16` leaves `graph.value_info` pinning the graph to one
+resolution, which fails on the second frame size unless cleared.
+
 ## Sharpening: RCAS
 
 | Level | Shader | `SHARPNESS` |

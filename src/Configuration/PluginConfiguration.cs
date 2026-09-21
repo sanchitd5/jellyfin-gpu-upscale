@@ -39,6 +39,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         public bool DenoiseAllowed { get; set; } = true;
 
         /// <summary>
+        /// Neural super-resolution used when a session does not name one: off, realesr-anime-x2,
+        /// realesr-anime-x4, realesr-general-x4. Advanced and off by default - every one of them
+        /// is far below realtime on this hardware.
+        /// </summary>
+        public string NeuralLevel { get; set; } = "off";
+
+        /// <summary>Master switch for neural super-resolution.</summary>
+        public bool NeuralAllowed { get; set; } = true;
+
+        /// <summary>
         /// Post-scale refinement used when a session does not name one: off, ssimsuperres.
         /// Composes with any super-resolution level instead of replacing one.
         /// </summary>

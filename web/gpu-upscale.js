@@ -100,6 +100,24 @@
             ]
         },
         {
+            // NEURAL SUPER-RESOLUTION - a different mechanism from the Detail row below, not a
+            // better grade of it. Detail is a libplacebo shader inside the scaling pass; these are
+            // ONNX networks run by ONNX Runtime on CUDA, ahead of it, out of the same patched
+            // ffmpeg binary that carries OIDN and OptiX. The two compose.
+            //
+            // Measured once each in the deployed chain, 960x540 source at a 1080p target, against
+            // 265 fps with this off: x2 24 fps (0.56x realtime), anime x4 15 fps (0.34x), general
+            // x4 10 fps (0.24x). NONE of them reaches realtime for one session, so every entry
+            // says so in its own name. Not a ladder rung and never chosen for anyone.
+            key: 'neural', label: 'Neural super-resolution', fallback: 'off',
+            options: [
+                { id: 'off', name: 'Off' },
+                { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },
+                { id: 'realesr-anime-x4', name: 'Real-ESRGAN x4 anime (0.34x realtime - very slow)' },
+                { id: 'realesr-general-x4', name: 'Real-ESRGAN x4 general (0.24x realtime - slowest)' }
+            ]
+        },
+        {
             // Two different networks, not one quality ladder. The name says which family and
             // which weight, so the viewer can tell them apart rather than trusting an opaque
             // "Light / Standard / Max" that hid a family swap.
@@ -176,7 +194,7 @@
     var SR_ALIASES = { light: 'fsrcnnx', standard: 'fsrcnnx', max: 'fsrcnnx-max' };
 
     var DEFAULT_PREFS = {
-        upscale: 'off', deblur: 'off', denoise: 'off', sr: 'fsrcnnx',
+        upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', sr: 'fsrcnnx',
         deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
     };
 
@@ -237,6 +255,16 @@
         oidn: 5.0, optix: 3.6, 'optix-temporal': 4.5
     };
 
+    // Neural super-resolution, on the same scale as DENOISE_COST and taken the same way: one
+    // reading each in the deployed chain, 960x540 source at a 1080p target. 265 fps with it off
+    // against 24 / 15 / 10 fps gives 11 / 18 / 27. Those numbers dwarf everything else on this
+    // scale, which is the honest answer - these are not a dear option, they are a different order
+    // of cost - and like the OIDN and OptiX entries they exist only so that a Custom selection is
+    // costed rather than silently treated as free. No generated stage ever sets one.
+    var NEURAL_COST = {
+        off: 1, 'realesr-anime-x2': 11, 'realesr-anime-x4': 18, 'realesr-general-x4': 27
+    };
+
     var state = {
         version: 11,
         installed: false,
@@ -256,7 +284,7 @@
         // it is), 'custom' (the Advanced controls own it), or a stage recipe object.
         stage: 'unset',
         prefs: {
-            upscale: 'off', deblur: 'off', denoise: 'off', sr: 'fsrcnnx',
+            upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', sr: 'fsrcnnx',
             deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
         }
     };
@@ -304,6 +332,7 @@
                 upscale: state.prefs.upscale,
                 deblur: state.prefs.deblur,
                 denoise: state.prefs.denoise,
+                neural: state.prefs.neural,
                 sr: state.prefs.sr,
                 deband: state.prefs.deband,
                 kernel: state.prefs.kernel,
@@ -370,10 +399,10 @@
     }
 
     /* An indicative GPU cost for a stage, relative to the cheapest upscale measured. */
-    function stageCost(height, sr, denoise) {
+    function stageCost(height, sr, denoise, neural) {
         var row = FPS[height] || FPS[1080];
         var fps = sr ? row.sr : row.off;
-        return (FPS[1080].off / fps) * (DENOISE_COST[denoise] || 1);
+        return (FPS[1080].off / fps) * (DENOISE_COST[denoise] || 1) * (NEURAL_COST[neural] || 1);
     }
 
     function costHint(cost) {
@@ -485,7 +514,7 @@
         }
 
         if (state.stage === 'off') {
-            return { upscale: 'off', deblur: 'off', denoise: 'off', sr: 'off' };
+            return { upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', sr: 'off' };
         }
 
         if (state.stage === 'custom') {
@@ -690,7 +719,7 @@
     function serverLevels(caps, key) {
         var map = {
             sr: 'Sr', deblur: 'Deblur', denoise: 'Denoise', kernel: 'Upscalers',
-            refine: 'Refine', chroma: 'Chroma'
+            refine: 'Refine', chroma: 'Chroma', neural: 'Neural'
         };
         var list = caps && caps.levels && map[key] ? caps.levels[map[key]] : null;
         return (list && list.length) ? list : null;

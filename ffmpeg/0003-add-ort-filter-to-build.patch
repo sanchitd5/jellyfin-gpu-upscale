@@ -1,0 +1,46 @@
+--- a/configure	2026-09-22 02:35:05.095955229 +1000
++++ b/configure	2026-09-22 02:35:05.102028013 +1000
+@@ -2072,6 +2072,7 @@
+     libopenvino
+     libopus
+     libnvoptix
++    libonnxruntime
+     libopenimagedenoise
+     libplacebo
+     libpulse
+@@ -4154,6 +4155,7 @@
+ lensfun_filter_deps="liblensfun version3"
+ libplacebo_filter_deps="libplacebo vulkan"
+ oidn_filter_deps="libopenimagedenoise"
++ort_filter_deps="libonnxruntime"
+ optix_filter_deps="libnvoptix ffnvcodec"
+ lv2_filter_deps="lv2"
+ mcdeint_filter_deps="avcodec gpl"
+@@ -7359,6 +7361,7 @@
+         require_pkg_config libopus opus opus_multistream.h opus_multistream_surround_encoder_create
+     }
+ }
++enabled libonnxruntime    && require libonnxruntime onnxruntime_c_api.h OrtGetApiBase -lonnxruntime
+ enabled libopenimagedenoise && require libopenimagedenoise OpenImageDenoise/oidn.h oidnNewDevice -lOpenImageDenoise
+ # OptiX and NVOFA are implemented in the NVIDIA display driver and are reached with dlopen(),
+ # so there is nothing to link against - only headers have to be present.  See OPTIX.md.
+--- a/libavfilter/Makefile	2026-09-22 02:35:05.097881931 +1000
++++ b/libavfilter/Makefile	2026-09-22 02:35:05.103881965 +1000
+@@ -419,6 +419,7 @@
+ OBJS-$(CONFIG_OCV_FILTER)                    += vf_libopencv.o
+ OBJS-$(CONFIG_OCIO_FILTER)                   += vf_opencolorio.o ocio_wrapper.o
+ OBJS-$(CONFIG_OIDN_FILTER)                   += vf_oidn.o
++OBJS-$(CONFIG_ORT_FILTER)                    += vf_ort.o
+ OBJS-$(CONFIG_OPTIX_FILTER)                  += vf_optix.o
+ OBJS-$(CONFIG_OSCILLOSCOPE_FILTER)           += vf_datascope.o
+ OBJS-$(CONFIG_OVERLAY_FILTER)                += vf_overlay.o framesync.o
+--- a/libavfilter/allfilters.c	2026-09-22 02:35:05.100076612 +1000
++++ b/libavfilter/allfilters.c	2026-09-22 02:35:05.105964916 +1000
+@@ -393,6 +393,7 @@
+ extern const FFFilter ff_vf_ocv;
+ extern const FFFilter ff_vf_oidn;
+ extern const FFFilter ff_vf_optix;
++extern const FFFilter ff_vf_ort;
+ extern const FFFilter ff_vf_oscilloscope;
+ extern const FFFilter ff_vf_ocio;
+ extern const FFFilter ff_vf_overlay;

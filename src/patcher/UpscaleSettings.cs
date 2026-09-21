@@ -109,6 +109,20 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public bool DenoiseAllowed { get; set; } = true;
 
         /// <summary>
+        /// Neural super-resolution applied by default: off, realesr-anime-x2, realesr-anime-x4,
+        /// realesr-general-x4. A separate axis from SrLevel - it is an ONNX network run ahead of
+        /// the scaling pass, not a libplacebo shader inside it, and the two compose.
+        ///
+        /// Off by default and it should stay off: measured at 24, 15 and 10 fps respectively on a
+        /// 540p source at a 1080p target, against 265 fps with it off. None of them reaches
+        /// realtime for one session. It is offered, not recommended.
+        /// </summary>
+        public string NeuralLevel { get; set; } = "off";
+
+        /// <summary>Master switch for neural super-resolution. When false no session can turn it on.</summary>
+        public bool NeuralAllowed { get; set; } = true;
+
+        /// <summary>
         /// Post-scale refinement applied by default: off, ssimsuperres. A separate axis from
         /// SrLevel - it hooks POSTKERNEL and composes with every SR level rather than replacing
         /// one, and it is not subject to SrMinScaleFactor. Off by default: it costs a pass and

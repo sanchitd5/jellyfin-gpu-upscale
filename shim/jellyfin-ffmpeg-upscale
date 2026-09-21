@@ -27,8 +27,9 @@ import time
 REAL_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 
 # A SECOND, PATCHED ffmpeg carrying video filters that exist in no upstream or Jellyfin
-# ffmpeg: "oidn" (Intel Open Image Denoise) and "optix" (the NVIDIA OptiX AI denoiser,
-# spatial and temporal). ONE binary carries both, so there is still exactly one extra
+# ffmpeg: "oidn" (Intel Open Image Denoise), "optix" (the NVIDIA OptiX AI denoiser,
+# spatial and temporal) and "ort" (a super-resolution ONNX model run by ONNX Runtime on
+# the CUDA execution provider). ONE binary carries all three, so there is still one extra
 # thing on this server that can break, and it is used for one thing only: the sessions
 # that explicitly asked for one of those denoise levels. Everything else runs on the
 # stock binary above, untouched, so a broken build costs the opt-in levels and nothing
@@ -37,7 +38,7 @@ PATCHED_FFMPEG = "/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg"
 OIDN_FFMPEG = PATCHED_FFMPEG          # old name, kept for anything that still refers to it
 
 # The filters only that binary has.
-PATCHED_FILTERS = ("oidn", "optix")
+PATCHED_FILTERS = ("oidn", "optix", "ort")
 
 # The nodes the plugin emits for those levels, with the format conversions each needs
 # around it. Stripping the conversions too matters: leaving a lone format=gbrpf32le in
@@ -126,15 +127,53 @@ wants_oidn = wants_patched
 strip_oidn = strip_patched
 
 
+def patched_has(filters):
+    """Which of these filter names the patched binary really carries.
+
+    Existence is not the same as capability.  More than one feature is built into that one
+    binary, and a rebuild that forgets a filter would leave a binary that runs but fails
+    every session asking for the missing one.  Asking it what it has turns that into the
+    same graceful degradation as a missing binary.  The answer is cached against the
+    binary's size and mtime, so the subprocess runs once per build, not once per session.
+    """
+    try:
+        st = os.stat(PATCHED_FFMPEG)
+        os.makedirs(SLOT_DIR, exist_ok=True)
+        cache = os.path.join(SLOT_DIR, ".filters-%d-%d" % (st.st_size, int(st.st_mtime)))
+        try:
+            with open(cache) as fh:
+                have = set(fh.read().split())
+        except Exception:
+            out = subprocess.run([PATCHED_FFMPEG, "-hide_banner", "-filters"],
+                                 capture_output=True, text=True, timeout=30).stdout
+            # " TS oidn              V->V       Denoise frames with ..." - the name is the
+            # field in front of the "in->out" column, which is the only stable landmark.
+            have = set(re.findall(r"^\s*\S{1,3}\s+(\S+)\s+\S*->\S*\s", out, re.M))
+            try:
+                with open(cache, "w") as fh:
+                    fh.write(" ".join(sorted(have)))
+            except Exception:
+                pass
+        return [f for f in filters if f in have]
+    except Exception:
+        # Cannot tell: assume it is fine rather than degrade a working install.
+        return list(filters)
+
+
 def pick_binary(cfg, args):
     """The ffmpeg to run for this command, and the argument list to run it with."""
     wanted = wants_patched(args)
     if not wanted:
         return REAL_FFMPEG, args
     if os.access(PATCHED_FFMPEG, os.X_OK):
-        log(cfg, "routing to the patched ffmpeg build for this session (%s)" % ", ".join(wanted))
-        return PATCHED_FFMPEG, args
-    log(cfg, "%s requested but %s is not executable; running stock without the denoise node"
+        missing = [f for f in wanted if f not in patched_has(wanted)]
+        if not missing:
+            log(cfg, "routing to the patched ffmpeg build for this session (%s)" % ", ".join(wanted))
+            return PATCHED_FFMPEG, args
+        log(cfg, "%s requested but %s does not carry %s; running stock without those nodes"
+            % ("/".join(wanted), PATCHED_FFMPEG, "/".join(missing)))
+        return REAL_FFMPEG, strip_patched(args)
+    log(cfg, "%s requested but %s is not executable; running stock without those nodes"
         % ("/".join(wanted), PATCHED_FFMPEG))
     return REAL_FFMPEG, strip_patched(args)
 
