@@ -53,7 +53,7 @@
 
     var CONTROLS = [
         {
-            key: 'upscale', label: 'Upscale to', fallback: 'off', group: 'Size',
+            key: 'upscale', label: 'Upscale to', fallback: 'off', group: 'Size', chips: true,
             options: [
                 { id: 'off', name: 'Off' },
                 { id: '1080', name: '1080p' },
@@ -119,13 +119,28 @@
             // x4 10 fps (0.24x). NONE of them reaches realtime for one session, so every entry
             // says so in its own name. Not a ladder rung and never chosen for anyone.
             key: 'neural', label: 'Neural super-resolution', fallback: 'off', group: 'Detail',
-            probeKey: 'Neural',
+            probeKey: 'Neural', costKey: 'neural',
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },
                 { id: 'realesr-anime-x4', name: 'Real-ESRGAN x4 anime (0.34x realtime - very slow)' },
                 { id: 'realesr-general-x4', name: 'Real-ESRGAN x4 general (0.24x realtime - slowest)' }
             ]
+        },
+        {
+            // GAME TEMPORAL UPSCALERS - FSR2, DLSS SR and DLAA, which were built for a game engine
+            // that hands them true motion vectors, a depth buffer and a jittered camera. Video has
+            // none of those, so the server synthesises them, and every level says "degraded" in the
+            // wording the SERVER supplies. The options and their names are taken whole from the
+            // probe (`Game` and `GameLabels`): nothing here decides which of them exists, and
+            // nothing here writes their wording.
+            //
+            // They are the most expensive levels in the project - measured 960x540 to 1080p in the
+            // deployed chain: 87.9 fps with the axis off against 7.8 (dlaa), 4.0 (dlss) and 2.7
+            // (fsr2) - so each option carries its cost beside it. None is ever a ladder rung.
+            key: 'game', label: 'Game temporal upscaler', fallback: 'off', group: 'Detail',
+            probeKey: 'Game', labelsKey: 'GameLabels', fromProbe: true, costKey: 'game',
+            options: [{ id: 'off', name: 'Off' }]
         },
         {
             // Two different networks, not one quality ladder. The name says which family and
@@ -163,7 +178,7 @@
             // is also the only thing here that runs below the server's super-resolution threshold,
             // where the fixed-2x networks are bypassed and the chain is plain scaling plus a
             // sharpener. "Server default" sends nothing, like Debanding.
-            key: 'refine', label: 'Refine (post-scale)', fallback: 'default', group: 'Detail',
+            key: 'refine', label: 'Refine (post-scale)', fallback: 'default', group: 'Detail', chips: true,
             probeKey: 'Refine',
             options: [
                 { id: 'default', name: 'Server default' },
@@ -175,7 +190,7 @@
             // CHROMA upscaling - the colour planes, which every other control here leaves to the
             // plain kernel. These sources are 4:2:0, so chroma is stored at quarter resolution.
             // Composes with any super-resolution level rather than replacing one.
-            key: 'chroma', label: 'Chroma upscaling', fallback: 'default', group: 'Detail',
+            key: 'chroma', label: 'Chroma upscaling', fallback: 'default', group: 'Detail', chips: true,
             probeKey: 'Chroma',
             options: [
                 { id: 'default', name: 'Server default' },
@@ -187,7 +202,7 @@
             // Debanding rides on the libplacebo instance the chain is building anyway. "Server
             // default" sends nothing and lets the dashboard decide, which is what every client
             // without this script gets.
-            key: 'deband', label: 'Debanding', fallback: 'default', group: 'Picture',
+            key: 'deband', label: 'Debanding', fallback: 'default', group: 'Picture', chips: true,
             options: [
                 { id: 'default', name: 'Server default' },
                 { id: 'on', name: 'On' },
@@ -198,7 +213,7 @@
             // The libplacebo scaling kernel. The list comes from the server's own whitelist, since
             // an unknown kernel name does not soften the picture - it fails the whole job.
             key: 'kernel', label: 'Scaling kernel', fallback: 'default', group: 'Picture',
-            probeKey: 'Upscalers',
+            probeKey: 'Upscalers', fromProbe: true,
             options: [{ id: 'default', name: 'Server default' }]
         }
     ];
@@ -208,7 +223,7 @@
     var SR_ALIASES = { light: 'fsrcnnx', standard: 'fsrcnnx', max: 'fsrcnnx-max' };
 
     var DEFAULT_PREFS = {
-        upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', sr: 'fsrcnnx',
+        upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
         deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
     };
 
@@ -279,8 +294,18 @@
         off: 1, 'realesr-anime-x2': 11, 'realesr-anime-x4': 18, 'realesr-general-x4': 27
     };
 
+    // Game temporal upscalers, on the same scale as DENOISE_COST and NEURAL_COST. Measured
+    // 960x540 at a 1080p target in the deployed chain: 87.9 fps with the axis off against 7.8, 4.0
+    // and 2.7. The indices are PROVISIONAL - the frame rates are measured, putting them on the
+    // OIDN-5.0 scale is a ratio argument - but the ordering they express is not in doubt: these are
+    // the most expensive levels here, every one of them slower than every neural model.
+    var GAME_COST = { off: 1, dlaa: 11, dlss: 22, fsr2: 36 };
+
+    // Looked up by name at render time, because a control is declared before these exist.
+    var COSTS = { neural: NEURAL_COST, game: GAME_COST };
+
     var state = {
-        version: 12,
+        version: 13,
         installed: false,
         globals: [],
         chunks: 0,
@@ -298,7 +323,7 @@
         // it is), 'custom' (the Advanced controls own it), or a stage recipe object.
         stage: 'unset',
         prefs: {
-            upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', sr: 'fsrcnnx',
+            upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
             deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
         }
     };
@@ -347,6 +372,7 @@
                 deblur: state.prefs.deblur,
                 denoise: state.prefs.denoise,
                 neural: state.prefs.neural,
+                game: state.prefs.game,
                 sr: state.prefs.sr,
                 deband: state.prefs.deband,
                 kernel: state.prefs.kernel,
@@ -528,7 +554,7 @@
         }
 
         if (state.stage === 'off') {
-            return { upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', sr: 'off' };
+            return { upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'off' };
         }
 
         if (state.stage === 'custom') {
@@ -610,6 +636,7 @@
         if (e.deblur !== 'off') { bits.push('unblur ' + e.deblur); }
         if (e.denoise !== 'off') { bits.push('denoise ' + e.denoise); }
         if (state.prefs.neural && state.prefs.neural !== 'off') { bits.push('neural ' + state.prefs.neural); }
+        if (state.prefs.game && state.prefs.game !== 'off') { bits.push('game ' + state.prefs.game); }
         if (state.prefs.refine && state.prefs.refine !== 'default' && state.prefs.refine !== 'off') {
             bits.push('refine ' + state.prefs.refine);
         }
@@ -748,10 +775,19 @@
                     options = c.options;
                 }
 
-                if (c.key === 'kernel') {
-                    var kernels = (caps.levels && caps.levels.Upscalers) || [];
-                    options = [{ id: 'default', name: 'Server default' }].concat(
-                        kernels.map(function (k) { return { id: k, name: k }; }));
+                if (c.fromProbe) {
+                    // THE SERVER OWNS THIS LIST AND ITS WORDING. The levels come from the probe and
+                    // the names from the map the probe names in `labelsKey`, so a level this build
+                    // has never heard of still appears, correctly labelled, and a level the server
+                    // withdrew disappears. The control's own options are seeds - the neutral
+                    // entries, such as "Server default" - and a seed wins over the probe's name for
+                    // the same id.
+                    var listed = (caps.levels && caps.levels[c.probeKey]) || [];
+                    var labels = (c.labelsKey && caps.levels && caps.levels[c.labelsKey]) || {};
+                    var seeded = c.options.map(function (o) { return o.id; });
+                    options = c.options.concat(listed
+                        .filter(function (id) { return seeded.indexOf(id) < 0; })
+                        .map(function (id) { return { id: id, name: labels[id] || id }; }));
                 }
 
                 if (c.key === 'upscale' && targets !== null) {
@@ -775,7 +811,8 @@
 
                 return {
                     key: c.key, label: c.label, fallback: c.fallback, group: c.group || 'Detail',
-                    grade: c.grade || null, options: options
+                    grade: c.grade || null, chips: !!c.chips, costKey: c.costKey || null,
+                    options: options
                 };
             });
     }
@@ -792,6 +829,19 @@
                 var s = state.lastServerState;
                 return (s && s.Known && s.SrBypassed && state.prefs.sr !== 'off')
                     ? 'The server bypassed this at the current ratio: plain scaling plus the sharpener ran instead.'
+                    : '';
+            }
+        },
+        {
+            key: 'sr',
+            text: function () {
+                // fsr2 and dlss produce the target size themselves, so the server drops this pass
+                // and reports SrLevel "off" with GameApplied true. That is the SERVER'S signal, read
+                // straight out of the record - never worked out from what the viewer picked.
+                var s = state.lastServerState;
+                return (s && s.Known && s.GameApplied && isOff(s.SrLevel) && state.prefs.sr !== 'off')
+                    ? 'The game temporal upscaler produced the target size, so the server dropped'
+                      + ' this pass. It did not run.'
                     : '';
             }
         },
@@ -864,6 +914,7 @@
         { label: 'Unblur', level: 'DeblurLevel', applied: 'DeblurApplied' },
         { label: 'Denoise', level: 'DenoiseLevel', applied: 'DenoiseApplied' },
         { label: 'Neural SR', level: 'NeuralLevel' },
+        { label: 'Game upscaler', level: 'GameLevel', applied: 'GameApplied' },
         { label: 'Refine', level: 'RefineLevel', applied: 'RefineApplied' },
         { label: 'Chroma', level: 'ChromaLevel', applied: 'ChromaApplied' },
         { label: 'Debanding', applied: 'DebandApplied' },
@@ -1020,6 +1071,13 @@
         return n;
     }
 
+    /* An option's measured cost, when its axis carries one, as plainly as it can be put. */
+    function costSuffix(c, id) {
+        var table = c.costKey ? COSTS[c.costKey] : null;
+        var n = table ? table[id] : null;
+        return (n && n > 1) ? '  [GPU ' + n + 'x]' : '';
+    }
+
     function shortName(name) {
         // Chips carry the short form; the full name stays on the title attribute.
         return String(name).split(' (')[0];
@@ -1041,7 +1099,11 @@
         var cur = state.prefs[c.key] || c.fallback;
         var ids = c.options.map(function (o) { return o.id; });
         var grade = (c.grade || []).filter(function (id) { return ids.indexOf(id) >= 0; });
-        var chipIds = grade.length >= 2 ? grade : (c.options.length <= 4 ? ids : []);
+        // Chips only where the data says the short form is safe to show, because a chip drops
+        // everything after " (" - and on the neural and game axes that parenthesis is where the
+        // honesty lives ("degraded: synthesised motion vectors", "0.24x realtime"). Those axes are
+        // pickers, which show the server's wording whole.
+        var chipIds = grade.length >= 2 ? grade : (c.chips && c.options.length <= 4 ? ids : []);
         var rest = c.options.filter(function (o) { return chipIds.indexOf(o.id) < 0; });
 
         var row = el('div', 'gpuup-row');
@@ -1067,7 +1129,7 @@
             }
 
             rest.forEach(function (o) {
-                var opt = el('option', null, o.name);
+                var opt = el('option', null, o.name + costSuffix(c, o.id));
                 opt.value = o.id;
                 if (o.id === cur) { opt.selected = true; }
                 sel.appendChild(opt);
@@ -1553,6 +1615,14 @@
             if (state.prefs.chroma && state.prefs.chroma !== 'default') {
                 params.chroma = state.prefs.chroma;
             }
+
+            // The neural and game axes ride alongside the ladder exactly as refine and chroma do:
+            // they compose with every stage, so they are sent from the preference whichever stage
+            // is in force - unless the viewer said Off, where `effective()` has already made them
+            // off and this sends that. (Before this build the neural axis was never written onto
+            // the URL at all, so choosing a level there did nothing.)
+            params.neural = e.neural != null ? e.neural : (state.prefs.neural || 'off');
+            params.game = e.game != null ? e.game : (state.prefs.game || 'off');
         }
 
         // Compatibility: the first server-side version of this plugin keyed off maxHeight. Sending
