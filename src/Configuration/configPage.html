@@ -126,6 +126,8 @@
                         <option value="strong">Strong - nlmeans (spatial, slower)</option>
                         <option value="max">Max - nlmeans s=2.0 (slowest)</option>
                         <option value="oidn">OIDN - Intel Open Image Denoise (advanced, slowest)</option>
+                        <option value="optix">OptiX - NVIDIA AI denoiser, spatial (advanced)</option>
+                        <option value="optix-temporal">OptiX temporal - NVIDIA AI denoiser + motion vectors (advanced)</option>
                     </select>
                     <div class="fieldDescription">
                         Runs before the upscale, so the network is not asked to reconstruct noise into detail.
@@ -140,6 +142,17 @@
                         against 34-53% for nlmeans and 4-6% for atadenoise, with no over-smoothing). On this
                         library\'s normal material it measures as a no-op: within 0.01 dB of doing nothing.
                         It is not in the quality ladder for that reason.
+                        <br /><br />
+                        <strong>OptiX is advanced too.</strong> Both OptiX levels run through the same
+                        patched ffmpeg build as OIDN. Plain <code>optix</code> is spatial, like OIDN and
+                        like everything here except <code>atadenoise</code>; on a grainy source it cut
+                        flicker 66% against OIDN's 61%, at about 1.4x OIDN's speed.
+                        <code>optix-temporal</code> is the only level that uses motion between frames: it
+                        feeds the denoiser the previous denoised frame plus a motion field computed on
+                        this GPU's optical-flow engine. Measured, it cut flicker 60% - less than the
+                        spatial models, because the noise being removed also corrupts the motion estimate
+                        it depends on. It is offered and costed honestly rather than promoted. Neither
+                        OptiX level is in the quality ladder.
                         <br /><br />
                         <strong>hqdn3d used to be "Light" and has been retired.</strong> It recovered 0.00 dB
                         and 12% of the structural damage - it traded noise for blur one for one. Do not put it

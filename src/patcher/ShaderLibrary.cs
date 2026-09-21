@@ -229,8 +229,37 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             ["oidn"] = "format=gbrpf32le,oidn=quality=high:srgb=0,format=yuv420p",
             ["oidn-fast"] = "format=gbrpf32le,oidn=quality=fast:srgb=0,format=yuv420p",
 
+            // ADVANCED ONLY as well, and for a different reason from OIDN. The NVIDIA OptiX AI
+            // denoiser, filter "optix", carried by the SAME patched binary as oidn - one build,
+            // two filters, so there is still exactly one thing on this server that can break and
+            // it still breaks only for the sessions that asked for it. See OPTIX.md.
+            //
+            // "optix" is the spatial model. On grain it does the job OIDN already does: measured
+            // on a degraded high-bitrate source it cut flicker 66% against OIDN's 61%, which is
+            // inside the run-to-run spread of a shared GPU, at about 1.4x OIDN's throughput.
+            //
+            // "optix-temporal" is the one that reaches an axis nothing else here reaches. Every
+            // other denoiser offered judges each frame on its own, so none of them can see
+            // inter-frame flicker - atadenoise holds the light rung precisely because it is the
+            // only cheap thing that touches the time axis at all. The TEMPORAL model takes the
+            // previous denoised frame plus a per-pixel motion field, produced inside the filter
+            // by NVOFA, this GPU's fixed-function optical flow engine, and reprojects through it.
+            //
+            // MEASURED, and the result is not the flattering one: on a GRAINY source the temporal
+            // model cut flicker 60% where the spatial one cut 66%, because the same noise being
+            // removed also corrupts the flow estimate it depends on. On a CLEAN source the flow is
+            // clearly worth having - statTD 0.342 with it against 0.397 with a zero field - which
+            // is what proves the reprojection is wired up correctly rather than inert; but on a
+            // clean source no denoiser has anything to do. So this level is offered, named and
+            // honestly costed. It is not promoted and it is not a rung.
+            ["optix"] = "format=gbrpf32le,optix=mode=ldr,format=yuv420p",
+            ["optix-temporal"] = "format=gbrpf32le,optix=mode=temporal,format=yuv420p",
+
             // Accepted but not listed: names that pin a filter explicitly, so a caller can ask for
             // one by family, and so the pre-atadenoise meaning of "strong" stays reachable.
+            // Unlisted: the OptiX HDR model, for a caller who knows the source is linear HDR.
+            ["optix-hdr"] = "format=gbrpf32le,optix=mode=hdr,format=yuv420p",
+
             ["atadenoise"] = "atadenoise",
             ["nlmeans"] = "nlmeans_vulkan",
             ["nlmeans-strong"] = "nlmeans_vulkan=s=2.0",
@@ -240,7 +269,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// The denoise levels worth offering a viewer, cheapest first. The alias names above are
         /// accepted by the API but not listed, for the same reason the cas-* names are not.
         /// </summary>
-        private static readonly string[] _denoiseMenu = { "off", "light", "strong", "max", "oidn" };
+        private static readonly string[] _denoiseMenu = { "off", "light", "strong", "max", "oidn", "optix", "optix-temporal" };
 
         /// <summary>The names offered as real levels, in ladder order. Aliases are accepted but not listed.</summary>
         public static IEnumerable<string> SrLevels => _srFiles.Keys;

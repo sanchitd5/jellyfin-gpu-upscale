@@ -12,6 +12,11 @@ FFmpeg 7.x/8.x tree.
 
 ## The shape: a second binary, never the default one
 
+> That binary now carries a second filter as well, `optix` (the NVIDIA OptiX AI denoiser, spatial
+> and temporal) - see `OPTIX.md`. One extra build on the server, two filters. Everything below
+> about routing, degradation and what an upgrade can break applies to both; the shim's
+> `PATCHED_FILTERS` tuple is the single list of names that reach it.
+
 The stock `jellyfin-ffmpeg` is **not** modified, replaced or patched. A separate build living at
 `/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg` carries the filter, and the ffmpeg shim
 (`/usr/local/bin/jellyfin-ffmpeg-upscale`, which is already the binary Jellyfin is pointed at with

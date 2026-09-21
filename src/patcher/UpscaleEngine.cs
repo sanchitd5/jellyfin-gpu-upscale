@@ -324,9 +324,27 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     continue;
                 }
 
-                return node.StartsWith("oidn", StringComparison.OrdinalIgnoreCase)
-                    ? node + ", Intel Open Image Denoise"
-                    : node;
+                if (node.StartsWith("oidn", StringComparison.OrdinalIgnoreCase))
+                {
+                    return node + ", Intel Open Image Denoise";
+                }
+
+                // OptiX has two models behind one filter name and they are not interchangeable -
+                // the temporal one is the whole point of the level - so the report has to say
+                // WHICH one ran, not just that OptiX did.
+                if (node.StartsWith("optix", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (node.IndexOf("mode=temporal", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return node + ", NVIDIA OptiX AI denoiser, temporal model with NVOFA motion vectors";
+                    }
+
+                    return node + ", NVIDIA OptiX AI denoiser, "
+                        + (node.IndexOf("mode=hdr", StringComparison.OrdinalIgnoreCase) >= 0 ? "HDR" : "LDR")
+                        + " spatial model";
+                }
+
+                return node;
             }
 
             return filter;

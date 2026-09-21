@@ -90,7 +90,13 @@
                 // this level ever reaches. Offered here and nowhere else: it is not a ladder rung,
                 // because it is the most expensive level on offer and measures as a no-op on this
                 // library's normal bitrates. It earns its place only on grainy high-bitrate video.
-                { id: 'oidn', name: 'OIDN (Intel, grainy sources only - slow)' }
+                { id: 'oidn', name: 'OIDN (Intel, grainy sources only - slow)' },
+                // NVIDIA OptiX, out of the same patched binary. The temporal entry is the one
+                // worth offering: it is the only level here that uses motion between frames, so
+                // it is the only one that can touch flicker rather than grain. Neither is a
+                // ladder rung; both are reachable only from this Advanced row.
+                { id: 'optix', name: 'OptiX (NVIDIA, spatial - slow)' },
+                { id: 'optix-temporal', name: 'OptiX temporal (NVIDIA, anti-flicker - slowest)' }
             ]
         },
         {
@@ -187,7 +193,14 @@
     // OIDN re-measured in the deployed chain on a real source: 200 fps with denoise off against
     // 36-42 fps with it, i.e. about 5x. It is not a ladder rung - the entry is here so that a
     // Custom selection is costed honestly rather than silently treated as free.
-    var DENOISE_COST = { off: 1, light: 1.35, strong: 2.8, max: 3.1, oidn: 5.0 };
+    // OptiX measured in the same chain on the same 720p source: 120 fps with denoise off,
+    // 49.9 with optix spatial, 39.6 with optix-temporal, 35.7 with oidn, at a 1080p target.
+    // Placed on the same scale as the oidn entry that is 3.6 and 4.5. Neither is a ladder rung;
+    // the entries exist so that a Custom selection is costed honestly rather than treated as free.
+    var DENOISE_COST = {
+        off: 1, light: 1.35, strong: 2.8, max: 3.1,
+        oidn: 5.0, optix: 3.6, 'optix-temporal': 4.5
+    };
 
     var state = {
         version: 11,

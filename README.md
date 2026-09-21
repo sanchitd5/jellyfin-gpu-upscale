@@ -244,6 +244,8 @@ sharpening pass rather than stacking two sharpeners into ringing, and reports th
 | `strong` | `nlmeans_vulkan` | **spatial**, Vulkan — runs after `hwupload` |
 | `max` | `nlmeans_vulkan=s=2.0` | spatial, strongest |
 | `oidn` | Intel Open Image Denoise | neural, CUDA — **advanced only, needs a patched ffmpeg** |
+| `optix` | NVIDIA OptiX AI denoiser | neural, spatial — advanced only, patched ffmpeg |
+| `optix-temporal` | OptiX temporal model | neural, reprojected with NVOFA optical flow |
 
 The ladder climbs in cost **and changes family**, which is deliberate: a temporal filter attacks
 flicker between frames, a spatial one attacks per-frame grain, and only the spatial one removed heavy
@@ -320,6 +322,51 @@ undenoised output it measures 56–65 dB with detail energy changed by under 2%,
 picture. On genuinely grainy material it removes the grain completely while leaving hair strands,
 highlights and lash lines intact and inventing nothing — where `atadenoise` leaves that grain
 visually untouched. A high bitrate alone is not grain, so most libraries will see nothing from it.
+
+## NVIDIA OptiX (`denoise=optix`, `denoise=optix-temporal`)
+
+The counterpart to OIDN, and the only level here with a **temporal** model — it reprojects the
+previous denoised frame using motion vectors, which is what a purely spatial denoiser cannot do.
+See [OPTIX.md](OPTIX.md) for the filter source and build steps.
+
+`ffmpeg/vf_optix.c` is ours. It needs **no CUDA toolkit**: OptiX and the optical-flow engine are both
+`dlopen()`ed out of the display driver, and the filter writes no GPU kernels. Motion vectors come from
+**NVOFA**, the fixed-function optical-flow engine on Turing and later, so the flow costs neither SM
+time nor CPU time.
+
+**Measured flicker reduction** on a grainy source, against the undenoised chain:
+
+| level | flicker |
+|---|---|
+| `atadenoise` | −7% |
+| `oidn` | −61% |
+| `optix` (spatial) | **−66%** |
+| `optix-temporal` | −60% |
+
+Two results worth stating plainly. **`atadenoise` holds the cheap rung on cost, not merit** — and on a
+clean source it *adds* about 35% flicker. And **the temporal model does not beat the spatial one on
+grainy material**, because the flow is estimated from the same noisy picture the denoiser is cleaning.
+The reprojection itself is correct: on a clean moving source, real flow beats a zero field (statTD
+0.342 against 0.397). Noise defeats the flow, not the plumbing.
+
+A zero-flow temporal mode scores *best* of all on flicker (−74%) and is deliberately **not** the
+default: that is stability bought by averaging across motion, the same trap already recorded for
+`tmix`. It remains available as `flow=none` for diagnosis.
+
+Throughput on a 1280x720 source (300 frames, shared GPU): `optix` 49.9 / 49.4 / 40.9 fps and
+`optix-temporal` 39.6 / 38.1 / 33.1 fps at 1080p / 1440p / 2160p, against `oidn` at 35.7 / 34.7 / 29.7
+and no denoise at 120.5 / 107.4 / 64.5.
+
+**Licensing differs from OIDN and matters here.** OIDN is Apache-2.0; OptiX is NVIDIA proprietary. The
+filter source is ours and publishes cleanly, but **no NVIDIA headers, binaries or SDK material are
+vendored** — you must obtain the OptiX headers (NVIDIA EULA, publicly downloadable but not open
+source), the Optical Flow SDK headers (3-clause BSD) and matching `nv-codec-headers` yourself.
+OPTIX.md lists exactly what and from where.
+
+**A driver change is a new risk class.** OptiX lives *inside* the driver and negotiates an ABI at
+`optixInit()`, with a second handshake for NVOFA — so these levels can change or break with nothing
+here rebuilt, which a `jellyfin-ffmpeg` upgrade cannot do. After a driver change, re-run
+`-h filter=optix` and a short temporal encode.
 
 ## The non-2x ratio problem
 

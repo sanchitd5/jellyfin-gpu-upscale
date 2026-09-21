@@ -26,15 +26,25 @@ import time
 
 REAL_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 
-# A SECOND, PATCHED ffmpeg carrying the "oidn" video filter (Intel Open Image Denoise),
-# which does not exist in any upstream or Jellyfin ffmpeg. It is used for one thing only:
-# the sessions that explicitly asked for the OIDN denoise level. Everything else runs on
-# the stock binary above, untouched, so a broken OIDN build costs one opt-in feature
-# rather than all playback on this server.
-OIDN_FFMPEG = "/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg"
+# A SECOND, PATCHED ffmpeg carrying video filters that exist in no upstream or Jellyfin
+# ffmpeg: "oidn" (Intel Open Image Denoise) and "optix" (the NVIDIA OptiX AI denoiser,
+# spatial and temporal). ONE binary carries both, so there is still exactly one extra
+# thing on this server that can break, and it is used for one thing only: the sessions
+# that explicitly asked for one of those denoise levels. Everything else runs on the
+# stock binary above, untouched, so a broken build costs the opt-in levels and nothing
+# else. The path keeps its historical name so an existing install is not disturbed.
+PATCHED_FFMPEG = "/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg"
+OIDN_FFMPEG = PATCHED_FFMPEG          # old name, kept for anything that still refers to it
 
-# The node the plugin emits for that level, with the format conversions it needs around it.
-OIDN_NODE_RE = re.compile(r"(?:format=gbrpf32le,)?oidn(?:=[^,]*)?(?:,format=yuv420p)?")
+# The filters only that binary has.
+PATCHED_FILTERS = ("oidn", "optix")
+
+# The nodes the plugin emits for those levels, with the format conversions each needs
+# around it. Stripping the conversions too matters: leaving a lone format=gbrpf32le in
+# the chain would hand libplacebo a pixel format it has no reason to be given.
+PATCHED_NODE_RE = re.compile(
+    r"(?:format=gbrpf32le,)?(?:%s)(?:=[^,]*)?(?:,format=yuv420p)?"
+    % "|".join(PATCHED_FILTERS))
 REAL_FFPROBE = "/usr/lib/jellyfin-ffmpeg/ffprobe"
 CONFIG_PATH = "/etc/jellyfin-upscale.json"
 LOG_PATH = "/var/log/jellyfin-upscale.log"
@@ -80,41 +90,53 @@ def log(cfg, msg):
         pass
 
 
-def wants_oidn(args):
-    """True when this command asks for the oidn filter, which only the patched binary has."""
+def wants_patched(args):
+    """The patched-only filters this command asks for, if any.
+
+    Matched on whole filter names so that a node is recognised wherever it sits in the
+    chain and nothing else is ever mistaken for one.
+    """
+    found = []
     for a in args:
-        if "oidn" in a and re.search(r"(^|,|\[)oidn(=|,|\]|$)", a):
-            return True
-    return False
+        for name in PATCHED_FILTERS:
+            if name in a and re.search(r"(^|,|\[)%s(=|,|\]|$)" % name, a) and name not in found:
+                found.append(name)
+    return found
 
 
-def strip_oidn(args):
-    """Remove the oidn node from the filter string, leaving a working chain without it.
+def strip_patched(args):
+    """Remove the patched-only nodes from the filter string, leaving a working chain.
 
     Used only when the patched binary is missing or not runnable. Degrading to no denoise
-    is the right failure: the level is an opt-in extra, and the alternative is handing the
-    stock ffmpeg a filter name it does not know, which fails the whole session.
+    is the right failure: these levels are opt-in extras, and the alternative is handing
+    the stock ffmpeg a filter name it does not know, which fails the whole session.
     """
     out = list(args)
     for i, a in enumerate(out):
-        if not ("oidn" in a):
+        if not any(name in a for name in PATCHED_FILTERS):
             continue
-        chain = OIDN_NODE_RE.sub("", a)
+        chain = PATCHED_NODE_RE.sub("", a)
         chain = re.sub(r",{2,}", ",", chain).strip(",")
         out[i] = chain
     return out
 
 
+# Kept under their old names so nothing that imported them breaks.
+wants_oidn = wants_patched
+strip_oidn = strip_patched
+
+
 def pick_binary(cfg, args):
     """The ffmpeg to run for this command, and the argument list to run it with."""
-    if not wants_oidn(args):
+    wanted = wants_patched(args)
+    if not wanted:
         return REAL_FFMPEG, args
-    if os.access(OIDN_FFMPEG, os.X_OK):
-        log(cfg, "routing to the OIDN ffmpeg build for this session")
-        return OIDN_FFMPEG, args
-    log(cfg, "OIDN requested but %s is not executable; running stock without the denoise node"
-        % OIDN_FFMPEG)
-    return REAL_FFMPEG, strip_oidn(args)
+    if os.access(PATCHED_FFMPEG, os.X_OK):
+        log(cfg, "routing to the patched ffmpeg build for this session (%s)" % ", ".join(wanted))
+        return PATCHED_FFMPEG, args
+    log(cfg, "%s requested but %s is not executable; running stock without the denoise node"
+        % ("/".join(wanted), PATCHED_FFMPEG))
+    return REAL_FFMPEG, strip_patched(args)
 
 
 def passthrough(args):
