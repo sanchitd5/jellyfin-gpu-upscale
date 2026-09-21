@@ -1,14 +1,21 @@
 /*
  * GPU Upscale - jellyfin-web client hook.
  *
- * Adds one "Enhance" entry to the player's settings menu. It leads with PRESETS, because the
- * viewer's intent is "make this look better", not "choose a super-resolution network":
+ * Adds one "Enhance" entry to the player's settings menu. Choosing it opens ONE FLAT PANEL over
+ * the video - no nested sheets, no back buttons - carrying, in this order:
  *
- *     Quality     Automatic / Off / a graded ladder of up to ten stages / Custom
- *     Advanced    Upscale to, Unblur, Denoise, Detail (the four technical controls, unchanged)
- *     What the server did
+ *     Quality     Automatic / Off / Manual, and when Manual, a slider over the graded ladder
+ *                 generated for the source now playing
+ *     The axes    one row each, grouped by intent, the control type chosen from the data:
+ *                 segmented chips for a graded or short axis, a compact picker for a long one
+ *     What the    the server's own record for the session playing, refreshed while the panel is
+ *     server is   open, including the negatives: bypassed, requested but not applied, no chain
+ *     doing       built at all
  *
- * One home rather than four widgets, and the Quality menu goes back to meaning bitrate only.
+ * A NEW LEVEL IS DATA. Adding one means an entry in an options array; adding a whole axis means an
+ * entry in CONTROLS (with its probe key, its group and, if it grades, its rungs) plus one line in
+ * LIVE_ROWS. Neither needs a line of rendering code, which is the point: levels and axes have
+ * arrived in four of the last five sessions.
  *
  * THREE STATES, NOT TWO. "Automatic" means the viewer has expressed no opinion, so nothing is sent
  * and the server's own dashboard defaults decide - that is what RequireClientOptIn=false is for.
@@ -46,7 +53,7 @@
 
     var CONTROLS = [
         {
-            key: 'upscale', label: 'Upscale to', fallback: 'off',
+            key: 'upscale', label: 'Upscale to', fallback: 'off', group: 'Size',
             options: [
                 { id: 'off', name: 'Off' },
                 { id: '1080', name: '1080p' },
@@ -59,7 +66,8 @@
             // is gentlest - so low/medium/high map to 2.0/1.7/1.4 on the server. These labels read
             // in the ordinary direction on purpose: the viewer should never meet the inversion,
             // and nothing here should tempt anyone to "turn it up" by raising a number.
-            key: 'deblur', label: 'Unblur', fallback: 'off',
+            key: 'deblur', label: 'Unblur', fallback: 'off', group: 'Sharpness',
+            probeKey: 'Deblur', grade: ['off', 'low', 'medium', 'high'],
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'low', name: 'Gentle' },
@@ -80,7 +88,8 @@
             // a SPATIAL denoiser, kept because it attacks grain a temporal filter leaves alone.
             // hqdn3d was retired (no recovery at all) and tmix is deliberately absent (it ghosts
             // even on 96% still content) - both are recorded in ShaderLibrary.
-            key: 'denoise', label: 'Denoise', fallback: 'off',
+            key: 'denoise', label: 'Denoise', fallback: 'off', group: 'Noise',
+            probeKey: 'Denoise', grade: ['off', 'light', 'strong', 'max'],
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'light', name: 'Light (temporal)' },
@@ -109,7 +118,8 @@
             // 265 fps with this off: x2 24 fps (0.56x realtime), anime x4 15 fps (0.34x), general
             // x4 10 fps (0.24x). NONE of them reaches realtime for one session, so every entry
             // says so in its own name. Not a ladder rung and never chosen for anyone.
-            key: 'neural', label: 'Neural super-resolution', fallback: 'off',
+            key: 'neural', label: 'Neural super-resolution', fallback: 'off', group: 'Detail',
+            probeKey: 'Neural',
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },
@@ -121,7 +131,8 @@
             // Two different networks, not one quality ladder. The name says which family and
             // which weight, so the viewer can tell them apart rather than trusting an opaque
             // "Light / Standard / Max" that hid a family swap.
-            key: 'sr', label: 'Detail (super-resolution)', fallback: 'fsrcnnx',
+            key: 'sr', label: 'Detail (super-resolution)', fallback: 'fsrcnnx', group: 'Detail',
+            probeKey: 'Sr',
             options: [
                 { id: 'off', name: 'Off (plain scaling)' },
                 { id: 'fsrcnnx', name: 'FSRCNNX' },
@@ -152,7 +163,8 @@
             // is also the only thing here that runs below the server's super-resolution threshold,
             // where the fixed-2x networks are bypassed and the chain is plain scaling plus a
             // sharpener. "Server default" sends nothing, like Debanding.
-            key: 'refine', label: 'Refine (post-scale)', fallback: 'default',
+            key: 'refine', label: 'Refine (post-scale)', fallback: 'default', group: 'Detail',
+            probeKey: 'Refine',
             options: [
                 { id: 'default', name: 'Server default' },
                 { id: 'off', name: 'Off' },
@@ -163,7 +175,8 @@
             // CHROMA upscaling - the colour planes, which every other control here leaves to the
             // plain kernel. These sources are 4:2:0, so chroma is stored at quarter resolution.
             // Composes with any super-resolution level rather than replacing one.
-            key: 'chroma', label: 'Chroma upscaling', fallback: 'default',
+            key: 'chroma', label: 'Chroma upscaling', fallback: 'default', group: 'Detail',
+            probeKey: 'Chroma',
             options: [
                 { id: 'default', name: 'Server default' },
                 { id: 'off', name: 'Off' },
@@ -174,7 +187,7 @@
             // Debanding rides on the libplacebo instance the chain is building anyway. "Server
             // default" sends nothing and lets the dashboard decide, which is what every client
             // without this script gets.
-            key: 'deband', label: 'Debanding', fallback: 'default',
+            key: 'deband', label: 'Debanding', fallback: 'default', group: 'Picture',
             options: [
                 { id: 'default', name: 'Server default' },
                 { id: 'on', name: 'On' },
@@ -184,7 +197,8 @@
         {
             // The libplacebo scaling kernel. The list comes from the server's own whitelist, since
             // an unknown kernel name does not soften the picture - it fails the whole job.
-            key: 'kernel', label: 'Scaling kernel', fallback: 'default',
+            key: 'kernel', label: 'Scaling kernel', fallback: 'default', group: 'Picture',
+            probeKey: 'Upscalers',
             options: [{ id: 'default', name: 'Server default' }]
         }
     ];
@@ -266,7 +280,7 @@
     };
 
     var state = {
-        version: 11,
+        version: 12,
         installed: false,
         globals: [],
         chunks: 0,
@@ -556,6 +570,10 @@
      * action-sheet component is wrapped and the sheet is recognised by its SHAPE: the player
      * settings sheet is the one carrying an item with id "quality" or "aspectratio". That survives
      * module renumbering, and an unrecognised sheet is passed straight through.
+     *
+     * The sheet is the ENTRY POINT ONLY. Choosing "Enhance" opens one flat panel of this script's
+     * own making - every control on one surface, no drill-down, no back buttons - so nothing below
+     * depends on the action sheet's shape beyond that single entry.
      */
     function isPlayerSettingsSheet(items) {
         return Array.isArray(items) && items.some(function (i) {
@@ -574,7 +592,7 @@
         return bits.join(', ');
     }
 
-    /* The label on the Enhance row and on the Quality row: always what is actually in force. */
+    /* The label on the Enhance row and in the panel header: always what is actually in force. */
     function summaryText() {
         if (state.stage === 'unset') { return 'Automatic'; }
         if (state.stage === 'off') { return 'Off'; }
@@ -591,6 +609,7 @@
         if (e.sr && e.sr !== 'off' && e.upscale !== 'off') { bits.push(e.sr); }
         if (e.deblur !== 'off') { bits.push('unblur ' + e.deblur); }
         if (e.denoise !== 'off') { bits.push('denoise ' + e.denoise); }
+        if (state.prefs.neural && state.prefs.neural !== 'off') { bits.push('neural ' + state.prefs.neural); }
         if (state.prefs.refine && state.prefs.refine !== 'default' && state.prefs.refine !== 'off') {
             bits.push('refine ' + state.prefs.refine);
         }
@@ -625,16 +644,14 @@
                             name: 'Enhance', id: 'gpuupscale-enhance', asideText: summaryText()
                         }]);
 
-                        var positionTo = options.positionTo;
                         var self = this;
                         return originalShow.apply(self, arguments).then(function (chosen) {
                             if (chosen !== 'gpuupscale-enhance') {
                                 return chosen;
                             }
 
-                            return openEnhanceMenu(originalShow.bind(self), positionTo).then(
-                                function () { return Promise.reject(); },
-                                function () { return Promise.reject(); });
+                            openEnhancePanel();
+                            return Promise.reject();
                         });
                     }
                 } catch (err) {
@@ -657,12 +674,11 @@
      * and serves /GpuUpscale/Session/{id}. Probe for the newer endpoint and only offer the controls
      * the running server can actually act on, so the menu never promises something that will
      * silently do nothing.
-     */
-    /*
+     *
      * Only a SUCCESSFUL probe is cached. A failure is deliberately not remembered: the probe fails
-     * while the server is restarting, and caching that for the life of the page left the Enhance
-     * menu showing nothing but "Upscale to" until the viewer reloaded, with no way to tell why.
-     * A failed probe is retried the next time the menu is opened.
+     * while the server is restarting, and caching that for the life of the page left the panel
+     * showing nothing but "Upscale to" until the viewer reloaded, with no way to tell why.
+     * A failed probe is retried the next time the panel is opened.
      */
     function probeServer() {
         if (state.serverCaps && state.serverCaps.full) {
@@ -682,14 +698,14 @@
                 dataType: 'json'
             }).then(function (res) {
                 // The probe answer carries the levels this server can really deliver. Keep them:
-                // buildEnhanceMenu narrows the option lists to them. A server too old to send
-                // Levels leaves it null, and the menu falls back to the full lists, which is what
-                // that generation could do anyway.
+                // axisControls narrows the option lists to them. A server too old to send Levels
+                // leaves it null, and the panel falls back to the full lists, which is what that
+                // generation could do anyway.
                 state.serverCaps = { full: true, levels: (res && res.Levels) || null };
                 log('server probe: full capabilities', state.serverCaps.levels);
                 return state.serverCaps;
             }, function (err) {
-                log('server probe failed; will retry on next menu open', err);
+                log('server probe failed; will retry on next panel open', err);
                 return no;
             });
         } catch (err) {
@@ -697,165 +713,28 @@
         }
     }
 
-    function openEnhanceMenu(show, positionTo) {
-        state.menuShown++;
-        // Re-probe here rather than trusting a cached answer, so a menu opened after a server
-        // restart recovers the full control set instead of being stuck on "Upscale to". The
-        // session state is fetched alongside it, because it is the only honest source for whether
-        // the chosen SR level actually ran - see the note in buildEnhanceMenu.
-        return probeServer().then(function (caps) {
-            return fetchServerState().then(function () {
-                return buildEnhanceMenu(show, positionTo, caps || { full: false });
-            }, function () {
-                return buildEnhanceMenu(show, positionTo, caps || { full: false });
-            });
-        });
-    }
-
     /*
      * The levels the server said it can deliver, for one control, or null when it did not say.
-     * The key names are the server's: Sr, Deblur, Denoise.
+     * The key names are the server's: Sr, Deblur, Denoise. A control carries its own probe key in
+     * its data, so a NEW AXIS is one entry in CONTROLS and nothing else.
      */
-    function serverLevels(caps, key) {
-        var map = {
-            sr: 'Sr', deblur: 'Deblur', denoise: 'Denoise', kernel: 'Upscalers',
-            refine: 'Refine', chroma: 'Chroma', neural: 'Neural'
-        };
-        var list = caps && caps.levels && map[key] ? caps.levels[map[key]] : null;
+    function serverLevels(caps, control) {
+        var list = caps && caps.levels && control.probeKey ? caps.levels[control.probeKey] : null;
         return (list && list.length) ? list : null;
     }
 
     /*
-     * The server may decline to run the super-resolution network below a ratio threshold, because
-     * below it the fixed-2x networks measured no better than plain scaling while still costing
-     * GPU time. The client cannot work out that ratio for itself - it does not reliably know the
-     * source height - so it does not guess and it does not grey the control out: a wrong grey-out
-     * is worse than none. Instead the row is annotated from what the server REPORTED it did for
-     * the session actually playing, which is the same honest-reporting channel the playback-info
-     * row and "What the server did" already use.
-     */
-    function srNote() {
-        var s = state.lastServerState;
-        return (s && s.Known && s.SrBypassed) ? ' - not run at this ratio' : '';
-    }
-
-    /*
-     * THE MENU. Presets first, technical controls behind Advanced.
+     * The controls to render, narrowed to what this server and this source can really do.
      *
-     * The viewer's intent is "make this look better", so the primary choice is a graded ladder
-     * built for the source now playing, and the four technical controls - which are what the
-     * ladder is made of - stay one level down for anyone who wants them. Choosing a technical
-     * value switches the indicator to Custom rather than leaving a stage name standing beside
-     * settings that no longer match it.
+     * Everything here is driven by the CONTROLS data: which probe key holds the level list, which
+     * ids form the graded run, what the neutral fallback is. Nothing below knows the name of an
+     * axis or of a level.
      */
-    function buildEnhanceMenu(show, positionTo, caps) {
-        var items = [{ name: 'Quality', id: 'gpuupscale-stage', asideText: summaryText() }];
-        if (caps.full) {
-            items.push({ name: 'Advanced', id: 'gpuupscale-advanced', asideText: advancedText() });
-            items.push({ name: 'What the server did', id: 'gpuupscale-what' });
-        } else {
-            // An older server: only the upscale target is understood, so Advanced would offer
-            // controls it cannot honour.
-            items = [{ name: 'Upscale to', id: 'gpuupscale-advanced', asideText: advancedText() }];
-        }
-
-        return show({ items: items, positionTo: positionTo, __gpuUpscaleOwn: true }).then(function (chosen) {
-            if (chosen === 'gpuupscale-what') {
-                return describeServerState();
-            }
-
-            if (chosen === 'gpuupscale-advanced') {
-                return openAdvanced(show, positionTo, caps);
-            }
-
-            if (chosen === 'gpuupscale-stage') {
-                return openStages(show, positionTo);
-            }
-
-            return null;
-        });
-    }
-
-    /*
-     * The ladder. Every rung is a genuinely different filter chain for THIS source - a stage whose
-     * super-resolution level the server would bypass at this ratio is never generated, and a target
-     * the server would decline is never offered - so the ladder is shorter for a source that has
-     * less room above it. Ten rungs need three eligible targets, which a 540p source has and a
-     * 1080p source does not; showing six honest rungs beats padding to ten.
-     */
-    function openStages(show, positionTo) {
-        var l = ladder();
-        var rec = recommendedStage();
-        var cur = currentStage();
-        var items = [
-            {
-                id: 'unset',
-                name: 'Automatic (server default)',
-                selected: state.stage === 'unset'
-            },
-            {
-                id: 'off',
-                name: 'Off - play the file as it is, no GPU',
-                selected: state.stage === 'off'
-            }
-        ];
-
-        if (l === null) {
-            // No probe answer or no source height yet: say so instead of inventing a ladder.
-            items.push({ id: 'none', name: 'Quality stages need the source size - start playback first' });
-        } else if (!l.length) {
-            items.push({
-                id: 'none',
-                name: 'This source is already above the server\'s upscale limit - nothing to offer'
-            });
-        } else {
-            l.forEach(function (st) {
-                items.push({
-                    id: 'stage:' + st.n,
-                    name: st.n + '. ' + stageText(st)
-                        + (sameStage(st, rec) ? ' - recommended' : '')
-                        + '  (GPU ' + costHint(st.cost) + ')',
-                    selected: typeof state.stage === 'object' && sameStage(st, cur) && sameStage(st, state.stage)
-                });
-            });
-        }
-
-        if (state.stage === 'custom') {
-            items.push({ id: 'custom', name: 'Custom (see Advanced)', selected: true });
-        }
-
-        return show({ items: items, positionTo: positionTo, __gpuUpscaleOwn: true }).then(function (picked) {
-            if (picked == null || picked === 'none' || picked === 'custom') {
-                return null;
-            }
-
-            if (picked === 'unset' || picked === 'off') {
-                state.stage = picked;
-            } else {
-                var n = parseInt(String(picked).split(':')[1], 10);
-                var st = (l || []).filter(function (x) { return x.n === n; })[0];
-                if (!st) {
-                    return null;
-                }
-
-                // Stored as a recipe, not as a number: stage 7 on this item is not stage 7 on the
-                // next one, whose ladder may be a different length.
-                state.stage = { rank: st.rank, sr: st.sr, denoise: st.denoise };
-            }
-
-            savePrefs();
-            log('quality stage', picked);
-            requestRestream();
-            return null;
-        });
-    }
-
-    /* The four technical controls, narrowed to what this server and this source can really do. */
-    function advancedControls(caps) {
+    function axisControls(caps) {
         var targets = eligibleTargets();
         return (caps.full ? CONTROLS : CONTROLS.filter(function (c) { return c.key === 'upscale'; }))
             .map(function (c) {
-                var allowed = serverLevels(caps, c.key);
+                var allowed = serverLevels(caps, c);
                 var options = allowed
                     // "default" is this script's own id, not a server level: it means "send no
                     // marker and let the dashboard decide". It is never in the server's list, so it
@@ -878,7 +757,7 @@
                 if (c.key === 'upscale' && targets !== null) {
                     // ONLY TARGETS ABOVE THE SOURCE. A target at or below the source height is a
                     // downscale or a no-op, and one within MinScaleFactor of it is refused by the
-                    // server outright, so neither belongs in the menu. Off always stays.
+                    // server outright, so neither belongs in the panel. Off always stays.
                     var ids = targets.map(function (t) { return t.id; });
                     options = options.filter(function (o) {
                         return o.id === 'off' || ids.indexOf(o.id) >= 0;
@@ -894,85 +773,69 @@
                     });
                 }
 
-                return { key: c.key, label: c.label, fallback: c.fallback, options: options };
+                return {
+                    key: c.key, label: c.label, fallback: c.fallback, group: c.group || 'Detail',
+                    grade: c.grade || null, options: options
+                };
             });
     }
 
-    function openAdvanced(show, positionTo, caps) {
-        var controls = advancedControls(caps);
-
-        // Seed the controls from whatever is in force, so opening Advanced on a stage shows that
-        // stage's values rather than a stale set.
-        var live = effective();
-        if (live) {
-            Object.keys(state.prefs).forEach(function (k) {
-                if (live[k] != null) { state.prefs[k] = live[k]; }
-                if (k === 'upscale' && live.upscale == null) { state.prefs.upscale = 'off'; }
-            });
-        }
-
-        // A level that has gone away (an uninstalled shader, an old localStorage value, or a
-        // target this source is too tall for) must not leave a control showing something the
-        // server would refuse.
-        controls.forEach(function (c) {
-            var current = state.prefs[c.key];
-            if (current && !c.options.some(function (o) { return o.id === current; })) {
-                log('dropping unavailable preference', c.key, current);
-                state.prefs[c.key] = c.fallback;
-                savePrefs();
+    /*
+     * A note under one row, when the server has something to say about it that the option name
+     * cannot. Data, not a special case per axis: each entry names the control it annotates and a
+     * test over the live session record.
+     */
+    var CONTROL_NOTES = [
+        {
+            key: 'sr',
+            text: function () {
+                var s = state.lastServerState;
+                return (s && s.Known && s.SrBypassed && state.prefs.sr !== 'off')
+                    ? 'The server bypassed this at the current ratio: plain scaling plus the sharpener ran instead.'
+                    : '';
             }
-        });
-
-        var items = controls.map(function (c) {
-            var current = state.prefs[c.key] || c.fallback;
-            var opt = c.options.filter(function (o) { return o.id === current; })[0];
-            var aside = opt ? opt.name : current;
-            if (c.key === 'sr' && current !== 'off') { aside += srNote(); }
-            // Do not let anyone stack two sharpeners: NVScaler sharpens inside its own pass and
-            // the server drops the separate one, so say that here rather than in a support thread.
-            if (c.key === 'deblur' && state.prefs.sr === 'nvscaler') {
-                aside = 'not used - NVScaler sharpens internally';
-            }
-            if (c.key === 'upscale' && eligibleTargets() && !eligibleTargets().length) {
-                aside = 'not available for this source';
-            }
-
-            return { name: c.label, id: c.key, asideText: aside };
-        });
-
-        return show({ items: items, positionTo: positionTo, __gpuUpscaleOwn: true }).then(function (chosen) {
-            var control = controls.filter(function (c) { return c.key === chosen; })[0];
-            if (!control) {
-                return null;
-            }
-
-            var current = state.prefs[control.key] || control.fallback;
-            var opts = control.options.map(function (o) {
-                return { id: o.id, name: o.name, selected: o.id === current };
-            });
-            return show({ items: opts, positionTo: positionTo, __gpuUpscaleOwn: true }).then(function (picked) {
-                if (picked == null) {
-                    return null;
+        },
+        {
+            key: 'deblur',
+            text: function () {
+                var s = state.lastServerState;
+                if (s && s.Known && s.SrOwnsSharpening) {
+                    return 'Not used: the chosen upscaler sharpens inside its own pass.';
                 }
 
-                state.prefs[control.key] = String(picked);
-                // A technical value now owns the settings, so the indicator says Custom instead of
-                // naming a stage these values no longer match.
-                state.stage = 'custom';
-                savePrefs();
-                log('advanced', control.key, picked);
-                // The choice applies to the next stream negotiation; nudge the player to re-fetch.
-                requestRestream();
-                return null;
-            });
+                return '';
+            }
+        },
+        {
+            key: 'upscale',
+            text: function () {
+                var t = eligibleTargets();
+                return (t && !t.length)
+                    ? 'This source is at or above the server\'s upscale limit, so no target is offered.'
+                    : '';
+            }
+        }
+    ];
+
+    function controlNote(key) {
+        var out = '';
+        CONTROL_NOTES.forEach(function (n) {
+            if (n.key !== key) {
+                return;
+            }
+
+            try {
+                var t = n.text();
+                if (t) { out = out ? out + ' ' + t : t; }
+            } catch (e) { /* a note is never worth breaking the panel for */ }
         });
+        return out;
     }
 
     /*
      * Making the choice take effect means getting a fresh PlaybackInfo. jellyfin-web re-requests it
      * when the max streaming bitrate changes, so the smallest honest nudge is to re-apply the value
-     * it already has. If the hook is not reachable the viewer can simply restart playback, which is
-     * also what the menu says.
+     * it already has. If the hook is not reachable the viewer can simply restart playback.
      */
     function requestRestream() {
         try {
@@ -987,7 +850,101 @@
         }
     }
 
-    /* ------------------------------------------------- what the server actually did (honest) */
+    /* ------------------------------------------------------------------ what the server DID */
+
+    /*
+     * The live rows. One entry per axis, naming the fields of the session record it reads, so an
+     * axis added to CONTROLS is reported here by adding one line of DATA, not by writing rendering
+     * code. `applied` false against a level that is not "off" is the "requested but not applied"
+     * case, and it is always shown.
+     */
+    var LIVE_ROWS = [
+        { label: 'Upscaled', level: 'Upscaler', applied: 'UpscaleApplied' },
+        { label: 'Detail (SR)', level: 'SrLevel', requested: 'SrRequested' },
+        { label: 'Unblur', level: 'DeblurLevel', applied: 'DeblurApplied' },
+        { label: 'Denoise', level: 'DenoiseLevel', applied: 'DenoiseApplied' },
+        { label: 'Neural SR', level: 'NeuralLevel' },
+        { label: 'Refine', level: 'RefineLevel', applied: 'RefineApplied' },
+        { label: 'Chroma', level: 'ChromaLevel', applied: 'ChromaApplied' },
+        { label: 'Debanding', applied: 'DebandApplied' },
+        { label: 'Encoder', level: 'Encoder', note: 'EncoderReason' }
+    ];
+
+    function isOff(v) {
+        return v == null || v === '' || v === 'off' || v === false;
+    }
+
+    /*
+     * The lines of the live block, as [label, value] pairs. NEGATIVES ARE NEVER DROPPED: a level
+     * that was asked for and did not run is reported in the same list as one that did, and a
+     * session the server knows nothing about says exactly that rather than showing the viewer's
+     * own request back to them.
+     */
+    function liveLines() {
+        var s = state.lastServerState;
+        if (!s) {
+            return [['Status', state.playSessionId
+                ? 'Waiting for the server to answer for this session.'
+                : 'No stream yet. Start playback to see what the server does.']];
+        }
+
+        if (s.PatchActive === false) {
+            return [['Status', 'Enhancement is unavailable: the server-side patches are not active.']];
+        }
+
+        if (!s.Known) {
+            // The server writes a record only when it builds a filter chain. No record means no
+            // chain: direct play, a stream copy, or a session it never saw.
+            return [
+                ['Status', s.Status || 'unknown'],
+                ['What ran', (s.Summary || 'No enhancement')
+                    + ' - no filter chain was built for this session, so this is a direct play, a'
+                    + ' stream copy, or a stream the server has not started yet.']
+            ];
+        }
+
+        var lines = [['What ran', s.Summary || 'No enhancement']];
+        if (s.Status) {
+            lines.push(['Status', s.Status]);
+        }
+
+        LIVE_ROWS.forEach(function (r) {
+            var val = r.level ? s[r.level] : null;
+            if (!r.level && r.applied) {
+                val = s[r.applied] ? 'on' : 'off';
+            }
+
+            var applied = r.applied ? s[r.applied] : null;
+            var requested = r.requested ? s[r.requested] : null;
+            var text = null;
+
+            if (applied === false && !isOff(val)) {
+                text = String(val) + ' - requested, not applied';
+            } else if (requested != null && !isOff(requested) && requested !== val) {
+                text = 'requested ' + requested + ', ran ' + (isOff(val) ? 'nothing' : val);
+            } else if (!isOff(val)) {
+                text = String(val);
+            }
+
+            if (r.label === 'Detail (SR)' && s.SrBypassed) {
+                text = (text || 'off') + ' - bypassed at this ratio, plain scaling plus sharpener';
+            }
+
+            if (text && r.note && s[r.note]) {
+                text += ' (' + s[r.note] + ')';
+            }
+
+            if (text) {
+                lines.push([r.label, text]);
+            }
+        });
+
+        if (s.SrOwnsSharpening) {
+            lines.push(['Note', 'The upscaler sharpens internally, so the separate unblur pass was dropped.']);
+        }
+
+        return lines;
+    }
 
     function fetchServerState() {
         if (!state.playSessionId) {
@@ -1013,19 +970,389 @@
         }
     }
 
-    function describeServerState() {
-        return fetchServerState().then(function (s) {
-            var text = s && s.Summary ? s.Summary : 'Not known for this session';
-            try {
-                if (window.Dashboard && window.Dashboard.alert) {
-                    window.Dashboard.alert({ title: 'Enhance', message: text });
-                } else {
-                    window.alert(text);
-                }
-            } catch (e) { /* ignore */ }
+    /* ------------------------------------------------------------------------- the flat panel */
 
-            return null;
+    /*
+     * ONE SURFACE. Quality first, then every axis, then what the server actually did - all of it
+     * visible at once, over the video, with no nested sheets. The controls are chosen from the
+     * DATA, not written per axis:
+     *
+     *   a control with a `grade` run   -> segmented chips over the graded rungs, plus a compact
+     *                                     picker holding the specialist levels that are not rungs
+     *   four options or fewer          -> segmented chips
+     *   more than four                 -> a compact picker
+     *
+     * So a new level is a new entry in an options array, and a new axis is a new entry in CONTROLS
+     * plus one line in LIVE_ROWS. Neither needs a line of rendering code.
+     */
+    var PANEL_ID = 'gpuUpscalePanel';
+    var STYLE_ID = 'gpuUpscalePanelStyle';
+    var CSS = [
+        '#' + PANEL_ID + '{position:fixed;right:1.2em;bottom:5.5em;z-index:99999;width:24em;',
+        'max-width:calc(100vw - 2.4em);max-height:72vh;overflow-y:auto;background:rgba(16,16,18,.94);',
+        'color:#eee;border:1px solid rgba(255,255,255,.14);border-radius:.6em;padding:.7em .85em 1em;',
+        'box-shadow:0 .6em 2em rgba(0,0,0,.6);font-size:.85em;line-height:1.35;', '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);}',
+        '#' + PANEL_ID + ' h3{margin:.9em 0 .3em;font-size:.95em;font-weight:600;letter-spacing:.04em;',
+        'text-transform:uppercase;color:#9ad;opacity:.85;}',
+        '.gpuup-head{display:flex;align-items:baseline;gap:.5em;}',
+        '.gpuup-title{font-size:1.15em;font-weight:600;flex:0 0 auto;}',
+        '.gpuup-sum{flex:1 1 auto;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+        '.gpuup-x{flex:0 0 auto;background:none;border:0;color:inherit;font-size:1.2em;cursor:pointer;opacity:.7;}',
+        '.gpuup-row{margin:.35em 0;}',
+        '.gpuup-label{opacity:.8;margin-bottom:.1em;}',
+        '.gpuup-chips{display:flex;flex-wrap:wrap;align-items:center;gap:.25em;}',
+        '.gpuup-chip{background:transparent;color:inherit;border:1px solid rgba(255,255,255,.22);',
+        'border-radius:1em;padding:.12em .65em;cursor:pointer;font-size:.95em;font-family:inherit;}',
+        '.gpuup-chip.on{background:#00a4dc;border-color:#00a4dc;color:#fff;}',
+        '.gpuup-sel{background:rgba(255,255,255,.08);color:inherit;border:1px solid rgba(255,255,255,.22);',
+        'border-radius:.3em;padding:.12em .3em;font-size:.95em;font-family:inherit;max-width:100%;}',
+        '.gpuup-slider{width:100%;margin:.3em 0 .1em;}',
+        '.gpuup-note{opacity:.6;font-size:.9em;margin-top:.1em;}',
+        '.gpuup-live div{display:flex;gap:.5em;margin:.15em 0;}',
+        '.gpuup-live b{flex:0 0 7.5em;font-weight:400;opacity:.65;}',
+        '.gpuup-live span{flex:1 1 auto;}'
+    ].join('');
+
+    function el(tag, cls, text) {
+        var n = document.createElement(tag);
+        if (cls) { n.className = cls; }
+        if (text != null) { n.textContent = text; }
+        return n;
+    }
+
+    function shortName(name) {
+        // Chips carry the short form; the full name stays on the title attribute.
+        return String(name).split(' (')[0];
+    }
+
+    function ensureStyle() {
+        if (document.getElementById(STYLE_ID)) {
+            return;
+        }
+
+        var s = el('style');
+        s.id = STYLE_ID;
+        s.textContent = CSS;
+        (document.head || document.documentElement).appendChild(s);
+    }
+
+    /* One axis row: chips, a picker, or both. onPick receives the chosen level id. */
+    function controlRow(c, onPick) {
+        var cur = state.prefs[c.key] || c.fallback;
+        var ids = c.options.map(function (o) { return o.id; });
+        var grade = (c.grade || []).filter(function (id) { return ids.indexOf(id) >= 0; });
+        var chipIds = grade.length >= 2 ? grade : (c.options.length <= 4 ? ids : []);
+        var rest = c.options.filter(function (o) { return chipIds.indexOf(o.id) < 0; });
+
+        var row = el('div', 'gpuup-row');
+        row.appendChild(el('div', 'gpuup-label', c.label));
+        var box = el('div', 'gpuup-chips');
+        row.appendChild(box);
+
+        chipIds.forEach(function (id) {
+            var o = c.options.filter(function (x) { return x.id === id; })[0];
+            var b = el('button', 'gpuup-chip' + (id === cur ? ' on' : ''), shortName(o.name));
+            b.title = o.name;
+            b.onclick = function () { onPick(id); };
+            box.appendChild(b);
         });
+
+        if (rest.length) {
+            var sel = el('select', 'gpuup-sel');
+            if (chipIds.length) {
+                // A placeholder so the picker never looks like it owns a value the chips hold.
+                var ph = el('option', null, rest.length === 1 ? 'more...' : 'more levels...');
+                ph.value = '';
+                sel.appendChild(ph);
+            }
+
+            rest.forEach(function (o) {
+                var opt = el('option', null, o.name);
+                opt.value = o.id;
+                if (o.id === cur) { opt.selected = true; }
+                sel.appendChild(opt);
+            });
+            sel.onchange = function () {
+                if (sel.value) { onPick(sel.value); }
+            };
+            box.appendChild(sel);
+        }
+
+        var note = controlNote(c.key);
+        if (note) {
+            row.appendChild(el('div', 'gpuup-note', note));
+        }
+
+        return row;
+    }
+
+    /*
+     * The quality stage, as a slider over the ladder that is already generated for this source.
+     * The ladder itself is untouched: same stages, same order, same cost sort - only the way it is
+     * presented changed, from a list of sheet rows to one control.
+     */
+    function qualitySection(rerender) {
+        var wrap = el('div');
+        wrap.appendChild(el('h3', null, 'Quality'));
+
+        var modes = [
+            { id: 'unset', name: 'Automatic', title: 'Send nothing: the server\'s own defaults decide.' },
+            { id: 'off', name: 'Off', title: 'Play the file as it is. Direct play is left alone and no GPU is used.' },
+            { id: 'manual', name: 'Manual', title: 'Choose a stage on the ladder, or set the axes below.' }
+        ];
+        var manual = state.stage !== 'unset' && state.stage !== 'off';
+        var box = el('div', 'gpuup-chips');
+        modes.forEach(function (m) {
+            var on = m.id === 'manual' ? manual : state.stage === m.id;
+            var b = el('button', 'gpuup-chip' + (on ? ' on' : ''), m.name);
+            b.title = m.title;
+            b.onclick = function () {
+                if (m.id === 'manual') {
+                    if (!manual) {
+                        var rec = recommendedStage();
+                        state.stage = rec ? { rank: rec.rank, sr: rec.sr, denoise: rec.denoise } : 'custom';
+                    }
+                } else {
+                    state.stage = m.id;
+                }
+
+                savePrefs();
+                requestRestream();
+                rerender();
+            };
+            box.appendChild(b);
+        });
+        wrap.appendChild(box);
+
+        if (!manual) {
+            wrap.appendChild(el('div', 'gpuup-note', state.stage === 'off'
+                ? 'The file plays as it is. The server is told this is Off, not silence, so its own defaults stay out of it.'
+                : 'Nothing is sent. The server\'s dashboard defaults apply, exactly as for a player without this script.'));
+            return wrap;
+        }
+
+        var l = ladder();
+        if (l === null) {
+            // Two different reasons, and they are not the same problem: say which one it is.
+            wrap.appendChild(el('div', 'gpuup-note', serverConfig()
+                ? 'Quality stages need the source size. Start playback, then open this again.'
+                : 'The server has not reported its own limits yet, so the stages cannot be built'
+                  + ' honestly. Open this again in a moment. The axes below still work.'));
+            return wrap;
+        }
+
+        if (!l.length) {
+            wrap.appendChild(el('div', 'gpuup-note',
+                'This source is already above the server\'s upscale limit, so there is nothing to offer.'));
+            return wrap;
+        }
+
+        var cur = currentStage();
+        var rec = recommendedStage();
+        var slider = el('input', 'gpuup-slider');
+        slider.type = 'range';
+        slider.min = 1;
+        slider.max = l.length;
+        slider.step = 1;
+        slider.value = cur ? cur.n : (rec ? rec.n : 1);
+        var caption = el('div', 'gpuup-note');
+
+        function describe(n) {
+            var st = l.filter(function (x) { return x.n === n; })[0];
+            if (!st) {
+                return '';
+            }
+
+            return st.n + ' of ' + l.length + '. ' + stageText(st)
+                + '  (GPU ' + costHint(st.cost) + ')'
+                + (sameStage(st, rec) ? '  recommended' : '');
+        }
+
+        caption.textContent = state.stage === 'custom'
+            ? 'Custom: ' + advancedText() + '. Move the slider to go back to a stage.'
+            : describe(parseInt(slider.value, 10));
+
+        slider.oninput = function () {
+            caption.textContent = describe(parseInt(slider.value, 10));
+        };
+        slider.onchange = function () {
+            var st = l.filter(function (x) { return x.n === parseInt(slider.value, 10); })[0];
+            if (!st) {
+                return;
+            }
+
+            // Stored as a RECIPE, not as a number: stage 7 on this item is not stage 7 on the next
+            // one, whose ladder may be a different length.
+            state.stage = { rank: st.rank, sr: st.sr, denoise: st.denoise };
+            savePrefs();
+            log('quality stage', st.n);
+            requestRestream();
+            rerender();
+        };
+
+        wrap.appendChild(slider);
+        wrap.appendChild(caption);
+        return wrap;
+    }
+
+    function liveSection() {
+        var wrap = el('div');
+        wrap.appendChild(el('h3', null, 'What the server is doing'));
+        var box = el('div', 'gpuup-live');
+        liveLines().forEach(function (pair) {
+            var d = el('div');
+            d.appendChild(el('b', null, pair[0]));
+            d.appendChild(el('span', null, pair[1]));
+            box.appendChild(d);
+        });
+        wrap.appendChild(box);
+        return wrap;
+    }
+
+    function renderPanel(panel, caps) {
+        var body = el('div');
+
+        var head = el('div', 'gpuup-head');
+        head.appendChild(el('div', 'gpuup-title', 'Enhance'));
+        head.appendChild(el('div', 'gpuup-sum', summaryText()));
+        var x = el('button', 'gpuup-x', '×');
+        x.title = 'Close';
+        x.onclick = closePanel;
+        head.appendChild(x);
+        body.appendChild(head);
+
+        function rerender() {
+            renderPanel(panel, caps);
+        }
+
+        body.appendChild(qualitySection(rerender));
+
+        var controls = axisControls(caps);
+
+        // Seed the controls from whatever is in force, so a panel opened on a stage shows that
+        // stage's values rather than a stale set.
+        var live = effective();
+        if (live) {
+            Object.keys(state.prefs).forEach(function (k) {
+                if (live[k] != null) { state.prefs[k] = live[k]; }
+                if (k === 'upscale' && live.upscale == null) { state.prefs.upscale = 'off'; }
+            });
+        }
+
+        // A level that has gone away (an uninstalled shader, an old localStorage value, or a
+        // target this source is too tall for) must not leave a control showing something the
+        // server would refuse.
+        controls.forEach(function (c) {
+            var current = state.prefs[c.key];
+            if (current && !c.options.some(function (o) { return o.id === current; })) {
+                log('dropping unavailable preference', c.key, current);
+                state.prefs[c.key] = c.fallback;
+                savePrefs();
+            }
+        });
+
+        // Grouped by intent, in the order the groups first appear in CONTROLS: another thing a new
+        // axis gets for free by naming a group in its own data.
+        var groups = [];
+        controls.forEach(function (c) {
+            if (groups.indexOf(c.group) < 0) { groups.push(c.group); }
+        });
+
+        groups.forEach(function (g) {
+            body.appendChild(el('h3', null, g));
+            controls.filter(function (c) { return c.group === g; }).forEach(function (c) {
+                body.appendChild(controlRow(c, function (id) {
+                    state.prefs[c.key] = String(id);
+                    // A technical value now owns the settings, so the header says Custom instead of
+                    // naming a stage these values no longer match.
+                    state.stage = 'custom';
+                    savePrefs();
+                    log('axis', c.key, id);
+                    requestRestream();
+                    rerender();
+                }));
+            });
+        });
+
+        if (!caps.full) {
+            body.appendChild(el('div', 'gpuup-note',
+                'This server understands the upscale target only, so the other axes are not offered.'));
+        }
+
+        body.appendChild(liveSection());
+
+        panel.innerHTML = '';
+        panel.appendChild(body);
+    }
+
+    function closePanel() {
+        try {
+            if (state.liveTimer) {
+                clearInterval(state.liveTimer);
+                state.liveTimer = null;
+            }
+
+            var p = document.getElementById(PANEL_ID);
+            if (p && p.parentNode) {
+                p.parentNode.removeChild(p);
+            }
+
+            if (state.panelKeyHandler) {
+                document.removeEventListener('keydown', state.panelKeyHandler, true);
+                state.panelKeyHandler = null;
+            }
+        } catch (err) {
+            log('close failed', err);
+        }
+    }
+
+    /*
+     * Opening re-probes rather than trusting a cached answer, so a panel opened after a server
+     * restart recovers the full control set instead of being stuck on the upscale target. The
+     * session record is fetched alongside it, because it is the only honest source for what
+     * actually ran, and it keeps being fetched while the panel is open so the live block follows
+     * playback instead of freezing at the moment it was opened.
+     */
+    function openEnhancePanel() {
+        state.menuShown++;
+        return probeServer().then(function (caps) {
+            return fetchServerState().then(function () { return caps; },
+                function () { return caps; });
+        }).then(function (caps) {
+            try {
+                caps = caps || { full: false };
+                closePanel();
+                ensureStyle();
+                var panel = el('div');
+                panel.id = PANEL_ID;
+                panel.setAttribute('role', 'dialog');
+                panel.setAttribute('aria-label', 'Enhance');
+                (document.body || document.documentElement).appendChild(panel);
+                renderPanel(panel, caps);
+
+                state.panelKeyHandler = function (ev) {
+                    if (ev.key === 'Escape' || ev.keyCode === 27) {
+                        closePanel();
+                    }
+                };
+                document.addEventListener('keydown', state.panelKeyHandler, true);
+
+                state.liveTimer = setInterval(function () {
+                    try {
+                        fetchServerState().then(function () {
+                            var p = document.getElementById(PANEL_ID);
+                            if (p) { renderPanel(p, caps); }
+                        }, function () { /* keep the last answer */ });
+                    } catch (e) { /* ignore */ }
+                }, 3000);
+                return null;
+            } catch (err) {
+                // The panel is never allowed to take playback or the stock menus with it.
+                log('panel failed to open', err);
+                closePanel();
+                return null;
+            }
+        }, function () { return null; });
     }
 
     /*

@@ -80,36 +80,48 @@ sudo systemctl restart jellyfin
 
 ## The player menu
 
-The Enhance menu has three parts: **Quality** (Automatic / Off / a graded ladder / Custom),
-**Advanced**, and **What the server did**.
+One flat panel, opened from the settings sheet's **Enhance** entry. No nested sheets, no drill-down —
+every control is visible at once, over the video, closed with Esc or ×.
 
-The ladder is **generated per source**, not fixed, because the right ordering depends on the scale
-ratio. Stages are built by adding sharpening, then super-resolution *only where the server would
-actually run it*, then denoise, then stronger denoise at the top target — and are sorted by a cost
-index derived from measured throughput, so cost is monotonic by construction. Each carries a GPU
-cost hint. A stage is stored as a recipe (target rank, SR level, denoise), never as a bare number, so
-it survives a change of source.
+```
+Enhance                    <what is in force>              x
+QUALITY     [Automatic] [Off] [Manual]  + slider over the ladder
+SIZE        Upscale to
+SHARPNESS   Unblur
+NOISE       Denoise
+DETAIL      Neural SR | Detail (SR) | Refine | Chroma
+PICTURE     Debanding | Scaling kernel
+WHAT THE SERVER IS DOING   live, re-read every 3 s while open
+```
 
-What that produces in practice:
+**Control type is chosen from the data, not written per axis.** An axis with a graded run renders as
+segmented chips over the sensible rungs plus a compact picker for the specialist levels (Unblur shows
+Off/Gentle/Medium/Strong, with NVSharpen behind the picker). Four options or fewer render as chips;
+more than four as a picker. The quality stage is a slider over the generated ladder.
+
+That matters for maintenance: **adding a level is data, not UI code** — one entry in an options array.
+A new axis is one entry in `CONTROLS` plus one line in `LIVE_ROWS`. Four of the last five changes to
+this project added a level or an axis.
+
+The ladder itself is unchanged: still generated per source, still sorted by measured cost, still
+stored as a recipe rather than a number.
 
 | Source | Rungs | Recommended |
 |---|---|---|
 | 960x540 | 10 | 1080p, FSRCNNX + sharpen |
 | 1280x720 | 9 | 1080p, sharpen only (1.5x — the network is bypassed, so there is no fake rung) |
-| 720x960 (portrait) | 6 | — |
 | 1920x1080 | 6 | — |
-| 2160p | 0 | "already above the server's upscale limit — nothing to offer" |
+| 2160p | 0 | panel says the source is above the server's upscale limit |
 
-Ten rungs need three eligible targets; a 1080p source has two, so it honestly gets six rather than a
-padded ten. Nothing that measured worse than the default appears in the ladder — no `fsrcnnx-heavy`,
-no Anime4K, no sharpening above `low`, no NVScaler. All of those remain available in **Advanced**,
-which exposes upscale target (filtered to what is above the source), unblur, denoise, detail level,
-debanding, and the libplacebo scaling kernel (whitelisted — an unknown kernel is ignored rather than
-tried, because it would fail the whole job). Choosing anything there flips the indicator to Custom.
+Targets are filtered with the server's own thresholds from the probe (`MinScaleFactor`,
+`SrMinScaleFactor`, `MaxSourceHeight`, `MaxTargetHeight`) — never values hardcoded in JavaScript. A
+level whose shader or model is not installed is not offered, and a stale saved level resets to a valid
+one rather than surfacing a raw id.
 
-Targets are filtered using the server's own numbers from the probe, not values hardcoded in
-JavaScript. A target between `MinScaleFactor` and `SrMinScaleFactor` is still offered, labelled
-"(plain scaling at this ratio)", because the scale plus sharpener runs and measured well there.
+**Live server state sits in the same panel**, including the negatives: a bypassed SR level reads
+"requested fsrcnnx, ran nothing - bypassed at this ratio, plain scaling plus sharpener"; a requested
+level that did not run reads "requested, not applied"; a session with no filter chain says so and
+names direct play or stream copy as the reason. The server's own `EncoderReason` is shown verbatim.
 
 ## Off means direct play
 
