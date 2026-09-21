@@ -271,6 +271,46 @@ the filter probes with a 32x32 frame at config time; ORT's default thread pool p
 explicitly; and `convert_float_to_float16` leaves `graph.value_info` pinning the graph to one
 resolution, which fails on the second frame size unless cleared.
 
+## Game temporal upscalers (`game=`)
+
+FSR2, DLSS Super Resolution and DLAA, running on synthesised inputs. **They are shipped degraded and
+labelled as such**, because recorded video cannot supply what they were designed for. See
+[FSR2.md](FSR2.md) and [DLSS.md](DLSS.md).
+
+| Level | Cost index | fps (960x540 -> 1080p) |
+|---|---|---|
+| `dlaa` | 11 | 7.8 |
+| `dlss` | 22 | 4.0 |
+| `fsr2` | 36 | 2.7 |
+
+Against 87.9 fps with the axis off — **the most expensive levels in the project, slower than every
+neural model**. Most of that is a single-threaded complex 2D FFT per frame for the jitter estimate;
+`jitter=zero` skips it entirely.
+
+**What is synthesised, and why it is degraded.** These algorithms want per-frame camera jitter, true
+screen-space motion vectors and a depth buffer. Video has none of them. Motion vectors come from NVOFA
+optical flow, depth from a monocular model (Depth Anything V2 small), and jitter from measured global
+phase correlation — but the measurements say only 39.8% of textured blocks move within 0.25 px of the
+frame's global estimate, against FSR2's entire ±0.5 px budget. With a near-null jitter sequence the
+internal locks never sweep the display grid, so what remains is closer to temporal denoising plus a
+fixed Lanczos upscale. Expect ghosting.
+
+Options, all API-side today: `jitter=` measured (default) | cancel | zero | halton, `depth=` model
+(default) | model-stable | flat, `reactive=` flow (default) | none. `depth=model` self-downgrades to
+flat when the weights or the CUDA execution provider are absent.
+
+`fsr2` and `dlss` produce the target size themselves, so the server drops the SR shader and the refine
+pass for those two and the session report reads "plain scaling". `dlaa` is 1:1 and composes with
+everything.
+
+**FSR3 and FSR4 are not shipped.** FSR3's upscaler is still DX12-only upstream, Vulkan listed "in
+development". FSR4 requires RDNA3/RDNA4 and Shader Model 6.6 — it cannot run on an NVIDIA GPU at all.
+
+*Build note worth knowing:* upstream FSR2 does not build on Linux. Its CMake calls
+`tools/sc/FidelityFX_SC.exe`, a Windows binary, to compile shader permutations, and ships none
+precompiled. [`ffmpeg/gen_perm.py`](ffmpeg/gen_perm.py) replaces it with glslangValidator plus SPIR-V
+reflection — 1008 permutations, 109 unique blobs.
+
 ## Sharpening: RCAS
 
 | Level | Shader | `SHARPNESS` |

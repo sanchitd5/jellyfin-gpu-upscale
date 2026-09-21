@@ -211,6 +211,107 @@
                     </div>
                 </div>
 
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameLevel" label="Game temporal upscaler (default)">
+                        <option value="off">Off</option>
+                        <option value="fsr2">FSR2 (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
+                        <option value="dlss">DLSS SR (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
+                        <option value="dlaa">DLAA (degraded: no true jitter, so close to a pass-through)</option>
+                    </select>
+                    <div class="fieldDescription">
+                        <strong>Read this before turning one on. These are not image upscalers.</strong>
+                        FSR2 and DLSS are temporal reconstruction algorithms for a <em>renderer</em>.
+                        Everything they gain over a plain resize comes from the renderer handing them
+                        exact screen-space motion vectors, a depth buffer, the exact sub-pixel jitter it
+                        offset the camera by each frame, and a mask saying where history must not be
+                        trusted. <strong>A recording contains none of those.</strong> Every one is
+                        synthesised here: NVOFA optical flow for the motion vectors, a monocular estimate
+                        (or a flat plane) for depth, a measured global phase-correlation offset for
+                        jitter, and forward/backward flow inconsistency for the mask.
+                    </div>
+                    <div class="fieldDescription">
+                        <strong>The jitter one cannot be fixed, and it was measured rather than assumed.</strong>
+                        FSR2's jitter is a single <em>global</em> value; this content's sub-pixel motion is
+                        <em>local</em>. The median textured block departs from the global estimate by
+                        0.29 px against FSR2's entire &plusmn;0.5 px budget, and AMD's own documentation
+                        says the sequence must never produce a null vector - which is exactly what a fixed
+                        camera produces. With a near-null sequence the algorithm's locks never sweep the
+                        display grid, and what is left is a temporal denoise plus a fixed Lanczos
+                        upsample. <strong>Expect ghosting, and do not expect super-resolution.</strong>
+                    </div>
+                    <div class="fieldDescription">
+                        <code>fsr2</code> and <code>dlss</code> produce the target size themselves, so the
+                        Detail shader and the refinement pass are dropped for those two rather than run a
+                        second upscaler against the first. <code>dlaa</code> is 1:1 and runs as a
+                        restoration pass <em>before</em> the normal scale, so it composes with everything.
+                    </div>
+                    <div class="fieldDescription">
+                        <strong>Nothing from NVIDIA is shipped with this plugin.</strong>
+                        <code>dlss</code> and <code>dlaa</code> are listed only when a DLSS runtime
+                        (<code>libnvidia-ngx-dlss.so.*</code>, NVIDIA proprietary) has been installed into
+                        <code>/usr/lib/jellyfin-ffmpeg-oidn/dlss</code> by hand - see <code>DLSS.md</code>.
+                        The monocular depth weights are not shipped either; without them depth falls back
+                        to a flat plane. FSR2 itself is MIT and is built from source - see
+                        <code>FSR2.md</code>. If the patched binary is missing the shim strips the node and
+                        the session plays unenhanced instead of failing.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameJitter" label="Game upscaler: jitter source">
+                        <option value="measured">Measured global sub-pixel offset (phase correlation)</option>
+                        <option value="cancel">Measured, and declared present in the motion vectors</option>
+                        <option value="zero">None</option>
+                        <option value="halton">Halton sequence (a renderer's, and fiction on a recording)</option>
+                    </select>
+                    <div class="fieldDescription">
+                        All four are wrong; they are wrong differently. <code>measured</code> is real but
+                        global where the motion is local. <code>halton</code> tells the algorithm sample
+                        positions that were never used.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameDepth" label="Game upscaler: depth source">
+                        <option value="model">Monocular estimate</option>
+                        <option value="model-stable">Monocular estimate, flow-warped and smoothed</option>
+                        <option value="flat">Flat plane</option>
+                    </select>
+                    <div class="fieldDescription">
+                        A monocular estimate is <em>relative</em> and renormalised every frame, and the
+                        algorithms compare depth across frames to find disocclusion, so an unstable
+                        estimate manufactures ghosting. <code>model-stable</code> warps the previous frame's
+                        depth by the flow and blends. <code>flat</code> turns every depth-driven decision
+                        into a no-op, which is at least a known failure rather than a noisy one. Falls back
+                        to <code>flat</code> when the weights are absent or ONNX Runtime has no CUDA
+                        execution provider.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameReactive" label="Game upscaler: reactive mask">
+                        <option value="flow">Forward/backward flow inconsistency</option>
+                        <option value="none">None</option>
+                    </select>
+                    <div class="fieldDescription">
+                        The reactive mask is the algorithm's own designed control for ghosting: it marks
+                        where history must not be trusted. Flow inconsistency finds occlusion and
+                        disocclusion, which is where most of the ghosting comes from. It costs one extra
+                        NVOFA pass and does not find transparency or shading change.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="GameAllowed" />
+                        <span>Allow game temporal upscalers</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn one on.
+                    </div>
+                </div>
+
                 <div class="selectContainer">
                     <select is="emby-select" id="DenoiseLevel" label="Denoise (default)">
                         <option value="off">Off</option>
@@ -433,6 +534,11 @@
                     page.querySelector('#ChromaLevel').value = config.ChromaLevel || 'off';
                     page.querySelector('#NeuralLevel').value = config.NeuralLevel || 'off';
                     page.querySelector('#NeuralAllowed').checked = config.NeuralAllowed !== false;
+                    page.querySelector('#GameLevel').value = config.GameLevel || 'off';
+                    page.querySelector('#GameJitter').value = config.GameJitter || 'measured';
+                    page.querySelector('#GameDepth').value = config.GameDepth || 'model';
+                    page.querySelector('#GameReactive').value = config.GameReactive || 'flow';
+                    page.querySelector('#GameAllowed').checked = config.GameAllowed !== false;
                     page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
                     page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
                     page.querySelector('#Deband').checked = config.Deband !== false;
@@ -469,6 +575,11 @@
                     config.ChromaLevel = page.querySelector('#ChromaLevel').value;
                     config.NeuralLevel = page.querySelector('#NeuralLevel').value;
                     config.NeuralAllowed = page.querySelector('#NeuralAllowed').checked;
+                    config.GameLevel = page.querySelector('#GameLevel').value;
+                    config.GameJitter = page.querySelector('#GameJitter').value;
+                    config.GameDepth = page.querySelector('#GameDepth').value;
+                    config.GameReactive = page.querySelector('#GameReactive').value;
+                    config.GameAllowed = page.querySelector('#GameAllowed').checked;
                     config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
                     config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
                     config.Deband = page.querySelector('#Deband').checked;

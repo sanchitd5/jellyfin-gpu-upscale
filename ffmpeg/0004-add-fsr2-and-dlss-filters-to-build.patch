@@ -1,0 +1,59 @@
+--- a/configure
++++ b/configure
+@@ -2073,6 +2073,8 @@
+     libopus
+     libnvoptix
+     libonnxruntime
++    libffxfsr2
++    libngx
+     libopenimagedenoise
+     libplacebo
+     libpulse
+@@ -4157,6 +4159,8 @@
+ oidn_filter_deps="libopenimagedenoise"
+ ort_filter_deps="libonnxruntime"
+ optix_filter_deps="libnvoptix ffnvcodec"
++fsr2_filter_deps="libffxfsr2 ffnvcodec vulkan"
++dlss_filter_deps="libngx ffnvcodec vulkan"
+ lv2_filter_deps="lv2"
+ mcdeint_filter_deps="avcodec gpl"
+ metadata_filter_deps="avformat"
+@@ -7368,6 +7372,16 @@
+ enabled libnvoptix && { check_headers optix.h && check_headers nvOpticalFlowCuda.h || \
+     die "ERROR: optix.h / nvOpticalFlowCuda.h not found (see OPTIX.md; the headers are not bundled)"; } && \
+     add_extralibs -ldl
++# FidelityFX-FSR2 Vulkan backend, built as a static library out of tree: upstream ships no
++# installable form and its CMake shader step is a Windows .exe.  See FSR2.md.
++enabled libffxfsr2 && { check_headers ffx_fsr2.h || \
++    die "ERROR: ffx_fsr2.h not found (see FSR2.md; FidelityFX-FSR2 is not bundled)"; } && \
++    add_extralibs -lffx_fsr2_vk -lvulkan -lstdc++ -ldl
++# NVIDIA NGX.  Headers, libnvsdk_ngx.a and the DLSS feature blob are NVIDIA proprietary and
++# are NOT bundled with this repository.  See DLSS.md.
++enabled libngx && { check_headers nvsdk_ngx_vk.h || \
++    die "ERROR: nvsdk_ngx_vk.h not found (see DLSS.md; the NVIDIA DLSS SDK is not bundled)"; } && \
++    add_extralibs -lnvsdk_ngx -lvulkan -lstdc++ -ldl
+ enabled libplacebo        && require_pkg_config libplacebo "libplacebo >= 5.229.0" libplacebo/vulkan.h pl_vulkan_create
+ enabled libpulse          && require_pkg_config libpulse libpulse pulse/pulseaudio.h pa_context_new
+ enabled libqrencode       && require_pkg_config libqrencode libqrencode qrencode.h QRcode_encodeString
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -421,6 +421,8 @@
+ OBJS-$(CONFIG_OIDN_FILTER)                   += vf_oidn.o
+ OBJS-$(CONFIG_ORT_FILTER)                    += vf_ort.o
+ OBJS-$(CONFIG_OPTIX_FILTER)                  += vf_optix.o
++OBJS-$(CONFIG_FSR2_FILTER)                   += vf_fsr2.o
++OBJS-$(CONFIG_DLSS_FILTER)                   += vf_dlss.o
+ OBJS-$(CONFIG_OSCILLOSCOPE_FILTER)           += vf_datascope.o
+ OBJS-$(CONFIG_OVERLAY_FILTER)                += vf_overlay.o framesync.o
+ OBJS-$(CONFIG_OVERLAY_CUDA_FILTER)           += vf_overlay_cuda.o framesync.o vf_overlay_cuda.ptx.o \
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -394,6 +394,8 @@
+ extern const FFFilter ff_vf_oidn;
+ extern const FFFilter ff_vf_optix;
+ extern const FFFilter ff_vf_ort;
++extern const FFFilter ff_vf_fsr2;
++extern const FFFilter ff_vf_dlss;
+ extern const FFFilter ff_vf_oscilloscope;
+ extern const FFFilter ff_vf_ocio;
+ extern const FFFilter ff_vf_overlay;

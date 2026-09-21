@@ -50,6 +50,22 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// SrMinScaleFactor rides along because the menu has to be able to say that a chosen SR
         /// level is inactive for a low-ratio target rather than pretending it ran.
         /// </summary>
+        /// <summary>
+        /// The degraded wording the menu must render beside each game upscaler level. It is served
+        /// rather than baked into the script so that the one place it is written is the same place
+        /// the level is defined.
+        /// </summary>
+        private static Dictionary<string, string> GameLabels()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string level in ShaderLibrary.AvailableGameLevels())
+            {
+                map[level] = ShaderLibrary.GameLabel(level);
+            }
+
+            return map;
+        }
+
         private static Dictionary<string, object> Levels()
         {
             var cfg = UpscaleEngine.Settings;
@@ -63,6 +79,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // weights are not shipped, so on a server where they were never exported this
                 // list is just "off" and the menu renders no choice rather than one that fails.
                 ["Neural"] = ShaderLibrary.AvailableNeuralLevels(),
+
+                // Game temporal upscalers: another axis of its own, and another that can be
+                // short. dlss and dlaa need an NVIDIA DLSS runtime that is not shipped with
+                // this plugin, so they are listed only where one was installed.
+                ["Game"] = ShaderLibrary.AvailableGameLevels(),
+                ["GameLabels"] = GameLabels(),
 
                 // Two axes of their own, not extra rungs of the SR list: the refinement pass
                 // hooks POSTKERNEL and the chroma pass hooks CHROMA, so each composes with
@@ -111,6 +133,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ["DenoiseApplied"] = false,
                     ["DenoiseLevel"] = "off",
                     ["NeuralLevel"] = "off",
+                    ["GameLevel"] = "off",
                     ["DebandApplied"] = false,
                     ["SrLevel"] = "off",
                     ["RefineLevel"] = "off",
@@ -133,6 +156,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["DenoiseApplied"] = record.DenoiseApplied,
                 ["DenoiseLevel"] = record.DenoiseLevel ?? "off",
                 ["NeuralLevel"] = record.NeuralLevel ?? "off",
+                ["GameLevel"] = record.GameLevel ?? "off",
+                ["GameApplied"] = record.GameApplied,
                 ["DebandApplied"] = record.DebandApplied,
                 ["SrLevel"] = record.SrLevel ?? "off",
                 ["RefineLevel"] = record.RefineLevel ?? "off",

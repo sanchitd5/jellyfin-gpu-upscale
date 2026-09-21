@@ -123,6 +123,25 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public bool NeuralAllowed { get; set; } = true;
 
         /// <summary>
+        /// Game temporal upscaler applied by default: off, fsr2, dlss, dlaa. OFF, and it stays
+        /// off: these are renderer algorithms fed inputs recorded video cannot supply. See the
+        /// block above ShaderLibrary._gameFilters.
+        /// </summary>
+        public string GameLevel { get; set; } = "off";
+
+        /// <summary>May a session ask for a game temporal upscaler at all?</summary>
+        public bool GameAllowed { get; set; } = true;
+
+        /// <summary>How jitter is supplied: measured, cancel, zero, halton.</summary>
+        public string GameJitter { get; set; } = "measured";
+
+        /// <summary>How depth is supplied: model, model-stable, flat.</summary>
+        public string GameDepth { get; set; } = "model";
+
+        /// <summary>How the reactive mask is supplied: flow, none.</summary>
+        public string GameReactive { get; set; } = "flow";
+
+        /// <summary>
         /// Post-scale refinement applied by default: off, ssimsuperres. A separate axis from
         /// SrLevel - it hooks POSTKERNEL and composes with every SR level rather than replacing
         /// one, and it is not subject to SrMinScaleFactor. Off by default: it costs a pass and

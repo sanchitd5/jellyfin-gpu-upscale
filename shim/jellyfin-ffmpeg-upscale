@@ -38,7 +38,7 @@ PATCHED_FFMPEG = "/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg"
 OIDN_FFMPEG = PATCHED_FFMPEG          # old name, kept for anything that still refers to it
 
 # The filters only that binary has.
-PATCHED_FILTERS = ("oidn", "optix", "ort")
+PATCHED_FILTERS = ("oidn", "optix", "ort", "fsr2", "dlss")
 
 # The nodes the plugin emits for those levels, with the format conversions each needs
 # around it. Stripping the conversions too matters: leaving a lone format=gbrpf32le in

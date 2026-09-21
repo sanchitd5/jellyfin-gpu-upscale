@@ -42,6 +42,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// <summary>True only when a neural super-resolution network really went into the command.</summary>
         public bool NeuralApplied { get; set; }
 
+        public bool GameApplied { get; set; }
+
         /// <summary>True only when libplacebo debanding really went into the command.</summary>
         public bool DebandApplied { get; set; }
 
@@ -84,6 +86,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         /// <summary>The neural super-resolution level that ran, or "off".</summary>
         public string NeuralLevel { get; set; }
+
+        public string GameLevel { get; set; }
 
         /// <summary>The video encoder that went into the command, when this plugin chose it.</summary>
         public string Encoder { get; set; }
@@ -184,10 +188,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             public string NeuralLevel { get; set; } = "off";
 
+            public string GameLevel { get; set; } = "off";
+
             /// <summary>The ffmpeg filter node for the neural super-resolution level, or null.</summary>
             public string NeuralFilter { get; set; }
 
+            /// <summary>The ffmpeg filter node for the game upscaler level, or null.</summary>
+            public string GameFilter { get; set; }
+
             public bool NeuralApplied { get; set; }
+
+            public bool GameApplied { get; set; }
 
             public string ShaderPath { get; set; }
 
@@ -290,6 +301,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 DeblurApplied = plan.Act && plan.DeblurApplied,
                 DenoiseApplied = plan.Act && plan.DenoiseApplied,
                 NeuralApplied = plan.Act && plan.NeuralApplied,
+                GameApplied = plan.Act && plan.GameApplied,
                 DebandApplied = plan.Act && plan.DebandApplied,
                 DeblurLevel = plan.Act && plan.DeblurApplied ? plan.DeblurLevel : "off",
                 SrLevel = plan.Act && plan.UpscaleApplied ? plan.SrLevel : "off",
@@ -303,6 +315,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 Upscaler = plan.Act ? plan.Upscaler : null,
                 DenoiseLevel = plan.Act && plan.DenoiseApplied ? plan.DenoiseLevel : "off",
                 NeuralLevel = plan.Act && plan.NeuralApplied ? plan.NeuralLevel : "off",
+                GameLevel = plan.Act && plan.GameApplied ? plan.GameLevel : "off",
                 Status = status,
                 Reason = reason,
             };
@@ -436,6 +449,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (r.NeuralApplied)
             {
                 parts.Add("Neural SR " + r.NeuralLevel + " (" + NeuralName(r.NeuralLevel) + ")");
+            }
+
+            if (r.GameApplied)
+            {
+                // The degraded wording is not optional and is not softened. A viewer reading
+                // this report must not believe they are getting what a game gets.
+                parts.Add("Game upscaler " + r.GameLevel + " (" + ShaderLibrary.GameLabel(r.GameLevel) + ")");
             }
 
             if (r.UpscaleApplied)
@@ -728,11 +748,36 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.NeuralLevel = neuralUsed;
                 plan.NeuralApplied = plan.NeuralFilter != null;
 
+                // ---- game temporal upscalers (fsr2 / dlss / dlaa) --------------------------
+                // Advanced, opt-in, off by default and never chosen automatically. See the
+                // block above _gameFilters in ShaderLibrary for why they are labelled degraded.
+                string gameDefault = clientSaidOff ? "off" : cfg.GameLevel;
+                string gameLevel = cfg.GameAllowed ? (Option(state, "game") ?? gameDefault) : "off";
+                if (!ShaderLibrary.IsGameLevel(gameLevel))
+                {
+                    gameLevel = ShaderLibrary.IsGameLevel(cfg.GameLevel) ? cfg.GameLevel : "off";
+                }
+
+                plan.GameFilter = ShaderLibrary.GameFilter(
+                    gameLevel, plan.Width, plan.Height, cfg, out string gameUsed);
+                plan.GameLevel = gameUsed;
+                plan.GameApplied = plan.GameFilter != null;
+
+                // fsr2 and dlss produce the OUTPUT size themselves. Running an SR network as
+                // well would enlarge the already-enlarged picture and let libplacebo shrink it
+                // back - two upscalers fighting, which is worse than either. dlaa is exempt: it
+                // is 1:1, so it is a restoration pass ahead of the normal scale, not a rival.
+                if (plan.GameApplied && ShaderLibrary.GameScalesOutput(plan.GameLevel))
+                {
+                    srLevel = "off";
+                    refineLevel = "off";
+                }
+
                 bool wantDeblur = !string.Equals(deblurLevel, "off", StringComparison.OrdinalIgnoreCase);
                 bool wantRefine = !string.Equals(refineLevel, "off", StringComparison.OrdinalIgnoreCase);
                 bool wantChroma = !string.Equals(chromaLevel, "off", StringComparison.OrdinalIgnoreCase);
                 if (!plan.UpscaleApplied && !wantDeblur && !wantRefine && !wantChroma
-                    && !plan.DenoiseApplied && !plan.NeuralApplied)
+                    && !plan.DenoiseApplied && !plan.NeuralApplied && !plan.GameApplied)
                 {
                     return clientSaidOff
                         ? Plan.No("off-by-client", "the viewer selected Off")
@@ -783,7 +828,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.DebandApplied = wantDeband;
 
                 if (!plan.UpscaleApplied && !plan.DeblurApplied && !plan.RefineApplied
-                    && !plan.ChromaApplied && !plan.DenoiseApplied && !plan.NeuralApplied)
+                    && !plan.ChromaApplied && !plan.DenoiseApplied && !plan.NeuralApplied && !plan.GameApplied)
                 {
                     // Sharpening was asked for but its shader is missing: nothing left to do.
                     return Plan.No("not-requested", "requested shaders unavailable");
@@ -1227,6 +1272,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (plan.NeuralApplied)
             {
                 sb.Append(',').Append(plan.NeuralFilter);
+            }
+
+            // The game temporal upscalers run last on the CPU side, after denoise and after
+            // neural SR, immediately before hwupload. fsr2 and dlss hand libplacebo a picture
+            // that is already at the target size, so the libplacebo scale becomes a no-op;
+            // dlaa hands it the source size and libplacebo still does the scaling.
+            if (plan.GameApplied)
+            {
+                sb.Append(',').Append(plan.GameFilter);
             }
 
             sb.Append(",hwupload");

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 
@@ -410,6 +411,68 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private static readonly string[] _neuralMenu =
             { "off", "realesr-anime-x2", "realesr-anime-x4", "realesr-general-x4" };
 
+
+        /// <summary>
+        /// Where a DLSS runtime has to be installed for the dlss/dlaa levels to be offered.
+        /// NOTHING from NVIDIA is shipped with this plugin: the file is
+        /// libnvidia-ngx-dlss.so.&lt;version&gt; out of github.com/NVIDIA/DLSS, under NVIDIA's
+        /// proprietary licence, and the operator must fetch it themselves. See DLSS.md.
+        /// </summary>
+        public const string DlssRuntimeDirectory = "/usr/lib/jellyfin-ffmpeg-oidn/dlss";
+
+        /// <summary>Monocular depth weights for the game upscalers. Not shipped; see FSR2.md.</summary>
+        public const string DepthModelPath =
+            "/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx";
+
+        /// <summary>
+        /// GAME TEMPORAL UPSCALERS - READ THIS BEFORE OFFERING ONE TO ANYBODY.
+        ///
+        /// FSR2 and DLSS are not image upscalers. They are temporal reconstruction algorithms for
+        /// a renderer, and everything they gain over a plain resize comes from a renderer handing
+        /// them four things a camera never records:
+        ///
+        ///   exact screen-space motion vectors, with the camera jitter removed
+        ///   a depth buffer
+        ///   the exact sub-pixel jitter the projection matrix was offset by, per frame
+        ///   a reactive mask saying where history must not be trusted
+        ///
+        /// Recorded video has none of them, so every one is synthesised in the filter: NVOFA
+        /// optical flow for the motion vectors, a monocular estimate (or a flat plane) for depth,
+        /// a measured global phase-correlation offset for jitter, and forward/backward flow
+        /// inconsistency for the reactive mask.
+        ///
+        /// The jitter one is fatal by construction and it was measured here, not assumed
+        /// (the jitter measurements (see What was tried and rejected in the README)): FSR2's jitter is a single GLOBAL scalar, this
+        /// content's sub-pixel motion is LOCAL, and the median textured block departs from the
+        /// global estimate by 0.29 px against FSR2's whole +/-0.5 px budget. With a near-null
+        /// jitter sequence FSR2's lock creation picks the same display-resolution pixels every
+        /// frame, the locks never sweep the display grid, and what is left is a temporal denoise
+        /// plus a fixed Lanczos upsample. AMD's own documentation says the sequence must never
+        /// produce a null vector, which is exactly what a fixed sensor produces.
+        ///
+        /// So these levels are ADVANCED, OPT-IN, OFF BY DEFAULT and NOT rungs of the generated
+        /// quality ladder, they are labelled degraded everywhere they are shown, and nothing
+        /// selects them automatically. They exist because they were asked for with all of the
+        /// above understood.
+        ///
+        /// fsr2  AMD FidelityFX Super Resolution 2 (MIT), Vulkan backend. Scales to the target.
+        /// dlss  NVIDIA DLSS Super Resolution through NGX. Scales to the target.
+        /// dlaa  The same NGX network at 1:1 - a restoration pass BEFORE the scale, not an
+        ///       upscaler. At 1:1 the entire gain would be accumulated sub-pixel samples, which
+        ///       is the one thing missing, so expect close to a pass-through.
+        /// </summary>
+        private static readonly Dictionary<string, string> _gameFilters =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["off"] = null,
+            ["fsr2"] = "fsr2",
+            ["dlss"] = "dlss",
+            ["dlaa"] = "dlss=mode=dlaa",
+        };
+
+        /// <summary>The game upscaler levels offered. "off" is always first.</summary>
+        private static readonly string[] _gameMenu = { "off", "fsr2", "dlss", "dlaa" };
+
         /// <summary>The names offered as real levels, in ladder order. Aliases are accepted but not listed.</summary>
         public static IEnumerable<string> SrLevels => _srFiles.Keys;
 
@@ -578,6 +641,161 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         }
 
         public static bool IsNeuralLevel(string level) => level != null && _neuralModels.ContainsKey(level.Trim());
+
+        public static bool IsGameLevel(string level) =>
+            level != null && _gameFilters.ContainsKey(level.Trim());
+
+        /// <summary>True when the level produces the OUTPUT size itself rather than the input size.</summary>
+        public static bool GameScalesOutput(string level) =>
+            level != null
+            && (string.Equals(level.Trim(), "fsr2", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(level.Trim(), "dlss", StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>Is a DLSS runtime present? It is not shipped, so dlss/dlaa may not be offerable.</summary>
+        public static bool DlssRuntimePresent()
+        {
+            try
+            {
+                return Directory.Exists(DlssRuntimeDirectory)
+                    && Directory.GetFiles(DlssRuntimeDirectory, "libnvidia-ngx-dlss.so*").Length > 0;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Only the levels this server could actually run. dlss and dlaa need a DLSS runtime that
+        /// is not shipped with the plugin, so on a server where nobody installed one they are not
+        /// listed - the same rule the neural weights follow.
+        /// </summary>
+        public static List<string> AvailableGameLevels()
+        {
+            var list = new List<string>();
+            bool dlss = DlssRuntimePresent();
+            foreach (string level in _gameMenu)
+            {
+                if ((string.Equals(level, "dlss", StringComparison.Ordinal)
+                     || string.Equals(level, "dlaa", StringComparison.Ordinal)) && !dlss)
+                {
+                    continue;
+                }
+
+                list.Add(level);
+            }
+
+            return list;
+        }
+
+        /// <summary>The wording a viewer must see beside one of these levels. Not decoration.</summary>
+        public static string GameLabel(string level)
+        {
+            switch ((level ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "fsr2":
+                    return "FSR2 (degraded: synthesised motion vectors, estimated depth, no true jitter)";
+                case "dlss":
+                    return "DLSS SR (degraded: synthesised motion vectors, estimated depth, no true jitter)";
+                case "dlaa":
+                    return "DLAA (degraded: no true jitter, so close to a pass-through)";
+                default:
+                    return "off";
+            }
+        }
+
+        /// <summary>
+        /// The ffmpeg filter node for a game upscaler level, or null for none. Always CPU-side:
+        /// both filters take planar float RGB and carry their own conversions, so neither has
+        /// "_vulkan" in it and both land before hwupload under the same routing invariant the
+        /// denoise and neural levels obey.
+        ///
+        /// Depth falls back to flat when the weights are absent, and the filter falls back again
+        /// on its own if ONNX Runtime has no CUDA execution provider - a per-frame vision
+        /// transformer on the CPU runs at about 1 fps, which is not a transcode filter.
+        /// </summary>
+        public static string GameFilter(
+            string level, int outWidth, int outHeight, UpscaleSettings cfg, out string levelUsed)
+        {
+            levelUsed = "off";
+            if (string.IsNullOrWhiteSpace(level)
+                || !_gameFilters.TryGetValue(level.Trim(), out string node)
+                || node == null)
+            {
+                return null;
+            }
+
+            string canonical = level.Trim().ToLowerInvariant();
+            bool isDlss = canonical == "dlss" || canonical == "dlaa";
+            if (isDlss && !DlssRuntimePresent())
+            {
+                return null;
+            }
+
+            bool depthModel = false;
+            try
+            {
+                depthModel = File.Exists(DepthModelPath);
+            }
+            catch (Exception)
+            {
+                depthModel = false;
+            }
+
+            var sb = new StringBuilder("format=gbrpf32le,");
+            sb.Append(node);
+            if (GameScalesOutput(canonical))
+            {
+                sb.AppendFormat(CultureInfo.InvariantCulture, "=w={0}:h={1}", outWidth, outHeight);
+                sb.Append(':');
+            }
+            else
+            {
+                sb.Append(node.IndexOf('=') >= 0 ? ':' : '=');
+            }
+
+            sb.Append("jitter=").Append(GameOption(cfg?.GameJitter, "measured", "measured", "cancel", "zero", "halton"));
+            sb.Append(":reactive=").Append(GameOption(cfg?.GameReactive, "flow", "flow", "none"));
+            string depth = GameOption(cfg?.GameDepth, depthModel ? "model" : "flat", "model", "model-stable", "flat");
+            if (!depthModel)
+            {
+                depth = "flat";
+            }
+
+            sb.Append(":depth=").Append(depth);
+            if (depth != "flat")
+            {
+                sb.Append(":dmodel=").Append(DepthModelPath);
+            }
+
+            if (isDlss)
+            {
+                sb.Append(":sdk=").Append(DlssRuntimeDirectory);
+            }
+
+            sb.Append(",format=yuv420p");
+            levelUsed = canonical;
+            return sb.ToString();
+        }
+
+        /// <summary>An unrecognised option value is ignored rather than put into an ffmpeg command.</summary>
+        private static string GameOption(string value, string fallback, params string[] allowed)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                string v = value.Trim().ToLowerInvariant();
+                foreach (string a in allowed)
+                {
+                    if (string.Equals(a, v, StringComparison.Ordinal))
+                    {
+                        return a;
+                    }
+                }
+            }
+
+            return fallback;
+        }
+
 
         /// <summary>
         /// Only the levels whose weights are actually on disk. The weights are not shipped with the
