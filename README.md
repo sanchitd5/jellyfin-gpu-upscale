@@ -1,66 +1,122 @@
 # GPU Upscale for Jellyfin
 
 Realtime GPU super-resolution, sharpening and denoising for Jellyfin transcodes, using libplacebo
-GLSL user shaders on Vulkan. A viewer picks a target from the player's **Enhance** menu and the
-stream is upscaled on the fly.
+GLSL user shaders on Vulkan. A viewer picks a quality level from the player's **Enhance** menu and
+the stream is upscaled on the fly — a 540p capture served at 1080p, reconstructed rather than
+stretched.
 
 Built and measured against Jellyfin **12.1.0** with an NVIDIA RTX 3090.
 
 > **This is not an official Jellyfin plugin, and it works by runtime-patching Jellyfin.**
-> Read the [Limitations and risks](#limitations-and-risks) section before installing it anywhere
-> you care about. It will break on some Jellyfin upgrades, by design of the approach rather than by
-> accident.
+> Read [Limitations and risks](#limitations-and-risks) before installing it anywhere you care about.
+> It will break on some Jellyfin upgrades — by the nature of the approach, not by accident.
 
-## Why it patches Jellyfin
+Two things distinguish it from the usual "enable an upscaler" plugin, and both are the reason the
+rest of this document is long:
 
-Jellyfin 12.1 exposes **no plugin interface for the video filter graph**. Inspecting the shipped
-assemblies shows provider interfaces (`IAuthenticationProvider`, `IMediaSourceProvider`,
-`IMetadataProvider`, …) and an audio-filter hook, but nothing for video filters or the encoding
-graph. A stock plugin therefore cannot inject a scaling chain.
+**Every choice here was measured against ground truth, and several popular options lost.** FSR's
+EASU, NVScaler, Anime4K below its native ratio, temporal video super-resolution and generative models
+were all tested on real footage and rejected with numbers — see
+[What was tried and rejected](#what-was-tried-and-rejected). The defaults are what survived, not what
+sounded best.
 
-So this plugin uses [Lib.Harmony](https://github.com/pardeike/Harmony) to patch
-`MediaBrowser.Controller.MediaEncoding.EncodingHelper` at runtime:
+**It never claims to have done something it did not do.** If the concurrency cap, a subtitle burn-in,
+a direct-play session or a low scale ratio means enhancement did not run, the session report says so
+plainly rather than showing a quality badge that is a lie.
 
-| Method | What the postfix does |
-|---|---|
-| `GetVideoProcessingFilterParam` | replaces `-vf` with the libplacebo chain; bails out on `-filter_complex` (subtitle burn-in) |
-| `GetInputVideoHwaccelArgs` | swaps CUDA device setup for `-init_hw_device vulkan=vk:0 -filter_hw_device vk` |
-| `GetHwaccelType` | drops `-hwaccel cuda -hwaccel_output_format cuda` |
-| `GetHardwareVideoDecoder` | drops `*_cuvid`, so frames reach `hwupload` in system memory |
-| `GetVideoEncoder` | turns a stream `copy` into a real encode when enhancement was requested |
+## Contents
 
-Every postfix is individually try/caught: a throw leaves Jellyfin's own value in place.
+**Using it** — [Requirements](#requirements) · [Install](#install) · [The player menu](#the-player-menu) · [Off means direct play](#off-means-direct-play)
 
-### Two obstacles worth knowing about
+**What it does** — [Super-resolution levels](#super-resolution-levels) · [The non-2x ratio problem](#the-non-2x-ratio-problem) · [Sharpening: RCAS](#sharpening-rcas) · [Denoise](#denoise) · [Intel Open Image Denoise (denoise=oidn)](#intel-open-image-denoise-denoiseoidn) · [NVIDIA OptiX (denoise=optix, denoise=optix-temporal)](#nvidia-optix-denoiseoptix-denoiseoptix-temporal)
 
-**Plugins load into a collectible `AssemblyLoadContext`.** Harmony cannot emit detours against one
-(`System.NotSupportedException: Resolving to a collectible assembly is not supported`). The patch
-code therefore lives in a **second assembly outside the plugin directory**, loaded into the default
-context. It must be outside, because Jellyfin enumerates plugin DLLs with `SearchOption.AllDirectories`
-— even a subfolder gets pulled into the collectible context. The two sides exchange only primitives
-(JSON strings, an `object`-typed logger), so no type crosses the boundary.
+**Running it** — [Configuration](#configuration) · [Honest reporting](#honest-reporting) · [Measured throughput](#measured-throughput)
 
-**Lib.Harmony 2.4.1 refuses .NET 10** (`CoreCLR version 10.0.12 is not supported`). Use **2.4.2** or
-newer.
+**How it works** — [Why it patches Jellyfin](#why-it-patches-jellyfin) · [The filter chain](#the-filter-chain) · [How a viewer's choice reaches the server](#how-a-viewers-choice-reaches-the-server) · [Fallback: the ffmpeg shim](#fallback-the-ffmpeg-shim)
 
-## The filter chain
+**Before you rely on it** — [Limitations and risks](#limitations-and-risks) · [What was tried and rejected](#what-was-tried-and-rejected) · [Licences and credits](#licences-and-credits)
 
+## Requirements
+
+- Jellyfin **12.1.0** (other versions: see the risks section)
+- NVIDIA GPU with NVENC, a driver new enough for your `jellyfin-ffmpeg`, and Vulkan
+- `jellyfin-ffmpeg` built with **libplacebo + vulkan + libshaderc** (`jellyfin-ffmpeg8` is)
+- .NET SDK matching the server's runtime, to build
+
+There is **no ONNX/OpenVINO/TensorFlow** requirement — and deliberately no dependency on them.
+ffmpeg's `sr`/`dnn_processing` filters are not used; everything is GLSL through libplacebo.
+
+## Install
+
+**Full step-by-step guide, including environment checks and troubleshooting: [INSTALL.md](INSTALL.md).**
+The short version:
+
+```bash
+# 1. shaders (fetches FSRCNNX and Anime4K from upstream, installs the bundled CAS shaders)
+sudo ./scripts/install-shaders.sh
+
+# 2. build
+export DOTNET_ROOT=/opt/dotnet   # wherever your SDK lives
+dotnet publish src -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out
+dotnet publish src/patcher -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out-patcher
+
+# 3. deploy
+#    plugin  -> /var/lib/jellyfin/plugins/GpuUpscale_<version>/   (owned jellyfin:jellyfin)
+#    patcher -> /usr/lib/jellyfin-gpuupscale/                     (NOT under plugins/)
+#    client  -> /usr/share/jellyfin/web/gpu-upscale.js + a <script> tag in index.html
+sudo ./scripts/jellyfin-gpuupscale-webinject
+sudo systemctl restart jellyfin
 ```
-setparams(kept),format=yuv420p,hwupload,
-libplacebo=w=W:h=H:upscaler=ewa_lanczos
-         :deband=1:deband_threshold=3:deband_grain=0
-         :custom_shader_path=<shader>,
-hwdownload,format=yuv420p  →  h264_nvenc / hevc_nvenc
-```
 
-`deband_grain=0` is deliberate: libplacebo defaults it to 6, which adds synthetic grain that is
-wrong for already-noisy source material.
+`scripts/jellyfin-gpuupscale-activate` swaps a staged build in place with a backup, and
+`--rollback` reverts it.
 
-Optional denoise runs **before** the upscale, on the GPU via `nlmeans_vulkan` after `hwupload`.
+## The player menu
 
-Sharpening is **RCAS**, derived from AMD FidelityFX FSR v1.0.2. It hooks `LUMA`, so it runs at the
-super-resolution shader's output size rather than at the final output size — at a 4K target that is
-a quarter of the pixels, which is why it costs roughly 1% where a `MAIN`-hooked sharpener costs 12%.
+The Enhance menu has three parts: **Quality** (Automatic / Off / a graded ladder / Custom),
+**Advanced**, and **What the server did**.
+
+The ladder is **generated per source**, not fixed, because the right ordering depends on the scale
+ratio. Stages are built by adding sharpening, then super-resolution *only where the server would
+actually run it*, then denoise, then stronger denoise at the top target — and are sorted by a cost
+index derived from measured throughput, so cost is monotonic by construction. Each carries a GPU
+cost hint. A stage is stored as a recipe (target rank, SR level, denoise), never as a bare number, so
+it survives a change of source.
+
+What that produces in practice:
+
+| Source | Rungs | Recommended |
+|---|---|---|
+| 960x540 | 10 | 1080p, FSRCNNX + sharpen |
+| 1280x720 | 9 | 1080p, sharpen only (1.5x — the network is bypassed, so there is no fake rung) |
+| 720x960 (portrait) | 6 | — |
+| 1920x1080 | 6 | — |
+| 2160p | 0 | "already above the server's upscale limit — nothing to offer" |
+
+Ten rungs need three eligible targets; a 1080p source has two, so it honestly gets six rather than a
+padded ten. Nothing that measured worse than the default appears in the ladder — no `fsrcnnx-heavy`,
+no Anime4K, no sharpening above `low`, no NVScaler. All of those remain available in **Advanced**,
+which exposes upscale target (filtered to what is above the source), unblur, denoise, detail level,
+debanding, and the libplacebo scaling kernel (whitelisted — an unknown kernel is ignored rather than
+tried, because it would fail the whole job). Choosing anything there flips the indicator to Custom.
+
+Targets are filtered using the server's own numbers from the probe, not values hardcoded in
+JavaScript. A target between `MinScaleFactor` and `SrMinScaleFactor` is still offered, labelled
+"(plain scaling at this ratio)", because the scale plus sharpener runs and measured well there.
+
+## Off means direct play
+
+The stored preference has three states, and "said nothing" is deliberately different from "said off":
+
+- **unset** — the viewer has never opened the menu. The client sends nothing at all, so the server's
+  own default applies (with `RequireClientOptIn = false`, eligible transcodes are still enhanced).
+- **off** — an explicit opinion. The client marks the request `upscale=off&deblur=off&denoise=off`
+  and **leaves direct play alone**, so the file direct plays exactly as stock Jellyfin would. The
+  markers exist only so that a session which transcodes for some unrelated reason knows this is Off
+  rather than silence. Server-side this suppresses the dashboard defaults too, so `ForceTranscode`
+  has no plan to act on and a would-be stream copy stays a copy. Status: `off-by-client`.
+- **a stage** — the client additionally sets `EnableDirectPlay=false` / `EnableDirectStream=false` on
+  the PlaybackInfo *request*, because a direct-play response contains no `TranscodingUrl` to mark.
 
 ## Super-resolution levels
 
@@ -100,96 +156,41 @@ why it is the default. Both families ship; pick per session.
 Some shaders carry `//!WHEN` guards that skip the pass below a minimum scale factor (FSRCNNX 1.300,
 Anime4K 1.200), so e.g. a 1.125x scale fires neither.
 
-## Requirements
+## The non-2x ratio problem
 
-- Jellyfin **12.1.0** (other versions: see the risks section)
-- NVIDIA GPU with NVENC, a driver new enough for your `jellyfin-ffmpeg`, and Vulkan
-- `jellyfin-ffmpeg` built with **libplacebo + vulkan + libshaderc** (`jellyfin-ffmpeg8` is)
-- .NET SDK matching the server's runtime, to build
+FSRCNNX and Anime4K are fixed-2x networks. At other ratios libplacebo has to rescale their output,
+and the detail they add shrinks with it. Measured detail gain over plain scaling, by ratio:
 
-There is **no ONNX/OpenVINO/TensorFlow** requirement — and deliberately no dependency on them.
-ffmpeg's `sr`/`dnn_processing` filters are not used; everything is GLSL through libplacebo.
+| Ratio | 1.41 | 1.50 | 1.70 | 1.90 | 2.00 |
+|---|---|---|---|---|---|
+| detail vs plain | **-2.2%** | **-0.3%** | +3.6% | +7.2% | +19.3% |
 
-## Install
+Below roughly 1.5x the network is doing nothing useful while costing GPU time. `SrMinScaleFactor`
+(default **1.60**) skips it below that ratio; the upscale still happens with plain scaling, and the
+session's unblur and denoise still run. The session record reports the bypass rather than implying
+super-resolution ran.
 
-**Full step-by-step guide, including environment checks and troubleshooting: [INSTALL.md](INSTALL.md).**
-The short version:
+Snapping the target so the ratio lands nearer 2x was measured and **rejected** — worse on fidelity,
+worse on detail, and 78% more pixels shipped.
 
-```bash
-# 1. shaders (fetches FSRCNNX and Anime4K from upstream, installs the bundled CAS shaders)
-sudo ./scripts/install-shaders.sh
+The full picture, measured on one clip in one run against a ground-truth detail of 3.5179:
 
-# 2. build
-export DOTNET_ROOT=/opt/dotnet   # wherever your SDK lives
-dotnet publish src -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out
-dotnet publish src/patcher -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out-patcher
+| Ratio | Chain | PSNR | SSIM | detail |
+|---|---|---|---|---|
+| 1.50 | plain | 43.684 | 0.98583 | 3.2818 |
+| 1.50 | plain + RCAS-2.0 | 43.518 | 0.98511 | **3.5950** |
+| 1.50 | FSRCNNX + RCAS-2.0 | **43.714** | **0.98591** | 3.4304 |
+| 1.50 | FSRCNNX alone | 43.766 | 0.98615 | 3.2726 |
 
-# 3. deploy
-#    plugin  -> /var/lib/jellyfin/plugins/GpuUpscale_<version>/   (owned jellyfin:jellyfin)
-#    patcher -> /usr/lib/jellyfin-gpuupscale/                     (NOT under plugins/)
-#    client  -> /usr/share/jellyfin/web/gpu-upscale.js + a <script> tag in index.html
-sudo ./scripts/jellyfin-gpuupscale-webinject
-sudo systemctl restart jellyfin
-```
+Two things are true at once, which is why earlier readings looked contradictory. On **detail energy**
+the network alone is worthless at 1.5x (3.2726 against plain scaling's 3.2818) and the sharpener alone
+lands nearest ground truth. On **fidelity** the network never loses: FSRCNNX+RCAS beats plain+RCAS by
+0.196 dB at 1.50x, 0.344 dB at 1.70x and 0.473 dB at 1.90x — the gain grows with the ratio and is
+smallest exactly where the bypass sits.
 
-`scripts/jellyfin-gpuupscale-activate` swaps a staged build in place with a backup, and
-`--rollback` reverts it.
-
-## Configuration
-
-Dashboard → Plugins → GPU Upscale. Defaults suit a single busy GPU:
-
-| Setting | Default | Notes |
-|---|---|---|
-| `TargetHeight` | 1080 | used when a session names no target |
-| `MaxTargetHeight` | 2160 | hard ceiling |
-| `SrLevel` | `fsrcnnx` | default super-resolution level |
-| `DeblurLevel` / `DeblurAllowed` | `off` / true | RCAS sharpening; SR already sharpens, so default off |
-| `DenoiseLevel` / `DenoiseAllowed` | `off` / true | `light` = nlmeans_vulkan, `strong` = nlmeans_vulkan s=2.0 |
-| `SrMinScaleFactor` | 1.60 | below this ratio the SR network is skipped (see below); 0 disables |
-| `Deband` | true | with `grain=0` |
-| `MinScaleFactor` | 1.15 | skip near-identity upscales entirely |
-| `MaxSourceHeight` | 1440 | never upscale sources taller than this |
-| `MaxConcurrent` | 2 | beyond this, stock transcoding is used |
-| `Encoder` | `hevc_nvenc` | falls back to the client's codec when unsupported |
-| `RequireClientOptIn` | true | off = enhance every eligible transcode |
-| `ForceTranscode` | false | turn a would-be stream copy into a real transcode |
-| `ForceTranscodeForDirectPlay` | false | see below — stops clients direct playing eligible material |
-
-### Enhancing direct play
-
-A direct-playing file has no transcode, so there is nothing to enhance. The injected client handles
-this for web viewers by disabling direct play on the PlaybackInfo *request* when a selection is made.
-Clients without the script (Android, TV, mobile) are unaffected and play unenhanced.
-
-`ForceTranscodeForDirectPlay` closes that gap server-side, via a Harmony **prefix** on
-`Jellyfin.Api.Helpers.MediaInfoHelper.SetDeviceSpecificData` that flips its `enableDirectPlay` /
-`enableDirectStream` parameters for eligible material, on every client.
-
-It defaults to **false**, and the cost is real: each such session becomes a GPU transcode subject to
-`MaxConcurrent`, and sessions past that limit fall back to stock transcoding — *more* expensive than
-the direct play they replaced. Eligibility reuses the engine's own arithmetic
-(`UpscaleEngine.WouldEnhanceSource`), so the override cannot force a transcode for material the
-engine would then decline to enhance.
-
-The target is resolved by name with `AccessTools.TypeByName`, so there is no compile-time reference
-to `Jellyfin.Api` and no version pin to a web-API assembly.
-
-### How patch failures degrade
-
-The five core `EncodingHelper` patches are **interdependent, not five independent features** — the
-filter chain only works because the hwaccel and decoder patches put frames where `hwupload` expects
-them. Installing a subset would emit ffmpeg command lines that fail outright, which is worse than
-leaving playback unenhanced. So they stay all-or-nothing: if any core method cannot be resolved,
-none are patched, Jellyfin is left alone, and the log **names the missing methods**.
-
-Optional patches (currently just the direct-play override) install separately, after the core set is
-live, each in its own try/catch. One failing degrades that feature alone:
-
-```
-active (5 EncodingHelper methods patched); optional: direct-play override
-active (5 EncodingHelper methods patched); optional UNAVAILABLE: MediaInfoHelper.SetDeviceSpecificData
-```
+So `SrMinScaleFactor = 1.60` is a **cost policy, not a quality cliff**: roughly 0.2 dB for about 15%
+GPU, on a card that is usually shared, where the ~1% sharpener already reaches ground-truth detail.
+Lower it on the dashboard with no rebuild and the quality ladder follows automatically.
 
 ## Sharpening: RCAS
 
@@ -368,103 +369,61 @@ OPTIX.md lists exactly what and from where.
 here rebuilt, which a `jellyfin-ffmpeg` upgrade cannot do. After a driver change, re-run
 `-h filter=optix` and a short temporal encode.
 
-## The non-2x ratio problem
+## Configuration
 
-FSRCNNX and Anime4K are fixed-2x networks. At other ratios libplacebo has to rescale their output,
-and the detail they add shrinks with it. Measured detail gain over plain scaling, by ratio:
+Dashboard → Plugins → GPU Upscale. Defaults suit a single busy GPU:
 
-| Ratio | 1.41 | 1.50 | 1.70 | 1.90 | 2.00 |
-|---|---|---|---|---|---|
-| detail vs plain | **-2.2%** | **-0.3%** | +3.6% | +7.2% | +19.3% |
-
-Below roughly 1.5x the network is doing nothing useful while costing GPU time. `SrMinScaleFactor`
-(default **1.60**) skips it below that ratio; the upscale still happens with plain scaling, and the
-session's unblur and denoise still run. The session record reports the bypass rather than implying
-super-resolution ran.
-
-Snapping the target so the ratio lands nearer 2x was measured and **rejected** — worse on fidelity,
-worse on detail, and 78% more pixels shipped.
-
-The full picture, measured on one clip in one run against a ground-truth detail of 3.5179:
-
-| Ratio | Chain | PSNR | SSIM | detail |
-|---|---|---|---|---|
-| 1.50 | plain | 43.684 | 0.98583 | 3.2818 |
-| 1.50 | plain + RCAS-2.0 | 43.518 | 0.98511 | **3.5950** |
-| 1.50 | FSRCNNX + RCAS-2.0 | **43.714** | **0.98591** | 3.4304 |
-| 1.50 | FSRCNNX alone | 43.766 | 0.98615 | 3.2726 |
-
-Two things are true at once, which is why earlier readings looked contradictory. On **detail energy**
-the network alone is worthless at 1.5x (3.2726 against plain scaling's 3.2818) and the sharpener alone
-lands nearest ground truth. On **fidelity** the network never loses: FSRCNNX+RCAS beats plain+RCAS by
-0.196 dB at 1.50x, 0.344 dB at 1.70x and 0.473 dB at 1.90x — the gain grows with the ratio and is
-smallest exactly where the bypass sits.
-
-So `SrMinScaleFactor = 1.60` is a **cost policy, not a quality cliff**: roughly 0.2 dB for about 15%
-GPU, on a card that is usually shared, where the ~1% sharpener already reaches ground-truth detail.
-Lower it on the dashboard with no rebuild and the quality ladder follows automatically.
-
-## The player menu
-
-The Enhance menu has three parts: **Quality** (Automatic / Off / a graded ladder / Custom),
-**Advanced**, and **What the server did**.
-
-The ladder is **generated per source**, not fixed, because the right ordering depends on the scale
-ratio. Stages are built by adding sharpening, then super-resolution *only where the server would
-actually run it*, then denoise, then stronger denoise at the top target — and are sorted by a cost
-index derived from measured throughput, so cost is monotonic by construction. Each carries a GPU
-cost hint. A stage is stored as a recipe (target rank, SR level, denoise), never as a bare number, so
-it survives a change of source.
-
-What that produces in practice:
-
-| Source | Rungs | Recommended |
+| Setting | Default | Notes |
 |---|---|---|
-| 960x540 | 10 | 1080p, FSRCNNX + sharpen |
-| 1280x720 | 9 | 1080p, sharpen only (1.5x — the network is bypassed, so there is no fake rung) |
-| 720x960 (portrait) | 6 | — |
-| 1920x1080 | 6 | — |
-| 2160p | 0 | "already above the server's upscale limit — nothing to offer" |
+| `TargetHeight` | 1080 | used when a session names no target |
+| `MaxTargetHeight` | 2160 | hard ceiling |
+| `SrLevel` | `fsrcnnx` | default super-resolution level |
+| `DeblurLevel` / `DeblurAllowed` | `off` / true | RCAS sharpening; SR already sharpens, so default off |
+| `DenoiseLevel` / `DenoiseAllowed` | `off` / true | `light` = nlmeans_vulkan, `strong` = nlmeans_vulkan s=2.0 |
+| `SrMinScaleFactor` | 1.60 | below this ratio the SR network is skipped (see below); 0 disables |
+| `Deband` | true | with `grain=0` |
+| `MinScaleFactor` | 1.15 | skip near-identity upscales entirely |
+| `MaxSourceHeight` | 1440 | never upscale sources taller than this |
+| `MaxConcurrent` | 2 | beyond this, stock transcoding is used |
+| `Encoder` | `hevc_nvenc` | falls back to the client's codec when unsupported |
+| `RequireClientOptIn` | true | off = enhance every eligible transcode |
+| `ForceTranscode` | false | turn a would-be stream copy into a real transcode |
+| `ForceTranscodeForDirectPlay` | false | see below — stops clients direct playing eligible material |
 
-Ten rungs need three eligible targets; a 1080p source has two, so it honestly gets six rather than a
-padded ten. Nothing that measured worse than the default appears in the ladder — no `fsrcnnx-heavy`,
-no Anime4K, no sharpening above `low`, no NVScaler. All of those remain available in **Advanced**,
-which exposes upscale target (filtered to what is above the source), unblur, denoise, detail level,
-debanding, and the libplacebo scaling kernel (whitelisted — an unknown kernel is ignored rather than
-tried, because it would fail the whole job). Choosing anything there flips the indicator to Custom.
+### Enhancing direct play
 
-Targets are filtered using the server's own numbers from the probe, not values hardcoded in
-JavaScript. A target between `MinScaleFactor` and `SrMinScaleFactor` is still offered, labelled
-"(plain scaling at this ratio)", because the scale plus sharpener runs and measured well there.
+A direct-playing file has no transcode, so there is nothing to enhance. The injected client handles
+this for web viewers by disabling direct play on the PlaybackInfo *request* when a selection is made.
+Clients without the script (Android, TV, mobile) are unaffected and play unenhanced.
 
-## Off means direct play
+`ForceTranscodeForDirectPlay` closes that gap server-side, via a Harmony **prefix** on
+`Jellyfin.Api.Helpers.MediaInfoHelper.SetDeviceSpecificData` that flips its `enableDirectPlay` /
+`enableDirectStream` parameters for eligible material, on every client.
 
-The stored preference has three states, and "said nothing" is deliberately different from "said off":
+It defaults to **false**, and the cost is real: each such session becomes a GPU transcode subject to
+`MaxConcurrent`, and sessions past that limit fall back to stock transcoding — *more* expensive than
+the direct play they replaced. Eligibility reuses the engine's own arithmetic
+(`UpscaleEngine.WouldEnhanceSource`), so the override cannot force a transcode for material the
+engine would then decline to enhance.
 
-- **unset** — the viewer has never opened the menu. The client sends nothing at all, so the server's
-  own default applies (with `RequireClientOptIn = false`, eligible transcodes are still enhanced).
-- **off** — an explicit opinion. The client marks the request `upscale=off&deblur=off&denoise=off`
-  and **leaves direct play alone**, so the file direct plays exactly as stock Jellyfin would. The
-  markers exist only so that a session which transcodes for some unrelated reason knows this is Off
-  rather than silence. Server-side this suppresses the dashboard defaults too, so `ForceTranscode`
-  has no plan to act on and a would-be stream copy stays a copy. Status: `off-by-client`.
-- **a stage** — the client additionally sets `EnableDirectPlay=false` / `EnableDirectStream=false` on
-  the PlaybackInfo *request*, because a direct-play response contains no `TranscodingUrl` to mark.
+The target is resolved by name with `AccessTools.TypeByName`, so there is no compile-time reference
+to `Jellyfin.Api` and no version pin to a web-API assembly.
 
-## How a viewer's choice reaches the server
+### How patch failures degrade
 
-Jellyfin's `ParseStreamOptions` copies **every lowercase-initial query parameter** into the request's
-`StreamOptions` dictionary, readable server-side via `GetOption(...)`. Nothing clamps or rewrites it.
-The injected client therefore appends
-`&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=light&deband=on&kernel=ewa_lanczos`.
+The five core `EncodingHelper` patches are **interdependent, not five independent features** — the
+filter chain only works because the hwaccel and decoder patches put frames where `hwupload` expects
+them. Installing a subset would emit ffmpeg command lines that fail outright, which is worse than
+leaving playback unenhanced. So they stay all-or-nothing: if any core method cannot be resolved,
+none are patched, Jellyfin is left alone, and the log **names the missing methods**.
 
-A requested *bitrate* would not survive — Jellyfin clamps it to the source bitrate before
-`EncodingHelper` sees it — which is why an earlier sentinel-bitrate approach was abandoned.
+Optional patches (currently just the direct-play override) install separately, after the core set is
+live, each in its own try/catch. One failing degrades that feature alone:
 
-**Direct play has no transcode to enhance**, so when (and only when) a viewer selects enhancement,
-the client also sets `EnableDirectPlay=false` / `EnableDirectStream=false` on the PlaybackInfo
-*request*. Marking the response cannot work: a direct-play response contains no `TranscodingUrl` to
-mark, and clearing `SupportsDirectPlay` there would leave the player with nothing to fall back to.
+```
+active (5 EncodingHelper methods patched); optional: direct-play override
+active (5 EncodingHelper methods patched); optional UNAVAILABLE: MediaInfoHelper.SetDeviceSpecificData
+```
 
 ## Honest reporting
 
@@ -486,6 +445,95 @@ about ±25%, so treat the ratios as the reliable part.
 | + unblur medium | 176 fps | 147 fps | 93 fps |
 
 Denoise costs roughly: `hqdn3d` 5.5x realtime, `nlmeans_vulkan` 2.9x realtime.
+
+## Why it patches Jellyfin
+
+Jellyfin 12.1 exposes **no plugin interface for the video filter graph**. Inspecting the shipped
+assemblies shows provider interfaces (`IAuthenticationProvider`, `IMediaSourceProvider`,
+`IMetadataProvider`, …) and an audio-filter hook, but nothing for video filters or the encoding
+graph. A stock plugin therefore cannot inject a scaling chain.
+
+So this plugin uses [Lib.Harmony](https://github.com/pardeike/Harmony) to patch
+`MediaBrowser.Controller.MediaEncoding.EncodingHelper` at runtime:
+
+| Method | What the postfix does |
+|---|---|
+| `GetVideoProcessingFilterParam` | replaces `-vf` with the libplacebo chain; bails out on `-filter_complex` (subtitle burn-in) |
+| `GetInputVideoHwaccelArgs` | swaps CUDA device setup for `-init_hw_device vulkan=vk:0 -filter_hw_device vk` |
+| `GetHwaccelType` | drops `-hwaccel cuda -hwaccel_output_format cuda` |
+| `GetHardwareVideoDecoder` | drops `*_cuvid`, so frames reach `hwupload` in system memory |
+| `GetVideoEncoder` | turns a stream `copy` into a real encode when enhancement was requested |
+
+Every postfix is individually try/caught: a throw leaves Jellyfin's own value in place.
+
+### Two obstacles worth knowing about
+
+**Plugins load into a collectible `AssemblyLoadContext`.** Harmony cannot emit detours against one
+(`System.NotSupportedException: Resolving to a collectible assembly is not supported`). The patch
+code therefore lives in a **second assembly outside the plugin directory**, loaded into the default
+context. It must be outside, because Jellyfin enumerates plugin DLLs with `SearchOption.AllDirectories`
+— even a subfolder gets pulled into the collectible context. The two sides exchange only primitives
+(JSON strings, an `object`-typed logger), so no type crosses the boundary.
+
+**Lib.Harmony 2.4.1 refuses .NET 10** (`CoreCLR version 10.0.12 is not supported`). Use **2.4.2** or
+newer.
+
+## The filter chain
+
+```
+setparams(kept),format=yuv420p,hwupload,
+libplacebo=w=W:h=H:upscaler=ewa_lanczos
+         :deband=1:deband_threshold=3:deband_grain=0
+         :custom_shader_path=<shader>,
+hwdownload,format=yuv420p  →  h264_nvenc / hevc_nvenc
+```
+
+`deband_grain=0` is deliberate: libplacebo defaults it to 6, which adds synthetic grain that is
+wrong for already-noisy source material.
+
+Optional denoise runs **before** the upscale, on the GPU via `nlmeans_vulkan` after `hwupload`.
+
+Sharpening is **RCAS**, derived from AMD FidelityFX FSR v1.0.2. It hooks `LUMA`, so it runs at the
+super-resolution shader's output size rather than at the final output size — at a 4K target that is
+a quarter of the pixels, which is why it costs roughly 1% where a `MAIN`-hooked sharpener costs 12%.
+
+## How a viewer's choice reaches the server
+
+Jellyfin's `ParseStreamOptions` copies **every lowercase-initial query parameter** into the request's
+`StreamOptions` dictionary, readable server-side via `GetOption(...)`. Nothing clamps or rewrites it.
+The injected client therefore appends
+`&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=light&deband=on&kernel=ewa_lanczos`.
+
+A requested *bitrate* would not survive — Jellyfin clamps it to the source bitrate before
+`EncodingHelper` sees it — which is why an earlier sentinel-bitrate approach was abandoned.
+
+**Direct play has no transcode to enhance**, so when (and only when) a viewer selects enhancement,
+the client also sets `EnableDirectPlay=false` / `EnableDirectStream=false` on the PlaybackInfo
+*request*. Marking the response cannot work: a direct-play response contains no `TranscodingUrl` to
+mark, and clearing `SupportsDirectPlay` there would leave the player with nothing to fall back to.
+
+## Fallback: the ffmpeg shim
+
+`shim/jellyfin-ffmpeg-upscale` is a standalone Python wrapper that rewrites the transcode command
+without any Harmony patching, wired in via `JELLYFIN_FFMPEG_OPT=--ffmpeg=...`. It is less capable
+(it infers intent from the command line rather than from the session) but survives Jellyfin changes
+that break the patches. It stands down automatically while the plugin's patches are active.
+
+## Limitations and risks
+
+- **Patches match `EncodingHelper` methods by name.** A rename or refactor in a later Jellyfin makes
+  them resolve to nothing; the plugin logs it and does not patch. Worse, a method could survive by
+  name and change meaning — Harmony cannot detect that. **Re-verify after every Jellyfin upgrade.**
+- **A `jellyfin-web` package upgrade replaces `index.html` and deletes the injected script**, so the
+  Enhance menu silently disappears. `scripts/99-jellyfin-gpuupscale` re-applies it after dpkg runs.
+- **The client hooks depend on minified bundle internals** (the `webpackChunk` global, the module
+  exporting `getVideoQualityOptions`). Modules are matched on export shape rather than by id, but a
+  web rebuild can still break the menu. It fails safe: normal playback and menus are unaffected.
+- **Subtitle burn-in is never enhanced** — those jobs build a `-filter_complex` graph and are skipped.
+- **Clients without the injected script** (Android, TV, mobile) direct-play and are never enhanced.
+- **The concurrency cap is advisory** — it counts live ffmpeg processes carrying `libplacebo` at
+  command-build time, so two sessions starting simultaneously can both pass. Linux-only by construction.
+- `targetAbi` pins the plugin to a Jellyfin version; a later server may refuse to load it until raised.
 
 ## What was tried and rejected
 
@@ -585,29 +633,6 @@ VFR reference silently compares misaligned frames (it reported a good model at 1
 metrics by frame index instead. And **libplacebo shifts luma by about -9/255 on untagged clips**,
 which quietly penalises every shader chain against a non-libplacebo reference; `-color_range pc` in,
 `tv` out fixes it.
-
-## Limitations and risks
-
-- **Patches match `EncodingHelper` methods by name.** A rename or refactor in a later Jellyfin makes
-  them resolve to nothing; the plugin logs it and does not patch. Worse, a method could survive by
-  name and change meaning — Harmony cannot detect that. **Re-verify after every Jellyfin upgrade.**
-- **A `jellyfin-web` package upgrade replaces `index.html` and deletes the injected script**, so the
-  Enhance menu silently disappears. `scripts/99-jellyfin-gpuupscale` re-applies it after dpkg runs.
-- **The client hooks depend on minified bundle internals** (the `webpackChunk` global, the module
-  exporting `getVideoQualityOptions`). Modules are matched on export shape rather than by id, but a
-  web rebuild can still break the menu. It fails safe: normal playback and menus are unaffected.
-- **Subtitle burn-in is never enhanced** — those jobs build a `-filter_complex` graph and are skipped.
-- **Clients without the injected script** (Android, TV, mobile) direct-play and are never enhanced.
-- **The concurrency cap is advisory** — it counts live ffmpeg processes carrying `libplacebo` at
-  command-build time, so two sessions starting simultaneously can both pass. Linux-only by construction.
-- `targetAbi` pins the plugin to a Jellyfin version; a later server may refuse to load it until raised.
-
-## Fallback: the ffmpeg shim
-
-`shim/jellyfin-ffmpeg-upscale` is a standalone Python wrapper that rewrites the transcode command
-without any Harmony patching, wired in via `JELLYFIN_FFMPEG_OPT=--ffmpeg=...`. It is less capable
-(it infers intent from the command line rather than from the session) but survives Jellyfin changes
-that break the patches. It stands down automatically while the plugin's patches are active.
 
 ## Licences and credits
 
