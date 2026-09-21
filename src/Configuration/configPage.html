@@ -175,6 +175,31 @@
                     </div>
                 </div>
 
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="ForceTranscodeForDirectPlay" />
+                        <span>Enhance direct play too (stop clients playing files directly)</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        <b>Off by default, and read this before turning it on.</b>
+                        <br /><br />
+                        When a client can play a file directly, the server never builds an ffmpeg command,
+                        so there is nothing to enhance and playback info honestly reports "No enhancement".
+                        This setting tells the server to refuse direct play for any item that is eligible for
+                        upscaling, which forces a transcode the enhancement chain can run in.
+                        <br /><br />
+                        <b>The cost is large and it applies to every client.</b> With this on, direct play
+                        effectively stops being used for eligible material, and each of those sessions becomes
+                        a GPU transcode subject to the concurrency limit above. Sessions past that limit fall
+                        back to stock transcoding, which is more expensive than the direct play they replaced.
+                        Leave it off unless you want enhancement everywhere and have the GPU headroom for it.
+                        <br /><br />
+                        With it off, the injected player script still forces a transcode for the web player
+                        when a viewer picks something in the Enhance menu, so per-session enhancement works
+                        either way. This setting is what reaches clients that do not run that script.
+                    </div>
+                </div>
+
                 <div class="inputContainer">
                     <input is="emby-input" type="text" id="Encoder" label="Encoder" />
                     <div class="fieldDescription">
@@ -255,6 +280,7 @@
                     page.querySelector('#MaxConcurrent').value = config.MaxConcurrent;
                     page.querySelector('#RequireClientOptIn').checked = config.RequireClientOptIn;
                     page.querySelector('#ForceTranscode').checked = config.ForceTranscode;
+                    page.querySelector('#ForceTranscodeForDirectPlay').checked = config.ForceTranscodeForDirectPlay === true;
                     page.querySelector('#Encoder').value = config.Encoder;
                     Dashboard.hideLoadingMsg();
                 });
@@ -284,6 +310,7 @@
                     config.MaxConcurrent = parseInt(page.querySelector('#MaxConcurrent').value, 10);
                     config.RequireClientOptIn = page.querySelector('#RequireClientOptIn').checked;
                     config.ForceTranscode = page.querySelector('#ForceTranscode').checked;
+                    config.ForceTranscodeForDirectPlay = page.querySelector('#ForceTranscodeForDirectPlay').checked;
                     config.Encoder = page.querySelector('#Encoder').value;
                     ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
                         Dashboard.processPluginConfigurationUpdateResult(result);

@@ -63,6 +63,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// <summary>Turn a would-be video stream copy into a real transcode even without a session request.</summary>
         public bool ForceTranscode { get; set; }
 
+        /// <summary>
+        /// Turn direct play off for anything this plugin would enhance, so a transcode exists for
+        /// the chain to run in. Off by default; see the config page for the cost.
+        /// </summary>
+        public bool ForceTranscodeForDirectPlay { get; set; }
+
         /// <summary>Only enhance when the session asks. Off means every eligible transcode is enhanced.</summary>
         public bool RequireClientOptIn { get; set; }
 

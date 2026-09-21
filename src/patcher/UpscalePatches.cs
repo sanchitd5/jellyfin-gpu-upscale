@@ -5,6 +5,8 @@ using System.Reflection;
 using HarmonyLib;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.GpuUpscale.Patcher
@@ -37,34 +39,75 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             try
             {
+                var harmony = new Harmony(HarmonyId);
+
+                /*
+                 * THE CORE SET stays all-or-nothing ON PURPOSE.
+                 *
+                 * These five are interdependent, not five independent features. The filter patch
+                 * emits a libplacebo chain that only works because the hwaccel patch supplied a
+                 * Vulkan device and the decoder patches put frames in system memory for hwupload.
+                 * Installing a subset would produce ffmpeg command lines that fail outright - that
+                 * is WORSE than not patching, because it breaks playback instead of merely leaving
+                 * it unenhanced. So if any one of them cannot be resolved, none are installed and
+                 * Jellyfin keeps its own behaviour untouched.
+                 *
+                 * What has been fixed here is the reporting and the blast radius: the failure now
+                 * NAMES the methods that could not be resolved instead of saying "method(s) not
+                 * found", and the optional patches below are installed separately so that one of
+                 * them failing can never take the core set down with it.
+                 */
                 var helper = typeof(EncodingHelper);
-                var patches = new List<(MethodBase Target, string Postfix)>
+                var core = new List<(string Name, MethodBase Target, string Postfix)>
                 {
-                    (AccessTools.Method(helper, "GetVideoProcessingFilterParam"), nameof(VideoProcessingFilterPostfix)),
-                    (AccessTools.Method(helper, "GetInputVideoHwaccelArgs"), nameof(InputVideoHwaccelArgsPostfix)),
-                    (AccessTools.Method(helper, "GetHwaccelType"), nameof(HwaccelTypePostfix)),
-                    (AccessTools.Method(helper, "GetHardwareVideoDecoder"), nameof(HardwareVideoDecoderPostfix)),
-                    (AccessTools.Method(helper, "GetVideoEncoder"), nameof(VideoEncoderPostfix)),
+                    ("GetVideoProcessingFilterParam", AccessTools.Method(helper, "GetVideoProcessingFilterParam"), nameof(VideoProcessingFilterPostfix)),
+                    ("GetInputVideoHwaccelArgs", AccessTools.Method(helper, "GetInputVideoHwaccelArgs"), nameof(InputVideoHwaccelArgsPostfix)),
+                    ("GetHwaccelType", AccessTools.Method(helper, "GetHwaccelType"), nameof(HwaccelTypePostfix)),
+                    ("GetHardwareVideoDecoder", AccessTools.Method(helper, "GetHardwareVideoDecoder"), nameof(HardwareVideoDecoderPostfix)),
+                    ("GetVideoEncoder", AccessTools.Method(helper, "GetVideoEncoder"), nameof(VideoEncoderPostfix)),
                 };
 
-                if (patches.Any(p => p.Target == null))
+                var missing = core.Where(p => p.Target == null).Select(p => p.Name).ToList();
+                if (missing.Count > 0)
                 {
-                    Status = "failed: EncodingHelper method(s) not found on this Jellyfin build";
-                    logger?.LogError("GpuUpscale: could not resolve all EncodingHelper methods; not patching.");
+                    Active = false;
+                    Status = "failed: EncodingHelper method(s) not found on this Jellyfin build: "
+                        + string.Join(", ", missing);
+                    logger?.LogError(
+                        "GpuUpscale: could not resolve EncodingHelper method(s) {Missing}; not patching. "
+                        + "The core patches are interdependent, so a partial install would break transcoding.",
+                        string.Join(", ", missing));
                     return;
                 }
 
-                var harmony = new Harmony(HarmonyId);
-                foreach (var (target, postfix) in patches)
+                foreach (var (name, target, postfix) in core)
                 {
                     harmony.Patch(target, postfix: new HarmonyMethod(typeof(UpscalePatches).GetMethod(postfix, BindingFlags.Static | BindingFlags.NonPublic)));
-                    logger?.LogInformation("GpuUpscale: patched {Method}", target.Name);
+                    logger?.LogInformation("GpuUpscale: patched {Method}", name);
                 }
 
                 _harmony = harmony;
                 Active = true;
+
+                // OPTIONAL PATCHES. Each is installed in its own try/catch after the core set is
+                // already live, so a target that a future Jellyfin renames or removes degrades that
+                // one feature and nothing else.
+                var optional = new List<string>();
+                var optionalFailed = new List<string>();
+                ApplyOptional(harmony, logger, optional, optionalFailed);
+
                 Status = "active (5 EncodingHelper methods patched)";
-                logger?.LogInformation("GpuUpscale: Harmony patches installed, plugin owns the transcode filter chain.");
+                if (optional.Count > 0)
+                {
+                    Status += "; optional: " + string.Join(", ", optional);
+                }
+
+                if (optionalFailed.Count > 0)
+                {
+                    Status += "; optional UNAVAILABLE: " + string.Join(", ", optionalFailed);
+                }
+
+                logger?.LogInformation("GpuUpscale: Harmony patches installed, plugin owns the transcode filter chain. {Status}", Status);
             }
             catch (Exception ex)
             {
@@ -81,6 +124,117 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 }
 
                 _harmony = null;
+            }
+        }
+
+        /// <summary>True when the direct-play override is installed and can be switched on.</summary>
+        public static bool DirectPlayOverrideAvailable { get; private set; }
+
+        /// <summary>
+        /// Installs the optional patches. Each one is independent: it resolves its own target and
+        /// is patched inside its own try/catch, so a failure here can never disturb the core set,
+        /// which is already installed and live by the time this runs.
+        /// </summary>
+        private static void ApplyOptional(Harmony harmony, ILogger logger, List<string> applied, List<string> failed)
+        {
+            // MediaInfoHelper lives in Jellyfin.Api, a different assembly from the core targets, and
+            // is resolved BY NAME so that the patcher does not need a compile-time reference to a
+            // web-API assembly it would then be version-pinned to.
+            try
+            {
+                var mediaInfoHelper = AccessTools.TypeByName("Jellyfin.Api.Helpers.MediaInfoHelper");
+                var target = mediaInfoHelper == null ? null : AccessTools.Method(mediaInfoHelper, "SetDeviceSpecificData");
+                if (target == null)
+                {
+                    failed.Add("MediaInfoHelper.SetDeviceSpecificData (direct-play override)");
+                    logger?.LogWarning(
+                        "GpuUpscale: could not resolve Jellyfin.Api.Helpers.MediaInfoHelper.SetDeviceSpecificData. "
+                        + "ForceTranscodeForDirectPlay will do nothing; everything else is unaffected.");
+                    return;
+                }
+
+                harmony.Patch(target, prefix: new HarmonyMethod(
+                    typeof(UpscalePatches).GetMethod(nameof(SetDeviceSpecificDataPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
+
+                DirectPlayOverrideAvailable = true;
+                applied.Add("direct-play override");
+                logger?.LogInformation("GpuUpscale: patched MediaInfoHelper.SetDeviceSpecificData (direct-play override available)");
+            }
+            catch (Exception ex)
+            {
+                failed.Add("MediaInfoHelper.SetDeviceSpecificData (direct-play override)");
+                logger?.LogWarning(
+                    ex,
+                    "GpuUpscale: the optional direct-play override could not be installed. "
+                    + "Upscaling itself is unaffected.");
+            }
+        }
+
+        /// <summary>
+        /// Turns direct play off for items this plugin would enhance, so that a transcode exists
+        /// for the chain to run in.
+        ///
+        /// WHY THIS IS NEEDED. When a client can direct play, Jellyfin's PlaybackInfo response
+        /// carries no TranscodingUrl at all - so there is no ffmpeg command, and nothing to
+        /// enhance, however the plugin is configured. The injected web script solves this for the
+        /// web player by asking PlaybackInfo not to allow direct play; this is the same lever
+        /// applied server-side, which is the only thing that can reach clients that do not run the
+        /// injected script.
+        ///
+        /// It is OFF by default (<see cref="UpscaleSettings.ForceTranscodeForDirectPlay"/>) because
+        /// it is expensive and far-reaching: with it on, direct play effectively stops being used
+        /// for any eligible item on any client, and every one of those sessions becomes a GPU
+        /// transcode. Nothing about it changes behaviour until the flag is switched on.
+        ///
+        /// Total, like every other entry point here: any surprise means "leave Jellyfin alone".
+        /// </summary>
+        private static void SetDeviceSpecificDataPrefix(
+            MediaSourceInfo mediaSource,
+            ref bool enableDirectPlay,
+            ref bool enableDirectStream)
+        {
+            try
+            {
+                if (!enableDirectPlay && !enableDirectStream)
+                {
+                    return;
+                }
+
+                var cfg = UpscaleEngine.Settings;
+                if (cfg == null || !cfg.Enabled || !cfg.ForceTranscodeForDirectPlay)
+                {
+                    return;
+                }
+
+                if (mediaSource?.MediaStreams == null)
+                {
+                    return;
+                }
+
+                foreach (var stream in mediaSource.MediaStreams)
+                {
+                    if (stream == null || stream.Type != MediaStreamType.Video)
+                    {
+                        continue;
+                    }
+
+                    if (!UpscaleEngine.WouldEnhanceSource(stream.Width, stream.Height))
+                    {
+                        return;
+                    }
+
+                    enableDirectPlay = false;
+                    enableDirectStream = false;
+                    _logger?.LogInformation(
+                        "GpuUpscale: direct play disabled for {Width}x{Height} source so it can be enhanced",
+                        stream.Width,
+                        stream.Height);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "GpuUpscale: direct-play override failed; leaving Jellyfin's decision alone");
             }
         }
 

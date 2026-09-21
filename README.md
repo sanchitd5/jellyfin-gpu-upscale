@@ -146,6 +146,42 @@ Dashboard → Plugins → GPU Upscale. Defaults suit a single busy GPU:
 | `Encoder` | `hevc_nvenc` | falls back to the client's codec when unsupported |
 | `RequireClientOptIn` | true | off = enhance every eligible transcode |
 | `ForceTranscode` | false | turn a would-be stream copy into a real transcode |
+| `ForceTranscodeForDirectPlay` | false | see below — stops clients direct playing eligible material |
+
+### Enhancing direct play
+
+A direct-playing file has no transcode, so there is nothing to enhance. The injected client handles
+this for web viewers by disabling direct play on the PlaybackInfo *request* when a selection is made.
+Clients without the script (Android, TV, mobile) are unaffected and play unenhanced.
+
+`ForceTranscodeForDirectPlay` closes that gap server-side, via a Harmony **prefix** on
+`Jellyfin.Api.Helpers.MediaInfoHelper.SetDeviceSpecificData` that flips its `enableDirectPlay` /
+`enableDirectStream` parameters for eligible material, on every client.
+
+It defaults to **false**, and the cost is real: each such session becomes a GPU transcode subject to
+`MaxConcurrent`, and sessions past that limit fall back to stock transcoding — *more* expensive than
+the direct play they replaced. Eligibility reuses the engine's own arithmetic
+(`UpscaleEngine.WouldEnhanceSource`), so the override cannot force a transcode for material the
+engine would then decline to enhance.
+
+The target is resolved by name with `AccessTools.TypeByName`, so there is no compile-time reference
+to `Jellyfin.Api` and no version pin to a web-API assembly.
+
+### How patch failures degrade
+
+The five core `EncodingHelper` patches are **interdependent, not five independent features** — the
+filter chain only works because the hwaccel and decoder patches put frames where `hwupload` expects
+them. Installing a subset would emit ffmpeg command lines that fail outright, which is worse than
+leaving playback unenhanced. So they stay all-or-nothing: if any core method cannot be resolved,
+none are patched, Jellyfin is left alone, and the log **names the missing methods**.
+
+Optional patches (currently just the direct-play override) install separately, after the core set is
+live, each in its own try/catch. One failing degrades that feature alone:
+
+```
+active (5 EncodingHelper methods patched); optional: direct-play override
+active (5 EncodingHelper methods patched); optional UNAVAILABLE: MediaInfoHelper.SetDeviceSpecificData
+```
 
 ## How a viewer's choice reaches the server
 

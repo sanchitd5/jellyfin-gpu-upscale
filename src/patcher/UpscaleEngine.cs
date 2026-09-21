@@ -484,6 +484,44 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         }
 
         /// <summary>
+        /// Would an upscale actually apply to a source of this size, under the current settings?
+        ///
+        /// This is the same arithmetic <see cref="Decide"/> uses for the upscale target, factored
+        /// out so the direct-play override asks exactly the question the engine will later answer.
+        /// If the two ever disagreed, the override would force expensive transcodes for material
+        /// the engine then declined to enhance, which is the worst of both worlds.
+        /// </summary>
+        public static bool WouldEnhanceSource(int? width, int? height)
+        {
+            try
+            {
+                UpscaleSettings cfg = Settings;
+                if (cfg == null || !cfg.Enabled)
+                {
+                    return false;
+                }
+
+                if (width == null || height == null || width <= 0 || height <= 0)
+                {
+                    return false;
+                }
+
+                int sh = height.Value;
+                if (sh > cfg.MaxSourceHeight)
+                {
+                    return false;
+                }
+
+                int target = Math.Min(cfg.TargetHeight, cfg.MaxTargetHeight);
+                return target > sh * cfg.MinScaleFactor;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Is there capacity for another enhanced transcode right now. Counts live ffmpeg processes
         /// already running a libplacebo chain.
         /// </summary>

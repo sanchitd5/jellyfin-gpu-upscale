@@ -38,6 +38,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public bool ForceTranscode { get; set; }
 
         /// <summary>
+        /// Turn direct play off for anything this plugin would enhance, so a transcode exists for
+        /// the chain to run in. OFF by default: it is the difference between "enhance the sessions
+        /// that were transcoding anyway" and "transcode almost everything, on every client".
+        /// </summary>
+        public bool ForceTranscodeForDirectPlay { get; set; }
+
+        /// <summary>
         /// Only enhance when the session asks for it. With this off, every eligible transcode is
         /// enhanced to TargetHeight, which is what makes enhancement work without the player UI.
         /// </summary>
