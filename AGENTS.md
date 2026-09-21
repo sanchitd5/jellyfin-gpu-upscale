@@ -111,6 +111,17 @@ Objective metrics disagree with each other on this content, and each can be game
 - Always test at **1.5x as well as 2.0x**. Fixed-2x networks look fine at their native ratio and can
   measure *below plain scaling* off it. A benchmark at 2.0x only is how a shader that softens real
   content got recommended once already.
+- **These captures are VFR.** ffmpeg's `psnr`/`ssim` framesync pairs frames by PTS, so scoring a CFR
+  output against a VFR reference silently compares misaligned frames. It once reported a good model
+  at 16-24 dB and the number looked plausible enough to believe. Compute metrics by frame index.
+- **libplacebo shifts luma by about -9/255 on untagged clips**, which penalises every libplacebo
+  chain against a non-libplacebo reference. `-color_range pc` in, `tv` out; verify DC error is 0.
+- **Know which baseline belongs to which method.** If the low-res input was made with swscale, then
+  swscale upscaling is its near-inverse and wins PSNR by construction. Compare shaders against a
+  libplacebo baseline and neural models against a swscale one, and say so.
+- **Temporal artifacts need their own measurement.** Per-frame metrics cannot see flicker, crawl or
+  ghosting. Measure still-pixel variation across consecutive frames; a recurrent model can *increase*
+  it by carrying sensor noise forward.
 
 ## Things that have already gone wrong
 

@@ -314,7 +314,59 @@ upscalers reconstruct detail by accumulating sub-pixel samples that a renderer d
 and a camera sampled the same grid every frame. FSR4 additionally requires RDNA3/4 hardware, and the
 current SDK targets DX12 on Windows.
 
+**Temporal video super-resolution** (BasicVSR++, RealBasicVSR). These are the video-native answer to
+"use multiple frames": they estimate motion from the frames themselves and need no jitter, depth or
+renderer data. They were measured properly, and rejected on two independent grounds.
+
+*There is no quality headroom left.* Against a ground truth of untouched 720p frames, the deployed
+shader chain reconstructs **103%** of the reference's detail energy. BasicVSR++ reconstructs **102%**
+— a tie — while running **33x slower** (5.9 fps against 196 at a 1440p output on a 640x360 source).
+A generous 3x TensorRT win would still leave it under 1x realtime for a *single* session.
+
+*And the temporal behaviour was worse, not better.* Measuring still-pixel variation across frames,
+per-frame shaders sit at the same value as plain scaling — they add no crawl. BasicVSR++ raised it
+**27%**: its recurrent state carries sensor noise forward and re-injects it. RealBasicVSR failed
+outright on low-motion footage (PSNR 15.76 static against 32.64 moving, same model and settings),
+which is the documented divergence of recurrent VSR on long static sequences (MRVSR, CVPR 2022,
+arXiv:2112.08950). In the stills it appears as oil-paint craquelure that *moves while the face does
+not*.
+
+There is also no fast runtime path: **vs-mlrt ships no multi-frame VSR model at all** (its catalogue
+is entirely one-frame-in, one-frame-out), and the recurrent hidden state is what blocks ONNX export.
+
+**Generative super-resolution** (Real-ESRGAN family, and diffusion). GAN models are fast enough to
+consider — `realesr-animevideov3` reached 127 fps — but they restructure faces. At 4x zoom: skin
+airbrushed to flat porcelain with pore mottle and sensor noise erased, eyebrows redrawn as solid
+hard-edged shapes with the individual hairs gone, eyelids gaining a drawn outline that is not in the
+source. Recognisably the same person, but it reads as *an illustration of her* rather than *a
+photograph of her*. They measure 127-195% of ground-truth detail energy, which is invention rather
+than recovery, and they score worse on fidelity while doing it.
+
+That trade may be acceptable for stylised content. It is not acceptable if the footage is ever
+treated as a record of something: Real-ESRGAN is independently measured to reduce ArcFace identity
+similarity while improving perceptual metrics, and AI-enhanced video of this kind was excluded from a
+US criminal trial under a Frye hearing (*State of Washington v. Puloka*, 2024) for creating false
+detail.
+
+Diffusion is not a candidate at all. One-step distilled models (OSEDiff, AdcSR, TSD-SR) take
+0.08-0.15 s for a *512x512* output on an RTX 3090; 1080p is 7.9x the pixels with superlinear
+attention, so roughly 0.7-2.5 s per frame — 25-50x off realtime. Multi-step models (SUPIR, StableSR)
+take 10-100 s per 512x512 image and carry non-commercial licences.
+
 **Frame generation** was considered and dropped: this project is about upscaling.
+
+### If you want to re-open any of this
+
+Bring a temporal model with released weights, a working TensorRT path, **and** a measured >100 fps at
+640x360 on Ampere — or evidence that the deployed chain is leaving detail on the table, which the
+ground-truth-referenced measurement says it is not.
+
+Two measurement traps cost a full pass of this work, so they are worth repeating: these captures are
+**VFR**, and ffmpeg's `psnr`/`ssim` framesync pairs by PTS, so comparing a CFR model output against a
+VFR reference silently compares misaligned frames (it reported a good model at 16-24 dB). Compute
+metrics by frame index instead. And **libplacebo shifts luma by about -9/255 on untagged clips**,
+which quietly penalises every shader chain against a non-libplacebo reference; `-color_range pc` in,
+`tv` out fixes it.
 
 ## Limitations and risks
 
