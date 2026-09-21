@@ -1,0 +1,42 @@
+#!/bin/bash
+# Activates the staged GPU Upscale build. This is the only step that needs a Jellyfin restart:
+# the plugin assembly is loaded at startup and the patch assembly lives in the default assembly
+# load context, so neither can be swapped in a running server.
+#
+# Run this when a service restart is acceptable. It backs up the live assemblies first and can be
+# rolled back with --rollback.
+set -eu
+
+PLUGIN_DIR=/var/lib/jellyfin/plugins/GpuUpscale_1.0.0.0
+PATCH_DIR=/usr/lib/jellyfin-gpuupscale
+STAGE=$PATCH_DIR/staged
+BACKUP=$PATCH_DIR/previous
+
+if [ "${1:-}" = "--rollback" ]; then
+    [ -d "$BACKUP" ] || { echo "no backup to roll back to"; exit 1; }
+    cp -a "$BACKUP/Jellyfin.Plugin.GpuUpscale.dll" "$BACKUP/Jellyfin.Plugin.GpuUpscale.deps.json" "$PLUGIN_DIR/"
+    cp -a "$BACKUP/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$BACKUP/0Harmony.dll" "$PATCH_DIR/"
+    chown -R jellyfin:jellyfin "$PLUGIN_DIR"
+    systemctl restart jellyfin
+    echo "rolled back to the previous build"
+    exit 0
+fi
+
+[ -d "$STAGE" ] || { echo "nothing staged in $STAGE"; exit 1; }
+
+mkdir -p "$BACKUP"
+cp -a "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json" "$BACKUP/"
+cp -a "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$PATCH_DIR/0Harmony.dll" "$BACKUP/"
+
+cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.dll" "$STAGE/Jellyfin.Plugin.GpuUpscale.deps.json" "$PLUGIN_DIR/"
+cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$STAGE/0Harmony.dll" "$PATCH_DIR/"
+chown -R jellyfin:jellyfin "$PLUGIN_DIR"
+chmod 644 "$PATCH_DIR"/*.dll
+
+mkdir -p /var/cache/jellyfin/gpu-upscale-shaders
+chown jellyfin:jellyfin /var/cache/jellyfin/gpu-upscale-shaders
+
+echo "activating - restarting jellyfin (this cancels any running library scan)"
+systemctl restart jellyfin
+sleep 20
+journalctl -u jellyfin --since "-1 min" --no-pager | grep -i gpuupscale | tail -5

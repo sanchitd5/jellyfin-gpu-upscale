@@ -1,0 +1,17 @@
+# build output
+bin/
+obj/
+out/
+out-patcher/
+*.dll
+*.pdb
+*.nupkg
+
+# shaders fetched at install time (not redistributed)
+shaders/FSRCNNX_*.glsl
+shaders/FSRCNN_*.glsl
+shaders/Anime4K_*.glsl
+
+# local
+.DS_Store
+*.swp

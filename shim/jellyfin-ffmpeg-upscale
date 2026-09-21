@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""FFmpeg shim for Jellyfin: realtime GPU upscaling via libplacebo + FSRCNNX.
+
+Jellyfin never asks ffmpeg for more pixels than the source has, so upscaling has
+to be decided here. This shim inspects each transcode invocation, works out the
+resolution the client actually asked for, and when that is larger than the source
+it rewrites the command onto a Vulkan libplacebo chain running an FSRCNNX shader
+before handing it to the real ffmpeg.
+
+Target resolution is resolved in this order:
+  1. the constants in Jellyfin's own scale=min(...) expression, when present;
+  2. the requested video bitrate mapped through bitrate_targets, which is what
+     the client's quality selector actually controls;
+  3. default_target_height, when force_upscale is on.
+
+Fail-open by design: any parse surprise, probe failure or non-transcode call
+falls through to the real ffmpeg with the original argument list untouched.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+REAL_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+REAL_FFPROBE = "/usr/lib/jellyfin-ffmpeg/ffprobe"
+CONFIG_PATH = "/etc/jellyfin-upscale.json"
+LOG_PATH = "/var/log/jellyfin-upscale.log"
+SLOT_DIR = "/run/jellyfin-upscale"
+
+DEFAULTS = {
+    "enabled": True,
+    "shader": "/usr/share/jellyfin-shaders/FSRCNNX_x2_16-0-4-1.glsl",
+    "upscaler": "ewa_lanczos",
+    "encoder": "hevc_nvenc",
+    "min_scale_factor": 1.15,     # skip near-identity upscales
+    "max_target_height": 2160,
+    "max_source_height": 1440,    # never upscale sources above this
+    "max_concurrent": 2,          # beyond this, fall through to stock ffmpeg
+    "use_bitrate_target": True,
+    # [requested video bits/sec at least, target height] - the client's quality
+    # picker is a bitrate picker, so this is how its choice reaches us.
+    "bitrate_targets": [[20000000, 2160], [8000000, 1440], [4000000, 1080]],
+    "force_upscale": False,       # ignore the client and always aim at default_target_height
+    "default_target_height": 2160,
+    "log": True,
+    "log_args": False,
+}
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONFIG_PATH) as fh:
+            cfg.update(json.load(fh))
+    except Exception:
+        pass
+    return cfg
+
+
+def log(cfg, msg):
+    if not cfg.get("log"):
+        return
+    try:
+        with open(LOG_PATH, "a") as fh:
+            fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def passthrough(args):
+    os.execv(REAL_FFMPEG, [REAL_FFMPEG] + args)
+
+
+def input_path(args):
+    """Jellyfin passes -i file:/path; the protocol prefix has to come off."""
+    for i, a in enumerate(args):
+        if a == "-i" and i + 1 < len(args):
+            cand = args[i + 1]
+            if cand.startswith("file:"):
+                cand = cand[5:]
+            cand = cand.strip('"')
+            if os.path.exists(cand):
+                return cand
+    return None
+
+
+def probe_dimensions(path):
+    out = subprocess.run(
+        [REAL_FFPROBE, "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+        capture_output=True, text=True, timeout=20).stdout.strip()
+    w, h = out.split(",")[:2]
+    return int(w), int(h)
+
+
+# Jellyfin emits e.g. scale=trunc(min(max(iw\,ih*a)\,1920)/2)*2:trunc(...\,1080)...
+# The literal constants in those min() clauses are the client's requested maximums.
+MIN_CONST = re.compile(r"min\((?:[^()]|\([^()]*\))*?\\?,\s*(\d{3,5})\s*\)")
+BITRATE_OPTS = ("-b:v", "-maxrate", "-b:v:0", "-maxrate:v:0")
+
+
+def opt_value(args, names):
+    for i, a in enumerate(args):
+        if a in names and i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
+def parse_bitrate(val):
+    if not val:
+        return None
+    val = val.strip().lower()
+    mult = 1
+    if val.endswith("k"):
+        mult, val = 1000, val[:-1]
+    elif val.endswith("m"):
+        mult, val = 1000000, val[:-1]
+    try:
+        return int(float(val) * mult)
+    except ValueError:
+        return None
+
+
+def filter_index(args):
+    for name in ("-vf", "-filter:v", "-filter:v:0"):
+        if name in args:
+            return args.index(name)
+    return None
+
+
+def target_from_filter(args):
+    idx = filter_index(args)
+    if idx is None:
+        return None
+    consts = [int(c) for c in MIN_CONST.findall(args[idx + 1])]
+    if len(consts) < 2:
+        return None
+    return consts[0], consts[1]      # first min() caps width, second caps height
+
+
+def target_from_bitrate(cfg, args):
+    bps = parse_bitrate(opt_value(args, BITRATE_OPTS))
+    if bps is None:
+        return None
+    for floor, height in sorted(cfg["bitrate_targets"], key=lambda p: -p[0]):
+        if bps >= floor:
+            return height
+    return None
+
+
+def split_filters(vf):
+    """Split a filter chain on commas that separate nodes, not ones inside ()."""
+    nodes, depth, cur = [], 0, []
+    prev = ""
+    for ch in vf:
+        if ch == "(" and prev != "\\":
+            depth += 1
+        elif ch == ")" and prev != "\\":
+            depth -= 1
+        if ch == "," and depth == 0 and prev != "\\":
+            nodes.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        prev = ch
+    if cur:
+        nodes.append("".join(cur))
+    return [n for n in nodes if n.strip()]
+
+
+def build_chain(cfg, tw, th):
+    shader = cfg["shader"]
+    placebo = "libplacebo=w=%d:h=%d:upscaler=%s" % (tw, th, cfg["upscaler"])
+    if shader and os.path.exists(shader):
+        placebo += ":custom_shader_path=%s" % shader
+    return "format=yuv420p,hwupload,%s,hwdownload,format=yuv420p" % placebo
+
+
+def rewrite_args(cfg, args, chain):
+    """Strip decode-side hwaccel, force a real encoder, install our filter chain."""
+    drop_with_value = {"-hwaccel", "-hwaccel_output_format", "-hwaccel_device",
+                       "-init_hw_device", "-filter_hw_device"}
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in drop_with_value:
+            i += 2
+            continue
+        # A copy codec cannot be filtered; upscaling means encoding.
+        if re.fullmatch(r"-(c|codec)(:v(:\d+)?)?", a) and i + 1 < len(args) and args[i + 1] == "copy":
+            out.extend([a, cfg["encoder"]])
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+
+    idx = filter_index(out)
+    if idx is not None:
+        # Keep Jellyfin's own non-scaling filters (setparams colour tagging and
+        # friends); only its scaling/hwframe nodes are ours to replace.
+        keep = [n for n in split_filters(out[idx + 1])
+                if not re.match(r"(scale|hwupload|hwdownload|hwmap|format)\w*\s*(=|$)", n.strip())]
+        out[idx + 1] = ",".join(keep + [chain]) if keep else chain
+    else:
+        # No filter chain yet: attach one in the output-options section, which is
+        # everything after the last -i and before the output file (the last arg).
+        out = out[:-1] + ["-vf", chain] + out[-1:]
+
+    return ["-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk"] + out
+
+
+def take_slot(cfg):
+    """Cheap concurrency cap. Returns the slot path, or None when full."""
+    try:
+        os.makedirs(SLOT_DIR, exist_ok=True)
+        now = time.time()
+        live = 0
+        for name in os.listdir(SLOT_DIR):
+            p = os.path.join(SLOT_DIR, name)
+            try:
+                pid = int(name)
+                if os.path.exists("/proc/%d" % pid) and now - os.path.getmtime(p) < 86400:
+                    live += 1
+                else:
+                    os.unlink(p)
+            except Exception:
+                pass
+        if live >= int(cfg["max_concurrent"]):
+            return None
+        slot = os.path.join(SLOT_DIR, str(os.getpid()))
+        open(slot, "w").close()
+        return slot
+    except Exception:
+        return None
+
+
+def main():
+    args = sys.argv[1:]
+    cfg = load_config()
+
+    if cfg.get("log_args"):
+        log(cfg, "argv: %s" % " ".join(args))
+
+    if not cfg.get("enabled") or "-i" not in args:
+        passthrough(args)
+
+    # The Jellyfin plugin patches the transcode command itself when its Harmony
+    # patches are live; the shim must then keep its hands off, or both would
+    # rewrite the same command.
+    if cfg.get("plugin_patch_active"):
+        passthrough(args)
+
+    # Belt and braces: never touch a chain that already carries a libplacebo node.
+    _vfi = filter_index(args)
+    if _vfi is not None and "libplacebo" in args[_vfi + 1]:
+        passthrough(args)
+
+    src = input_path(args)
+    if not src:
+        passthrough(args)
+
+    target = target_from_filter(args)
+    if target:
+        tw, th = target
+    else:
+        th = None
+        if cfg.get("use_bitrate_target"):
+            th = target_from_bitrate(cfg, args)
+        if th is None and cfg.get("force_upscale"):
+            th = int(cfg["default_target_height"])
+        if th is None:
+            passthrough(args)
+        tw = 0                      # width follows from the source aspect ratio
+
+    th = min(int(th), int(cfg["max_target_height"]))
+
+    try:
+        sw, sh = probe_dimensions(src)
+    except Exception as exc:
+        log(cfg, "probe failed %s: %s" % (src, exc))
+        passthrough(args)
+
+    if sh > int(cfg["max_source_height"]):
+        passthrough(args)
+    if th <= sh * float(cfg["min_scale_factor"]):
+        passthrough(args)           # target at or near source: stock path handles it
+
+    # Preserve the source aspect ratio inside the requested box.
+    scaled_w = int(round(sw * (th / sh) / 2)) * 2
+    if tw and scaled_w > tw:
+        scaled_w = tw - (tw % 2)
+        th = int(round(sh * (scaled_w / sw) / 2)) * 2
+
+    slot = take_slot(cfg)
+    if slot is None:
+        log(cfg, "concurrency cap hit, passthrough %s" % src)
+        passthrough(args)
+
+    new_args = rewrite_args(cfg, args, build_chain(cfg, scaled_w, th))
+    if cfg.get("log_args"):
+        log(cfg, "rewritten: %s" % " ".join(new_args))
+    log(cfg, "upscale %dx%d -> %dx%d %s" % (sw, sh, scaled_w, th, src))
+
+    rc = 1
+    try:
+        proc = subprocess.Popen([REAL_FFMPEG] + new_args, stderr=subprocess.PIPE, text=True)
+        tail = []
+        errfh = open("/tmp/upscale-last.err", "w")
+        for line in proc.stderr:
+            sys.stderr.write(line)
+            errfh.write(line)
+            tail = (tail + [line.rstrip()])[-6:]
+        errfh.close()
+        rc = proc.wait()
+        if rc != 0:
+            log(cfg, "ffmpeg stderr: %s" % " | ".join(tail))
+    finally:
+        try:
+            os.unlink(slot)
+        except Exception:
+            pass
+
+    if rc != 0:
+        log(cfg, "upscale exited rc=%d, retrying stock chain" % rc)
+        passthrough(args)
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        log(load_config(), "shim error, passthrough: %s" % traceback.format_exc().replace("\n", " | "))
+        passthrough(sys.argv[1:])

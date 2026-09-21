@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>GPU Upscale</title>
+</head>
+<body>
+<div id="GpuUpscaleConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+     data-controller="__plugin/GpuUpscale/configPage.js">
+    <div data-role="content">
+        <div class="content-primary">
+            <form id="GpuUpscaleConfigForm">
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">GPU Upscale</h2>
+                    <p id="patchStatus" class="fieldDescription"></p>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="Enabled" />
+                        <span>Enable upscaling</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        When off, Jellyfin transcodes exactly as it normally would.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="TargetHeight" label="Target height (px)" min="240" max="4320" required />
+                    <div class="fieldDescription">Height to upscale to. Width follows the source aspect ratio.</div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MaxTargetHeight" label="Maximum target height (px)" min="240" max="4320" required />
+                    <div class="fieldDescription">Hard ceiling applied to the target height.</div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="SrLevel" label="Super-resolution shader (default)">
+                        <option value="off">Off - plain ewa_lanczos scaling</option>
+                        <option value="fsrcnnx">FSRCNNX - FSRCNNX x2 8-0-4-1</option>
+                        <option value="fsrcnnx-heavy">FSRCNNX heavy - FSRCNNX x2 16-0-4-1</option>
+                        <option value="anime4k-s">Anime4K S - Upscale CNN x2 (small)</option>
+                        <option value="anime4k-m">Anime4K M - Upscale CNN x2 (medium)</option>
+                    </select>
+                    <div class="fieldDescription">
+                        Used when a playback session does not pick its own shader. Two different networks
+                        are offered, not one quality ladder, because which looks right on this content is a
+                        matter for the eye rather than for a benchmark.
+                        <br /><br />
+                        <b>FSRCNNX is the default.</b> It is the light 8-weight, deliberately: the old
+                        "Standard" tier was the 16-weight, which measured LOWER real-footage detail at roughly
+                        double the GPU cost, so the 8-weight now carries the plain family name. FSRCNNX was the
+                        only shader that raised detail above plain scaling at BOTH scale ratios tested
+                        (2.0x and 1.5x) on real captures.
+                        <br /><br />
+                        <b>Anime4K M</b> is a generic 2x CNN upscaler despite the name - the anime-specific work
+                        in that family is in the Restore shaders, which are not installed. At its native 2.0x
+                        (540p to 1080p) it ties FSRCNNX. But at 1.5x (720p to 1080p) it fell BELOW plain
+                        ewa_lanczos on every source tested: off its native ratio it softens rather than
+                        reconstructs, and on skin it flattens texture into a slightly waxy look. Its weights
+                        were trained on animation. Try it and judge by eye - if your sources are mostly 540p it
+                        is a genuine alternative.
+                        <br /><br />
+                        A sixth level, <code>fsrcnnx-max</code> (FSRCNN_x2_r1_32-0-2), is installed and accepted
+                        by the API but not offered here: it measured no better again at about twice the cost.
+                        The old names <code>light</code>, <code>standard</code> and <code>max</code> are still
+                        accepted by the API and map onto this ladder.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="DeblurAllowed" />
+                        <span>Allow unblur (sharpening)</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn unblur on.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="DeblurLevel" label="Unblur level (default)">
+                        <option value="off">Off</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                    </select>
+                    <div class="fieldDescription">
+                        Contrast adaptive sharpening for soft, low-bitrate or out-of-focus sources. Keep this
+                        conservative: the super-resolution pass already sharpens, and over-sharpened camera
+                        footage looks worse.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="DenoiseAllowed" />
+                        <span>Allow denoise</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn denoise on.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="DenoiseLevel" label="Denoise (default)">
+                        <option value="off">Off</option>
+                        <option value="light">Light - hqdn3d</option>
+                        <option value="strong">Strong - nlmeans_vulkan</option>
+                    </select>
+                    <div class="fieldDescription">
+                        Runs before the upscale, so the network is not asked to reconstruct noise into detail.
+                        Off by default and deliberately so: it costs real throughput and no measurement can
+                        settle whether it helps, because every sharpness metric penalises denoising by
+                        construction. Measured cost at 1080p output: Light 163 fps (5.5x realtime),
+                        Strong 86 fps (2.9x realtime).
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="Deband" />
+                        <span>Deband</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        libplacebo debanding at threshold 3 with synthetic grain forced to 0 (libplacebo
+                        defaults grain to 6, which dithers fake grain over the picture and is wrong for this
+                        content). Measured within run-to-run variance of free. Low-bitrate camera h264 bands
+                        visibly in dark gradients, which is what this removes.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="Upscaler" label="Upscaler kernel" />
+                    <div class="fieldDescription">
+                        libplacebo scaling kernel used underneath the shaders. Default: ewa_lanczos.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MinScaleFactor" label="Minimum scale factor" step="0.01" min="1" max="8" required />
+                    <div class="fieldDescription">Skip unless the target height is at least this multiple of the source height.</div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MaxSourceHeight" label="Maximum source height (px)" min="240" max="4320" required />
+                    <div class="fieldDescription">Never upscale sources taller than this.</div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MaxConcurrent" label="Maximum concurrent upscales" min="0" max="16" required />
+                    <div class="fieldDescription">Past this many live upscaling transcodes, new sessions use the stock path.</div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="RequireClientOptIn" />
+                        <span>Only upscale when the viewer picks it in the quality menu</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        On: upscaling happens only for playback started from an "Upscaled ..." entry in the
+                        player's quality menu (the client asks for a maxHeight above the source). Off: every
+                        eligible transcode is upscaled to the target height above.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="ForceTranscode" />
+                        <span>Upscale direct streams too (force transcode)</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Turns a would-be video stream copy into a real transcode so it can be upscaled. Costs GPU time.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="Encoder" label="Encoder" />
+                    <div class="fieldDescription">
+                        The video encoder used for any transcode this plugin enhances, including one it forces
+                        out of a stream copy. Leave blank or set to <code>auto</code> to follow whatever codec
+                        the client negotiated. A named encoder (for example <code>hevc_nvenc</code> or
+                        <code>h264_nvenc</code>) is applied only when this ffmpeg build actually has it AND the
+                        playback session declared that codec playable; otherwise the negotiated codec is kept,
+                        because handing a client a codec it cannot decode is a black screen, not a worse
+                        picture. The Recent sessions table below reports which was used and why.
+                    </div>
+                </div>
+
+                <div>
+                    <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                        <span>Save</span>
+                    </button>
+                </div>
+            </form>
+
+            <div class="verticalSection">
+                <h2 class="sectionTitle">Recent sessions</h2>
+                <p class="fieldDescription">What the server actually did, as it went into the ffmpeg command.</p>
+                <table style="width:100%;text-align:left">
+                    <thead><tr><th>Time (UTC)</th><th>Source</th><th>Result</th><th>Encoder</th><th>Status</th></tr></thead>
+                    <tbody id="activityBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        (function () {
+            var pluginId = '6f2a9c31-4d7b-4e2a-9d15-8a1c0b7e3f44';
+            // Same mapping the server applies in ShaderLibrary, so the page shows the level that
+            // a legacy persisted name actually resolves to rather than an empty select.
+            var SR_ALIASES = { light: 'fsrcnnx', standard: 'fsrcnnx', max: 'fsrcnnx-max' };
+            function loadStatus(page) {
+                ApiClient.ajax({
+                    type: 'GET',
+                    url: ApiClient.getUrl('GpuUpscale/Status'),
+                    dataType: 'json'
+                }).then(function (s) {
+                    page.querySelector('#patchStatus').textContent =
+                        'Filter injection: ' + s.PatchStatus + '. FFmpeg shim: ' + s.ShimSync + '.';
+                    var rows = (s.Sessions || []).map(function (a) {
+                        return '<tr><td>' + a.Timestamp + '</td><td>' + (a.Source || '') + '</td><td>' +
+                            (a.Summary || '') + '</td><td title="' + (a.EncoderReason || '') + '">' +
+                            (a.Encoder || '') + '</td><td>' + (a.Status || '') + '</td></tr>';
+                    }).join('');
+                    page.querySelector('#activityBody').innerHTML = rows ||
+                        '<tr><td colspan="5">No sessions since the server started.</td></tr>';
+                }, function () {
+                    page.querySelector('#patchStatus').textContent = 'Status unavailable.';
+                });
+            }
+
+            document.querySelector('#GpuUpscaleConfigPage').addEventListener('pageshow', function () {
+                var page = this;
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    page.querySelector('#Enabled').checked = config.Enabled;
+                    page.querySelector('#TargetHeight').value = config.TargetHeight;
+                    page.querySelector('#MaxTargetHeight').value = config.MaxTargetHeight;
+                    // The select only lists the real level names. A persisted legacy name
+                    // (light / standard / max) would otherwise leave the control blank and then
+                    // save that blank back over a good setting, so map it the same way the server
+                    // does before assigning.
+                    page.querySelector('#SrLevel').value = SR_ALIASES[config.SrLevel] || config.SrLevel || 'anime4k-m';
+                    page.querySelector('#DeblurLevel').value = config.DeblurLevel || 'off';
+                    page.querySelector('#DeblurAllowed').checked = config.DeblurAllowed !== false;
+                    page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
+                    page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
+                    page.querySelector('#Deband').checked = config.Deband !== false;
+                    page.querySelector('#Upscaler').value = config.Upscaler;
+                    page.querySelector('#MinScaleFactor').value = config.MinScaleFactor;
+                    page.querySelector('#MaxSourceHeight').value = config.MaxSourceHeight;
+                    page.querySelector('#MaxConcurrent').value = config.MaxConcurrent;
+                    page.querySelector('#RequireClientOptIn').checked = config.RequireClientOptIn;
+                    page.querySelector('#ForceTranscode').checked = config.ForceTranscode;
+                    page.querySelector('#Encoder').value = config.Encoder;
+                    Dashboard.hideLoadingMsg();
+                });
+                loadStatus(page);
+            });
+
+            document.querySelector('#GpuUpscaleConfigForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                var page = document.querySelector('#GpuUpscaleConfigPage');
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    config.Enabled = page.querySelector('#Enabled').checked;
+                    config.TargetHeight = parseInt(page.querySelector('#TargetHeight').value, 10);
+                    config.MaxTargetHeight = parseInt(page.querySelector('#MaxTargetHeight').value, 10);
+                    // fsrcnnx-max is a real level but is not offered in the select. If the config
+                    // holds it, the select reads back empty - do not let that overwrite it.
+                    var srPicked = page.querySelector('#SrLevel').value;
+                    if (srPicked) { config.SrLevel = srPicked; }
+                    config.DeblurLevel = page.querySelector('#DeblurLevel').value;
+                    config.DeblurAllowed = page.querySelector('#DeblurAllowed').checked;
+                    config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
+                    config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
+                    config.Deband = page.querySelector('#Deband').checked;
+                    config.Upscaler = page.querySelector('#Upscaler').value;
+                    config.MinScaleFactor = parseFloat(page.querySelector('#MinScaleFactor').value);
+                    config.MaxSourceHeight = parseInt(page.querySelector('#MaxSourceHeight').value, 10);
+                    config.MaxConcurrent = parseInt(page.querySelector('#MaxConcurrent').value, 10);
+                    config.RequireClientOptIn = page.querySelector('#RequireClientOptIn').checked;
+                    config.ForceTranscode = page.querySelector('#ForceTranscode').checked;
+                    config.Encoder = page.querySelector('#Encoder').value;
+                    ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                        loadStatus(page);
+                    });
+                });
+                return false;
+            });
+        })();
+    </script>
+</div>
+</body>
+</html>
