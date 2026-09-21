@@ -1,9 +1,14 @@
 # GPU Upscale for Jellyfin
 
-Realtime GPU super-resolution, sharpening and denoising for Jellyfin transcodes, using libplacebo
-GLSL user shaders on Vulkan. A viewer picks a quality level from the player's **Enhance** menu and
-the stream is upscaled on the fly — a 540p capture served at 1080p, reconstructed rather than
-stretched.
+Realtime GPU super-resolution, sharpening and denoising for Jellyfin transcodes. A viewer picks a
+quality level from the player's **Enhance** panel and the stream is upscaled on the fly: a 540p
+capture served at 1080p, reconstructed rather than stretched.
+
+Two engines sit behind that panel. **libplacebo GLSL user shaders on Vulkan** carry the super
+resolution, sharpening, refine and chroma passes. **Five custom ffmpeg video filters**, in a
+separately built binary beside the stock one, carry Intel Open Image Denoise, NVIDIA OptiX, ONNX
+neural models, FSR2 and DLSS/DLAA. Thirteen axes are exposed, all composable, all live-switchable
+mid-playback.
 
 Built and measured against Jellyfin **12.1.0** with an NVIDIA RTX 3090.
 
@@ -28,7 +33,7 @@ plainly rather than showing a quality badge that is a lie.
 
 **Using it** — [Requirements](#requirements) · [Install](#install) · [The player menu](#the-player-menu) · [Off means direct play](#off-means-direct-play)
 
-**What it does** — [Super-resolution levels](#super-resolution-levels) · [The non-2x ratio problem](#the-non-2x-ratio-problem) · [Sharpening: RCAS](#sharpening-rcas) · [Denoise](#denoise) · [Intel Open Image Denoise (denoise=oidn)](#intel-open-image-denoise-denoiseoidn) · [NVIDIA OptiX (denoise=optix, denoise=optix-temporal)](#nvidia-optix-denoiseoptix-denoiseoptix-temporal)
+**What it does** — [Super-resolution levels](#super-resolution-levels) · [The non-2x ratio problem](#the-non-2x-ratio-problem) · [Two more axes: refine and chroma](#two-more-axes-refine-and-chroma) · [Neural models (neural=)](#neural-models-neural) · [Game temporal upscalers (game=)](#game-temporal-upscalers-game) · [Sharpening: RCAS](#sharpening-rcas) · [Denoise](#denoise) · [Intel Open Image Denoise (denoise=oidn)](#intel-open-image-denoise-denoiseoidn) · [NVIDIA OptiX (denoise=optix, denoise=optix-temporal)](#nvidia-optix-denoiseoptix-denoiseoptix-temporal)
 
 **Running it** — [Configuration](#configuration) · [Honest reporting](#honest-reporting) · [Measured throughput](#measured-throughput)
 
@@ -43,18 +48,38 @@ plainly rather than showing a quality badge that is a lie.
 - `jellyfin-ffmpeg` built with **libplacebo + vulkan + libshaderc** (`jellyfin-ffmpeg8` is)
 - .NET SDK matching the server's runtime, to build
 
-There is **no ONNX/OpenVINO/TensorFlow** requirement — and deliberately no dependency on them.
-ffmpeg's `sr`/`dnn_processing` filters are not used; everything is GLSL through libplacebo.
+That is the whole requirement for the shader axes: `upscale`, `sr`, `deblur`, `refine`, `chroma`,
+`deband`, `kernel` and the `nlmeans_vulkan`/`hqdn3d` denoise levels all run on the stock
+`jellyfin-ffmpeg`. ffmpeg's own `sr`/`dnn_processing` filters are not used for any of them.
+
+The remaining axes need the **patched binary** from
+[`scripts/build-ffmpeg.sh`](scripts/build-ffmpeg.sh), which is optional and installed alongside the
+stock one rather than over it:
+
+| Axis | Needs | Extra dependency |
+|---|---|---|
+| `denoise=oidn` | `vf_oidn` | Intel Open Image Denoise runtime (fetched by the build script) |
+| `denoise=optix*` | `vf_optix` | OptiX + Optical Flow SDK **headers** at build time; both libraries are `dlopen`ed from the display driver at runtime, so no CUDA toolkit is needed |
+| `neural=` | `vf_ort` | ONNX Runtime with the CUDA execution provider, plus model weights you export yourself |
+| `game=` | `vf_fsr2`, `vf_dlss` | FidelityFX FSR2 sources, NVIDIA NGX SDK, and a depth model for `depth=model` |
+
+**Without that binary nothing breaks.** The server asks it which filters it carries and strips the
+chain nodes it lacks, so an unavailable level is simply not offered and an already-saved one falls
+back to plain scaling rather than failing the session.
 
 ## Install
 
 **Full step-by-step guide, including environment checks and troubleshooting: [INSTALL.md](INSTALL.md).**
 
-The custom filters (`oidn`, `optix`) need a patched FFmpeg, which
+The five custom filters (`oidn`, `optix`, `ort`, `fsr2`, `dlss`) need a patched FFmpeg, which
 [`scripts/build-ffmpeg.sh`](scripts/build-ffmpeg.sh) builds in one command. **No binary is
 distributed, deliberately**: the build is `--enable-gpl --enable-libx264` so it is GPLv2+, and it
 links Apache-2.0 code, which GPLv2 is not compatible with. Building it for yourself carries no such
-obligation; publishing it would. The OptiX path additionally sits under NVIDIA's EULA.
+obligation; publishing it would. The OptiX, NGX and FSR2 paths additionally sit under their vendors'
+own licences, and none of those sources are vendored here.
+
+It is a long build and an entirely optional one. Skip it to start, install the plugin, and add the
+binary later; the panel gains the extra levels the next time it reads the probe.
 
 The short version:
 
@@ -616,12 +641,33 @@ Sharpening is **RCAS**, derived from AMD FidelityFX FSR v1.0.2. It hooks `LUMA`,
 super-resolution shader's output size rather than at the final output size — at a 4K target that is
 a quarter of the pixels, which is why it costs roughly 1% where a `MAIN`-hooked sharpener costs 12%.
 
+**The custom filters sit outside libplacebo**, as ordinary ffmpeg filter nodes. `oidn`, `optix` and
+`ort` run CPU-side before `hwupload`, which is why they compose with an `sr` shader rather than
+replacing one; `fsr2` and `dlss` produce the target size themselves, so the server drops the SR
+shader and the refine pass for those two. Whenever any of them is in the chain, the shim runs the
+session on the patched binary instead of the stock one, having first asked that binary which filters
+it carries and dropped the nodes it does not.
+
 ## How a viewer's choice reaches the server
 
 Jellyfin's `ParseStreamOptions` copies **every lowercase-initial query parameter** into the request's
 `StreamOptions` dictionary, readable server-side via `GetOption(...)`. Nothing clamps or rewrites it.
-The injected client therefore appends
-`&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=light&deband=on&kernel=ewa_lanczos`.
+The injected client therefore appends the thirteen axes as plain query parameters:
+`&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=oidn&neural=off&game=off&refine=ssimsuperres`
+`&chroma=krigbilateral&deband=on&kernel=ewa_lanczos&jitter=measured&depth=model&reactive=flow`.
+
+Server-side each one is read by `UpscaleEngine.Option(state, ...)`, and **that read is what makes an
+axis real**. A parameter nothing reads travels the whole way and changes nothing, which is exactly
+how a missing `neural=` went unnoticed for two sessions. `journalctl -u jellyfin | grep libplacebo`
+prints the built command and settles it in one line.
+
+**Changing an option mid-playback applies without leaving the video.** The panel rewrites the
+preference, then asks the player to rebuild its stream, so a selection takes effect on the next
+segment rather than at the next play. The player is located by the *shape* of a module export
+(`setMaxStreamingBitrate` plus `getMaxStreamingBitrate` plus `currentItem`) rather than by name,
+because `window.playbackManager` does not exist in this build and the obvious approach silently
+never ran. The same handle drives the panel's auto-close when playback stops, and a fresh play
+resets the axes to the server's defaults rather than inheriting the last session's.
 
 A requested *bitrate* would not survive — Jellyfin clamps it to the source bitrate before
 `EncodingHelper` sees it — which is why an earlier sentinel-bitrate approach was abandoned.
@@ -646,8 +692,16 @@ that break the patches. It stands down automatically while the plugin's patches 
 - **A `jellyfin-web` package upgrade replaces `index.html` and deletes the injected script**, so the
   Enhance menu silently disappears. `scripts/99-jellyfin-gpuupscale` re-applies it after dpkg runs.
 - **The client hooks depend on minified bundle internals** (the `webpackChunk` global, the module
-  exporting `getVideoQualityOptions`). Modules are matched on export shape rather than by id, but a
-  web rebuild can still break the menu. It fails safe: normal playback and menus are unaffected.
+  exporting `getVideoQualityOptions`, the player module's method shape). Modules are matched on
+  export shape rather than by id, but a web rebuild can still break the menu. It fails safe: normal
+  playback and menus are unaffected.
+- **A silent client-side failure looks like a server bug.** If a selection never reaches the request,
+  the server applies its dashboard default and reports honestly on *that*, so the panel and the
+  session row disagree while both are telling the truth. Check the built ffmpeg command first.
+- **The patched ffmpeg binary degrades quietly by design.** Delete it, or rebuild it without one of
+  the five filters, and the affected levels stop being offered while everything else keeps working.
+  That is the right failure mode for viewers and the wrong one for whoever did the rebuild: verify
+  with `-filters`.
 - **Subtitle burn-in is never enhanced** — those jobs build a `-filter_complex` graph and are skipped.
 - **Clients without the injected script** (Android, TV, mobile) direct-play and are never enhanced.
 - **The concurrency cap is advisory** — it counts live ffmpeg processes carrying `libplacebo` at

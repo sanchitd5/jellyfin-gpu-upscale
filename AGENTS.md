@@ -6,21 +6,29 @@ a test. Read the invariants before changing anything.
 
 ## What this is
 
-A Jellyfin plugin that injects a libplacebo/Vulkan filter chain into transcodes for realtime
-super-resolution, sharpening and denoising. It works by runtime-patching Jellyfin with Harmony,
-because Jellyfin exposes no plugin hook for the video filter graph.
+A Jellyfin plugin that injects a filter chain into transcodes for realtime super-resolution,
+sharpening and denoising. It works by runtime-patching Jellyfin with Harmony, because Jellyfin
+exposes no plugin hook for the video filter graph.
+
+It started as libplacebo GLSL user shaders alone. It is now two things: those shaders, plus **five
+custom ffmpeg video filters** carried by a separately built binary beside the stock one. Both halves
+reach the same command line and compose, so a change in one can silently alter the other.
 
 Layout:
 
 ```
 src/                    plugin assembly (loads into Jellyfin's collectible ALC)
-src/patcher/            patcher assembly (loads into the DEFAULT ALC — this is where Harmony lives)
+src/patcher/            patcher assembly (loads into the DEFAULT ALC, this is where Harmony lives)
 src/Configuration/      settings class + the dashboard page
-web/gpu-upscale.js      injected browser script: Enhance menu + request marking
+web/gpu-upscale.js      injected browser script: the Enhance panel + request marking
+ffmpeg/vf_*.c           the five custom filters, plus their build patches and gen_perm.py
 shim/                   standalone ffmpeg wrapper, the no-Harmony fallback
 shaders/                CAS shaders (ours, superseded) + the RCAS derivation script
-scripts/                install, inject, activate/rollback
+scripts/                install, inject, activate/rollback, build-ffmpeg.sh
 ```
+
+Per-filter background lives in [OIDN.md](OIDN.md), [OPTIX.md](OPTIX.md), [NEURAL.md](NEURAL.md),
+[FSR2.md](FSR2.md) and [DLSS.md](DLSS.md); deployment in [INSTALL.md](INSTALL.md).
 
 ## Invariants — do not break these
 
@@ -49,6 +57,13 @@ reverted on the next inject *while the cache-buster still advances*, so browsers
 under a new URL. This has already caused one "all the options vanished" incident. Edit the canonical
 copy, then run the injector.
 
+Inside that script, **find things by shape, never by name.** `window.playbackManager` does not exist
+in jellyfin-web 12.1; the only file in the entire web tree naming it was this script's own code. The
+panel's live re-apply and its auto-close on playback stop both silently never ran for a whole session
+because of it. Locate the player as an export carrying the methods you need (`setMaxStreamingBitrate`
+plus `getMaxStreamingBitrate` plus `currentItem`) inside the modules the script already wraps. Shapes
+survive minification and module renumbering; names and ids do not.
+
 **6. Per-session options travel as lowercase query parameters.**
 Jellyfin's `ParseStreamOptions` copies every lowercase-initial query param into `StreamOptions`,
 readable with `GetOption(...)`, and nothing clamps them. A *bitrate* would not survive — Jellyfin
@@ -71,7 +86,23 @@ hook points decide and file order is irrelevant. This is why Anime4K + RCAS shar
 enlarging regardless of how the file is composed — that pairing was measured and kept because it
 still beat CAS-after, but the reasoning must be checked, not assumed, whenever a shader is added.
 
-**10. RCAS sharpness is inverted and clamped.** `0.0` is maximum, larger is gentler, and the shader
+**10. The patched ffmpeg binary is separate, and all five filters must survive a rebuild.**
+`vf_oidn`, `vf_optix`, `vf_ort`, `vf_fsr2` and `vf_dlss` live in a binary beside the stock
+`jellyfin-ffmpeg`, which is never modified. The shim routes a session there only when it asks for a
+filter that binary alone provides, and it asks the binary which filters it actually carries, stripping
+chain nodes it lacks. So a rebuild that quietly drops a `vf_*.c` degrades to unenhanced playback
+rather than failing every session, which means **nothing will tell you it happened**. Check `-filters`
+after every rebuild. Rollback copies sit beside the binary.
+
+**11. An axis is only real when `UpscaleEngine.Option(state, ...)` reads it.**
+Thirteen parameters reach the command today: `upscale`, `sr`, `deblur`, `denoise`, `neural`, `game`,
+`refine`, `chroma`, `deband`, `kernel`, `jitter`, `depth`, `reactive`. A control that renders, stores
+a preference and sends a parameter nothing reads is dead UI that reports success. Do not ship one.
+The client is data-driven on purpose: a new level is one entry in an options array, a new axis is one
+`CONTROLS` entry plus one `LIVE_ROWS` line, and display names come from the probe rather than from
+JavaScript. Adding the server side is the part that is easy to forget.
+
+**12. RCAS sharpness is inverted and clamped.** `0.0` is maximum, larger is gentler, and the shader
 hard-clamps to `[0, 2]` — a value above 2.0 silently does nothing. Any viewer-facing "low/medium/
 high" must map through that inversion or the labels lie.
 
@@ -89,6 +120,17 @@ can resolve by name and have changed meaning; no log line will reveal that.
 
 Always test the **negative** cases too: with the feature off, output must take the stock path
 untouched. Several real bugs here only appeared as "the fix works but so does the no-op".
+
+**When a viewer-facing option "does not work", prove the whole chain before theorising.** The
+recurring bug in this project is something that renders, is stored, and is never sent:
+
+```
+panel selection -> localStorage -> addParams writes the param -> param in TranscodingUrl
+  -> server Option() reads it -> the BUILT FFMPEG COMMAND changes -> session record reports it
+```
+
+`journalctl -u jellyfin | grep libplacebo` prints the built command. That is the entire audit and it
+needs no harness. Check the reverse as well: an axis set to off must **not** appear in the command.
 
 When testing the browser script, drive the **real served files** rather than a simulation. A headless
 harness that mocks the webpack chunk loader will happily validate your assumptions instead of
@@ -127,6 +169,12 @@ Objective metrics disagree with each other on this content, and each can be game
 
 - **Wrong webpack global.** This build uses the bare `webpackChunk`, not `webpackChunkjellyfin_web`.
   The hook attached to a global nobody used, threw no error, and silently did nothing.
+- **An axis that was never sent.** `addParams` wrote eight axes and omitted `neural`. Every neural
+  level a viewer picked did nothing, silently, for two sessions. Nothing threw, nothing logged, and
+  the server reported honestly on the level it actually received.
+- **A global that does not exist.** `window.playbackManager` is not a thing in jellyfin-web 12.1, so
+  every mid-playback selection stayed in the browser and the server fell back to its dashboard
+  default. It presented as three unrelated bugs, and was one.
 - **Marking the wrong side of PlaybackInfo.** A direct-play response contains no `TranscodingUrl` to
   mark, and clearing `SupportsDirectPlay` on the response leaves the player with no fallback. Direct
   play must be disabled on the *request*.
@@ -154,6 +202,11 @@ This runs on live servers, often sharing a GPU with other workloads.
   playback. Stop your own sessions by id.
 - Changing `MaxConcurrent`, `RequireClientOptIn` or `ForceTranscodeForDirectPlay` changes GPU load
   for every viewer, not just yours.
+
+**Prefer shipping to proving.** Benchmarking has repeatedly been cut here in favour of working
+features, and rightly: an unverified feature that ships beats a measured harness that does not.
+Correctness checks still earn their place, because they are what tells you a feature runs at all.
+Measurement is for deciding between options, not for gating delivery.
 
 ## Shaders and licensing
 
