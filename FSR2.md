@@ -19,7 +19,7 @@ resize comes from the renderer handing it four things a camera never records:
 | reactive mask | authored per material | **forward/backward flow inconsistency** |
 
 Three of those are approximations. The fourth is fatal, and it was measured here rather than
-argued (`the jitter measurements (see What was tried and rejected in the README)`):
+argued (`the jitter measurements (see the README)`):
 
 * `jitterOffset` in FSR2 is a **single global `float2` per frame**. There is no per-pixel,
   per-tile or texture-based jitter input anywhere in the API, because a renderer never needs one.

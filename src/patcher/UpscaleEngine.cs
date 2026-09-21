@@ -89,6 +89,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         public string GameLevel { get; set; }
 
+        /// <summary>The jitter source the game upscaler actually ran with, or null when it did not run.</summary>
+        public string GameJitter { get; set; }
+
+        /// <summary>The depth source the game upscaler actually ran with, or null.</summary>
+        public string GameDepth { get; set; }
+
+        /// <summary>The reactive-mask source the game upscaler actually ran with, or null.</summary>
+        public string GameReactive { get; set; }
+
+        /// <summary>
+        /// True when a depth source other than flat was asked for and the weights are not on this
+        /// server, so flat is what ran. The filter's other fallback - no CUDA execution provider -
+        /// happens inside ffmpeg and is not visible here, so this is not the whole story and does
+        /// not claim to be.
+        /// </summary>
+        public bool GameDepthDowngraded { get; set; }
+
         /// <summary>The video encoder that went into the command, when this plugin chose it.</summary>
         public string Encoder { get; set; }
 
@@ -199,6 +216,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             public bool NeuralApplied { get; set; }
 
             public bool GameApplied { get; set; }
+
+            /// <summary>The resolved jitter / depth / reactive the game filter node was built with.</summary>
+            public string GameJitter { get; set; }
+
+            public string GameDepth { get; set; }
+
+            public string GameReactive { get; set; }
+
+            /// <summary>Depth fell back to flat because the weights are not installed.</summary>
+            public bool GameDepthDowngraded { get; set; }
 
             public string ShaderPath { get; set; }
 
@@ -316,6 +343,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 DenoiseLevel = plan.Act && plan.DenoiseApplied ? plan.DenoiseLevel : "off",
                 NeuralLevel = plan.Act && plan.NeuralApplied ? plan.NeuralLevel : "off",
                 GameLevel = plan.Act && plan.GameApplied ? plan.GameLevel : "off",
+                GameJitter = plan.Act && plan.GameApplied ? plan.GameJitter : null,
+                GameDepth = plan.Act && plan.GameApplied ? plan.GameDepth : null,
+                GameReactive = plan.Act && plan.GameApplied ? plan.GameReactive : null,
+                GameDepthDowngraded = plan.Act && plan.GameApplied && plan.GameDepthDowngraded,
                 Status = status,
                 Reason = reason,
             };
@@ -455,7 +486,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 // The degraded wording is not optional and is not softened. A viewer reading
                 // this report must not believe they are getting what a game gets.
-                parts.Add("Game upscaler " + r.GameLevel + " (" + ShaderLibrary.GameLabel(r.GameLevel) + ")");
+                parts.Add("Game upscaler " + r.GameLevel + " (" + ShaderLibrary.GameLabel(r.GameLevel)
+                    + "; jitter " + (r.GameJitter ?? "?")
+                    + ", depth " + (r.GameDepth ?? "?")
+                    + (r.GameDepthDowngraded ? " - the depth weights are not installed, so flat is what ran" : string.Empty)
+                    + ", reactive " + (r.GameReactive ?? "?") + ")");
             }
 
             if (r.UpscaleApplied)
@@ -758,10 +793,31 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     gameLevel = ShaderLibrary.IsGameLevel(cfg.GameLevel) ? cfg.GameLevel : "off";
                 }
 
+                // jitter / depth / reactive are per-session on exactly the same carrier as the
+                // ten axes above: lowercase query options off the streaming request. Each falls
+                // back to the dashboard setting and then to the built-in default inside
+                // GameFilter, which is also where an unrecognised value is rejected. They are read
+                // unconditionally and are inert by construction: with game=off no filter node is
+                // built, so nothing carries them.
                 plan.GameFilter = ShaderLibrary.GameFilter(
-                    gameLevel, plan.Width, plan.Height, cfg, out string gameUsed);
+                    gameLevel,
+                    plan.Width,
+                    plan.Height,
+                    cfg,
+                    Option(state, "jitter"),
+                    Option(state, "depth"),
+                    Option(state, "reactive"),
+                    out string gameUsed,
+                    out string gameJitter,
+                    out string gameDepth,
+                    out string gameReactive,
+                    out bool gameDepthDowngraded);
                 plan.GameLevel = gameUsed;
                 plan.GameApplied = plan.GameFilter != null;
+                plan.GameJitter = gameJitter;
+                plan.GameDepth = gameDepth;
+                plan.GameReactive = gameReactive;
+                plan.GameDepthDowngraded = gameDepthDowngraded;
 
                 // fsr2 and dlss produce the OUTPUT size themselves. Running an SR network as
                 // well would enlarge the already-enlarged picture and let libplacebo shrink it

@@ -66,6 +66,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return map;
         }
 
+        /// <summary>The server's own wording for one option axis, keyed by value.</summary>
+        private static Dictionary<string, string> OptionLabels(string axis, string[] values)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string v in values)
+            {
+                map[v] = ShaderLibrary.GameOptionLabel(axis, v);
+            }
+
+            return map;
+        }
+
         private static Dictionary<string, object> Levels()
         {
             var cfg = UpscaleEngine.Settings;
@@ -85,6 +97,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // this plugin, so they are listed only where one was installed.
                 ["Game"] = ShaderLibrary.AvailableGameLevels(),
                 ["GameLabels"] = GameLabels(),
+
+                // The three synthesised-input options of those upscalers, their allowed values and
+                // their wording, plus the levels they act on. Served rather than baked into the
+                // script for the same reason the levels are: one place defines them, and a panel
+                // row is shown only where it does something.
+                ["GameJitter"] = new List<string>(ShaderLibrary.GameJitterValues),
+                ["GameDepth"] = new List<string>(ShaderLibrary.GameDepthValues),
+                ["GameReactive"] = new List<string>(ShaderLibrary.GameReactiveValues),
+                ["GameJitterLabels"] = OptionLabels("jitter", ShaderLibrary.GameJitterValues),
+                ["GameDepthLabels"] = OptionLabels("depth", ShaderLibrary.GameDepthValues),
+                ["GameReactiveLabels"] = OptionLabels("reactive", ShaderLibrary.GameReactiveValues),
+                ["GameOptionLevels"] = ShaderLibrary.GameOptionLevels(),
 
                 // Two axes of their own, not extra rungs of the SR list: the refinement pass
                 // hooks POSTKERNEL and the chroma pass hooks CHROMA, so each composes with
@@ -158,6 +182,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["NeuralLevel"] = record.NeuralLevel ?? "off",
                 ["GameLevel"] = record.GameLevel ?? "off",
                 ["GameApplied"] = record.GameApplied,
+                ["GameJitter"] = record.GameJitter,
+                ["GameDepth"] = record.GameDepth,
+                ["GameReactive"] = record.GameReactive,
+                ["GameDepthDowngraded"] = record.GameDepthDowngraded,
                 ["DebandApplied"] = record.DebandApplied,
                 ["SrLevel"] = record.SrLevel ?? "off",
                 ["RefineLevel"] = record.RefineLevel ?? "off",

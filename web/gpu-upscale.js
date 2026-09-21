@@ -143,6 +143,34 @@
             options: [{ id: 'off', name: 'Off' }]
         },
         {
+            // THE THREE SYNTHESISED INPUTS of the game upscalers, and the only controls here that
+            // are not always shown. They change nothing unless a game upscaler is running, so
+            // `showWhen` hides them unless the chosen game level is one the SERVER says they act
+            // on (`GameOptionLevels` from the probe - today fsr2, dlss and dlaa, since dlaa is the
+            // same filter and is handed the same depth, jitter and mask). A row that can do
+            // nothing is not shown, which is why these waited for the server to read them.
+            //
+            // Values and wording come whole from the probe, like the game levels themselves.
+            // 'default' is this script's own neutral id: it sends nothing, so the dashboard value
+            // applies, exactly as it does on Refine, Chroma and Debanding.
+            key: 'jitter', label: 'Game upscaler: jitter source', fallback: 'default', group: 'Detail',
+            probeKey: 'GameJitter', labelsKey: 'GameJitterLabels', fromProbe: true,
+            showWhen: { key: 'game', levelsKey: 'GameOptionLevels' },
+            options: [{ id: 'default', name: 'Server default' }]
+        },
+        {
+            key: 'depth', label: 'Game upscaler: depth source', fallback: 'default', group: 'Detail',
+            probeKey: 'GameDepth', labelsKey: 'GameDepthLabels', fromProbe: true,
+            showWhen: { key: 'game', levelsKey: 'GameOptionLevels' },
+            options: [{ id: 'default', name: 'Server default' }]
+        },
+        {
+            key: 'reactive', label: 'Game upscaler: reactive mask', fallback: 'default', group: 'Detail',
+            probeKey: 'GameReactive', labelsKey: 'GameReactiveLabels', fromProbe: true,
+            showWhen: { key: 'game', levelsKey: 'GameOptionLevels' },
+            options: [{ id: 'default', name: 'Server default' }]
+        },
+        {
             // Two different networks, not one quality ladder. The name says which family and
             // which weight, so the viewer can tell them apart rather than trusting an opaque
             // "Light / Standard / Max" that hid a family swap.
@@ -222,9 +250,13 @@
     // not come back to a control showing a level that is no longer in its own option list.
     var SR_ALIASES = { light: 'fsrcnnx', standard: 'fsrcnnx', max: 'fsrcnnx-max' };
 
+    /* The axes that only act while a game upscaler is running. Named once, used by addParams. */
+    var GAME_OPTION_KEYS = ['jitter', 'depth', 'reactive'];
+
     var DEFAULT_PREFS = {
         upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
-        deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
+        deband: 'default', kernel: 'default', refine: 'default', chroma: 'default',
+        jitter: 'default', depth: 'default', reactive: 'default'
     };
 
     /*
@@ -305,7 +337,7 @@
     var COSTS = { neural: NEURAL_COST, game: GAME_COST };
 
     var state = {
-        version: 13,
+        version: 16,
         installed: false,
         globals: [],
         chunks: 0,
@@ -315,6 +347,18 @@
         marked: [],
         playSessionId: null,
         lastServerState: null,
+        // Where the viewer dragged the panel to, as viewport pixels, or null for the built-in
+        // corner. Persisted with the other preferences; always re-clamped before it is used.
+        panelPos: null,
+        // The in-flight drag, and the "applying..." text while a change is being re-negotiated.
+        drag: null,
+        // The media source the last PlaybackInfo described, so a NEW item can be told from a
+        // re-negotiation of the one already playing.
+        lastSourceId: null,
+        playbackHooked: false,
+        applying: null,
+        applyTimer: null,
+        caps: null,
         // The height of the video stream the server reported for the item being played. Read out
         // of the PlaybackInfo response this script already intercepts, so the menu can drop targets
         // at or below the source instead of offering a downscale as if it were an improvement.
@@ -324,7 +368,8 @@
         stage: 'unset',
         prefs: {
             upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
-            deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
+            deband: 'default', kernel: 'default', refine: 'default', chroma: 'default',
+            jitter: 'default', depth: 'default', reactive: 'default'
         }
     };
     window.__gpuUpscale = state;
@@ -346,6 +391,14 @@
                     if (parsed[k] != null) { state.prefs[k] = parsed[k]; }
                 });
                 if (SR_ALIASES[state.prefs.sr]) { state.prefs.sr = SR_ALIASES[state.prefs.sr]; }
+
+                // The panel's position rides with the preferences. Anything that is not a pair of
+                // finite numbers is dropped rather than trusted: a bad value here would put the
+                // panel somewhere unreachable.
+                var pos = parsed.pos;
+                if (pos && typeof pos === 'object' && isFinite(pos.x) && isFinite(pos.y)) {
+                    state.panelPos = { x: Number(pos.x), y: Number(pos.y) };
+                }
 
                 if (parsed.stage && typeof parsed.stage === 'object') {
                     state.stage = parsed.stage;
@@ -377,7 +430,11 @@
                 deband: state.prefs.deband,
                 kernel: state.prefs.kernel,
                 refine: state.prefs.refine,
-                chroma: state.prefs.chroma
+                chroma: state.prefs.chroma,
+                jitter: state.prefs.jitter,
+                depth: state.prefs.depth,
+                reactive: state.prefs.reactive,
+                pos: state.panelPos
             }));
         } catch (e) { /* ignore */ }
     }
@@ -760,6 +817,17 @@
     function axisControls(caps) {
         var targets = eligibleTargets();
         return (caps.full ? CONTROLS : CONTROLS.filter(function (c) { return c.key === 'upscale'; }))
+            // A control that could not change anything is not rendered. The test is data on the
+            // control and a list from the server: show it only while the axis it depends on is
+            // set to a level the server says it acts on.
+            .filter(function (c) {
+                if (!c.showWhen) {
+                    return true;
+                }
+
+                var acts = (caps.levels && caps.levels[c.showWhen.levelsKey]) || [];
+                return acts.indexOf(state.prefs[c.showWhen.key]) >= 0;
+            })
             .map(function (c) {
                 var allowed = serverLevels(caps, c);
                 var options = allowed
@@ -812,7 +880,7 @@
                 return {
                     key: c.key, label: c.label, fallback: c.fallback, group: c.group || 'Detail',
                     grade: c.grade || null, chips: !!c.chips, costKey: c.costKey || null,
-                    options: options
+                    showWhen: c.showWhen || null, options: options
                 };
             });
     }
@@ -883,20 +951,131 @@
     }
 
     /*
-     * Making the choice take effect means getting a fresh PlaybackInfo. jellyfin-web re-requests it
-     * when the max streaming bitrate changes, so the smallest honest nudge is to re-apply the value
-     * it already has. If the hook is not reachable the viewer can simply restart playback.
+     * APPLYING A CHANGE LIVE - and it is jellyfin-web's own quality-change path, not a new one.
+     *
+     * playbackManager.setMaxStreamingBitrate() ends in the module-private changeStream(), which is
+     * the same function the stock quality menu reaches when a viewer picks a bitrate. That
+     * function already does every hard part of this:
+     *
+     *   - it re-requests PlaybackInfo, so this script's request and response hooks mark the new
+     *     negotiation exactly as they mark a fresh playback. That is what makes BOTH direct-play
+     *     crossovers work without a special case here: picking a stage while direct playing goes
+     *     through the request rewrite that sets EnableDirectPlay/EnableDirectStream false, and
+     *     picking Off stops forcing it, so the server is free to hand back a direct-play source.
+     *   - it restarts the player at the current position (current ticks plus the transcoding
+     *     offset), which discards the stale buffer along with the old stream.
+     *   - it calls stopActiveEncodings(oldPlaySessionId) both before and after the switch. That is
+     *     what stops the abandoned ffmpeg holding one of the server's MaxConcurrent slots until it
+     *     times out - one viewer walking down a slider must not exhaust them.
+     *
+     * The bitrate handed back is the one already in force, so nothing about the quality changes;
+     * the call is only the carrier. It does persist "not automatic" for the bitrate, exactly as
+     * picking a quality from the stock menu does, which is why it is not done when the value is
+     * not a number we can hand back unchanged.
+     *
+     * DEBOUNCED, because dragging a slider through five rungs must start one transcode, not five.
+     * FAIL SAFE: every failure path leaves playback exactly as it was and says the change will
+     * apply on the next playback, rather than taking the player down with it.
      */
-    function requestRestream() {
+    var APPLY_DEBOUNCE = 700;
+
+    function panelEl() {
+        return document.getElementById(PANEL_ID);
+    }
+
+    function repaintPanel() {
+        try {
+            var p = panelEl();
+            if (p) { renderPanel(p, state.caps || { full: false }); }
+        } catch (err) { /* the panel is never worth breaking playback for */ }
+    }
+
+    function playerPresent() {
         try {
             var pm = window.playbackManager;
-            if (pm && typeof pm.getMaxStreamingBitrate === 'function' && typeof pm.setMaxStreamingBitrate === 'function') {
-                var current = pm.getMaxStreamingBitrate();
-                pm.setMaxStreamingBitrate({ enableAutomaticBitrateDetection: false, maxBitrate: current });
-                log('asked the player to renegotiate');
-            }
+            return !!(pm
+                && typeof pm.setMaxStreamingBitrate === 'function'
+                && typeof pm.getMaxStreamingBitrate === 'function'
+                && typeof pm.currentItem === 'function'
+                && pm.currentItem());
         } catch (err) {
-            log('could not nudge the player; playback restart needed', err);
+            return false;
+        }
+    }
+
+    /*
+     * The change is finished when a NEW PlaySessionId comes back - which this script learns from
+     * the PlaybackInfo response it is already reading, so nothing extra is polled off the server.
+     * The timeout exists so the label cannot stick on forever if the negotiation never lands.
+     */
+    function watchApplied(previousId) {
+        var tries = 0;
+        var timer = setInterval(function () {
+            try {
+                tries++;
+                var done = (state.playSessionId && state.playSessionId !== previousId) || tries > 48;
+                if (done) {
+                    clearInterval(timer);
+                    state.applying = null;
+                    repaintPanel();
+                }
+            } catch (err) {
+                clearInterval(timer);
+                state.applying = null;
+            }
+        }, 250);
+    }
+
+    function doApply() {
+        state.applyTimer = null;
+        if (!playerPresent()) {
+            state.applying = null;
+            repaintPanel();
+            return;
+        }
+
+        var previousId = state.playSessionId;
+        try {
+            var pm = window.playbackManager;
+            var current = pm.getMaxStreamingBitrate();
+            if (!(current > 0)) {
+                // Handing back a value that is not a bitrate would overwrite the viewer's own
+                // saved setting with nothing. Not worth it: say so and leave playback alone.
+                log('no current bitrate to hand back; the change applies on the next playback');
+                state.applying = null;
+                repaintPanel();
+                return;
+            }
+
+            state.applying = 'applying\u2026';
+            repaintPanel();
+            pm.setMaxStreamingBitrate({ enableAutomaticBitrateDetection: false, maxBitrate: current });
+            log('asked the player to renegotiate at the current position');
+            watchApplied(previousId);
+        } catch (err) {
+            log('could not renegotiate; the change applies on the next playback', err);
+            state.applying = null;
+            repaintPanel();
+        }
+    }
+
+    /* Called by every control. Debounced, and a no-op when nothing is playing. */
+    function requestRestream() {
+        try {
+            if (state.applyTimer) {
+                clearTimeout(state.applyTimer);
+                state.applyTimer = null;
+            }
+
+            if (!playerPresent()) {
+                log('nothing is playing; the change applies on the next playback');
+                return;
+            }
+
+            state.applying = 'applying\u2026';
+            state.applyTimer = setTimeout(doApply, APPLY_DEBOUNCE);
+        } catch (err) {
+            log('could not schedule the change', err);
         }
     }
 
@@ -915,6 +1094,11 @@
         { label: 'Denoise', level: 'DenoiseLevel', applied: 'DenoiseApplied' },
         { label: 'Neural SR', level: 'NeuralLevel' },
         { label: 'Game upscaler', level: 'GameLevel', applied: 'GameApplied' },
+        // What the server actually ran those three with - read from the record, never from what
+        // this panel asked for. Null when no game upscaler ran, and a null row prints nothing.
+        { label: 'Game jitter', level: 'GameJitter' },
+        { label: 'Game depth', level: 'GameDepth' },
+        { label: 'Game reactive mask', level: 'GameReactive' },
         { label: 'Refine', level: 'RefineLevel', applied: 'RefineApplied' },
         { label: 'Chroma', level: 'ChromaLevel', applied: 'ChromaApplied' },
         { label: 'Debanding', applied: 'DebandApplied' },
@@ -994,6 +1178,14 @@
             lines.push(['Note', 'The upscaler sharpens internally, so the separate unblur pass was dropped.']);
         }
 
+        if (s.GameDepthDowngraded) {
+            // The server saw this one and said so. Its OTHER depth fallback - ONNX Runtime with no
+            // CUDA execution provider - happens inside ffmpeg, is not reported back, and is
+            // therefore not claimed here either way.
+            lines.push(['Note', 'The depth weights are not installed on this server, so the game'
+                + ' upscaler ran with a flat depth plane whatever was asked for.']);
+        }
+
         return lines;
     }
 
@@ -1045,7 +1237,12 @@
         'box-shadow:0 .6em 2em rgba(0,0,0,.6);font-size:.85em;line-height:1.35;', '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);}',
         '#' + PANEL_ID + ' h3{margin:.9em 0 .3em;font-size:.95em;font-weight:600;letter-spacing:.04em;',
         'text-transform:uppercase;color:#9ad;opacity:.85;}',
-        '.gpuup-head{display:flex;align-items:baseline;gap:.5em;}',
+        '.gpuup-head{display:flex;align-items:baseline;gap:.5em;cursor:move;touch-action:none;',
+        '-webkit-user-select:none;user-select:none;}',
+        '.gpuup-grip{flex:0 0 auto;background:none;border:0;color:inherit;font-size:1em;opacity:.55;',
+        'cursor:move;padding:0 .15em;font-family:inherit;line-height:1;}',
+        '.gpuup-grip:focus{outline:2px solid #00a4dc;opacity:1;}',
+        '.gpuup-applying{flex:0 0 auto;color:#00a4dc;opacity:.95;}',
         '.gpuup-title{font-size:1.15em;font-weight:600;flex:0 0 auto;}',
         '.gpuup-sum{flex:1 1 auto;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
         '.gpuup-x{flex:0 0 auto;background:none;border:0;color:inherit;font-size:1.2em;cursor:pointer;opacity:.7;}',
@@ -1271,12 +1468,252 @@
         return wrap;
     }
 
+    /* --------------------------------------------------------------- moving the panel */
+
+    /*
+     * The panel is moved by its header. Pointer events, so ONE code path covers mouse, touch and
+     * pen. Three things it must not do, and each is why the code is the shape it is:
+     *
+     *   - It must not swallow a click on a header control. A drag is only entered once the pointer
+     *     has travelled DRAG_SLOP pixels; below that nothing is captured and the button gets its
+     *     click as usual. When a drag DID happen, the click that follows is eaten once in the
+     *     capture phase, so letting go over the close button does not also close the panel.
+     *   - It must not put the panel anywhere it cannot be reached. Every position - dragged,
+     *     restored from localStorage, or left over after the window was resized - goes through
+     *     clampPos() before it is used.
+     *   - It must not be the only way to move it. A television has no pointer, so the grip is a
+     *     real focusable button: arrow keys move the panel, Enter or Space puts it back, and
+     *     double-clicking the header does the same. Nothing about the panel depends on dragging,
+     *     so a remote is not locked out of anything - it simply leaves the panel where it is.
+     *
+     * All of it is inside try/catch: a broken drag must never escape into the player.
+     */
+    var DRAG_SLOP = 4;
+    var KEY_STEP = 24;
+    var EDGE = 4;
+
+    function clampPos(x, y, w, h) {
+        var maxX = Math.max(EDGE, (window.innerWidth || 0) - w - EDGE);
+        var maxY = Math.max(EDGE, (window.innerHeight || 0) - h - EDGE);
+        return {
+            x: Math.min(Math.max(x, EDGE), maxX),
+            y: Math.min(Math.max(y, EDGE), maxY)
+        };
+    }
+
+    function applyPanelPos(panel) {
+        try {
+            panel = panel || panelEl();
+            if (!panel) {
+                return;
+            }
+
+            if (!state.panelPos) {
+                // Back to the stylesheet's own corner: clear the inline overrides, do not guess
+                // at what the CSS said.
+                panel.style.left = '';
+                panel.style.top = '';
+                panel.style.right = '';
+                panel.style.bottom = '';
+                return;
+            }
+
+            var r = panel.getBoundingClientRect();
+            var pos = clampPos(state.panelPos.x, state.panelPos.y, r.width, r.height);
+            state.panelPos = pos;
+            panel.style.left = pos.x + 'px';
+            panel.style.top = pos.y + 'px';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+        } catch (err) {
+            log('could not place the panel', err);
+        }
+    }
+
+    function movePanelBy(dx, dy) {
+        try {
+            var panel = panelEl();
+            if (!panel) {
+                return;
+            }
+
+            var r = panel.getBoundingClientRect();
+            state.panelPos = { x: r.left + dx, y: r.top + dy };
+            applyPanelPos(panel);
+            savePrefs();
+        } catch (err) {
+            log('could not move the panel', err);
+        }
+    }
+
+    function resetPanelPos() {
+        try {
+            state.panelPos = null;
+            applyPanelPos();
+            savePrefs();
+            log('panel position reset');
+        } catch (err) {
+            log('could not reset the panel position', err);
+        }
+    }
+
+    /* A pointerdown that landed on something clickable is that control's, not the drag's. */
+    function isControl(node) {
+        for (var n = node; n && n !== document; n = n.parentNode) {
+            var t = n.tagName && String(n.tagName).toLowerCase();
+            if (t === 'button' || t === 'select' || t === 'input' || t === 'textarea' || t === 'a') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function makeDraggable(head) {
+        try {
+            head.addEventListener('dblclick', function (ev) {
+                if (!isControl(ev.target)) {
+                    resetPanelPos();
+                }
+            });
+
+            if (!window.PointerEvent) {
+                // No pointer events: the panel simply stays where it is, and the grip's keyboard
+                // path still moves it. Nothing is broken, one way of moving it is absent.
+                return;
+            }
+
+            head.addEventListener('pointerdown', function (ev) {
+                try {
+                    if (ev.button != null && ev.button !== 0) {
+                        return;
+                    }
+
+                    if (isControl(ev.target)) {
+                        return;
+                    }
+
+                    var panel = panelEl();
+                    if (!panel) {
+                        return;
+                    }
+
+                    var r = panel.getBoundingClientRect();
+                    var d = {
+                        id: ev.pointerId,
+                        ox: ev.clientX - r.left,
+                        oy: ev.clientY - r.top,
+                        sx: ev.clientX,
+                        sy: ev.clientY,
+                        moved: false
+                    };
+
+                    var eatClick = function (e3) {
+                        e3.stopPropagation();
+                        e3.preventDefault();
+                    };
+
+                    function end() {
+                        try {
+                            document.removeEventListener('pointermove', onMove, true);
+                            document.removeEventListener('pointerup', onUp, true);
+                            document.removeEventListener('pointercancel', onUp, true);
+                            try { head.releasePointerCapture(d.id); } catch (e) { /* ignore */ }
+                            if (d.moved) {
+                                savePrefs();
+                                window.addEventListener('click', eatClick, true);
+                                setTimeout(function () {
+                                    window.removeEventListener('click', eatClick, true);
+                                }, 0);
+                            }
+                        } catch (err) {
+                            log('drag cleanup failed', err);
+                        }
+
+                        state.drag = null;
+                    }
+
+                    var onMove = function (e2) {
+                        try {
+                            if (!state.drag || e2.pointerId !== d.id) {
+                                return;
+                            }
+
+                            if (!d.moved
+                                && Math.abs(e2.clientX - d.sx) < DRAG_SLOP
+                                && Math.abs(e2.clientY - d.sy) < DRAG_SLOP) {
+                                return;
+                            }
+
+                            if (!d.moved) {
+                                d.moved = true;
+                                try { head.setPointerCapture(d.id); } catch (e) { /* not fatal */ }
+                            }
+
+                            if (e2.cancelable) { e2.preventDefault(); }
+                            state.panelPos = { x: e2.clientX - d.ox, y: e2.clientY - d.oy };
+                            applyPanelPos();
+                        } catch (err) {
+                            log('drag failed', err);
+                            end();
+                        }
+                    };
+
+                    var onUp = function (e4) {
+                        if (e4.pointerId === d.id) {
+                            end();
+                        }
+                    };
+
+                    state.drag = d;
+                    document.addEventListener('pointermove', onMove, true);
+                    document.addEventListener('pointerup', onUp, true);
+                    document.addEventListener('pointercancel', onUp, true);
+                } catch (err) {
+                    log('drag failed to start', err);
+                    state.drag = null;
+                }
+            });
+        } catch (err) {
+            log('could not make the panel draggable', err);
+        }
+    }
+
+    /* The grip: the pointerless way to do everything dragging does. */
+    function gripButton() {
+        var g = el('button', 'gpuup-grip', '\u283f');
+        g.type = 'button';
+        g.title = 'Drag to move. Arrow keys move it; Enter puts it back.';
+        g.setAttribute('aria-label', 'Move panel. Arrow keys move it, Enter resets its position.');
+        g.onkeydown = function (ev) {
+            var step = ev.shiftKey ? KEY_STEP * 3 : KEY_STEP;
+            var dx = 0;
+            var dy = 0;
+            if (ev.key === 'ArrowLeft') { dx = -step; } else if (ev.key === 'ArrowRight') { dx = step; } else if (ev.key === 'ArrowUp') { dy = -step; } else if (ev.key === 'ArrowDown') { dy = step; } else { return; }
+
+            ev.preventDefault();
+            ev.stopPropagation();
+            movePanelBy(dx, dy);
+        };
+        g.onclick = function (ev) {
+            ev.stopPropagation();
+            resetPanelPos();
+        };
+        return g;
+    }
+
     function renderPanel(panel, caps) {
+        state.caps = caps;
         var body = el('div');
 
         var head = el('div', 'gpuup-head');
+        head.appendChild(gripButton());
         head.appendChild(el('div', 'gpuup-title', 'Enhance'));
         head.appendChild(el('div', 'gpuup-sum', summaryText()));
+        if (state.applying) {
+            head.appendChild(el('div', 'gpuup-applying', state.applying));
+        }
+
         var x = el('button', 'gpuup-x', '×');
         x.title = 'Close';
         x.onclick = closePanel;
@@ -1343,8 +1780,28 @@
 
         body.appendChild(liveSection());
 
+        // The panel re-renders itself every few seconds to follow the session record. On a
+        // television that would throw the focus away three times a minute, so the focused
+        // control's position is carried across the swap.
+        var focusIndex = -1;
+        try {
+            var before = panel.querySelectorAll('button,select,input');
+            for (var fi = 0; fi < before.length; fi++) {
+                if (before[fi] === document.activeElement) { focusIndex = fi; break; }
+            }
+        } catch (e) { /* ignore */ }
+
         panel.innerHTML = '';
         panel.appendChild(body);
+        makeDraggable(head);
+        applyPanelPos(panel);
+
+        if (focusIndex >= 0) {
+            try {
+                var after = panel.querySelectorAll('button,select,input');
+                if (after[focusIndex]) { after[focusIndex].focus(); }
+            } catch (e) { /* ignore */ }
+        }
     }
 
     function closePanel() {
@@ -1363,8 +1820,92 @@
                 document.removeEventListener('keydown', state.panelKeyHandler, true);
                 state.panelKeyHandler = null;
             }
+
+            if (state.onPanelResize) {
+                window.removeEventListener('resize', state.onPanelResize);
+                state.onPanelResize = null;
+            }
+
+            state.drag = null;
         } catch (err) {
             log('close failed', err);
+        }
+    }
+
+    /*
+     * THE PANEL IS A PLAYBACK CONTROL, so it closes when there is no playback left to control.
+     *
+     * Hooked, not polled. jellyfin-web's Events helper is a plain callback registry kept ON THE
+     * OBJECT (events.js: obj._callbacks[type] = [] and Events.on pushes onto that array), so
+     * subscribing to the playback manager's own events needs no module access at all - pushing
+     * onto the same array is exactly what Events.on does, and the module is not exported anywhere
+     * this script can reach.
+     *
+     * PAUSE IS DELIBERATELY NOT IN THE LIST. Pausing to go and change a setting is the whole
+     * reason this panel exists; closing it under the viewer's hand would be hostile. Stop, end and
+     * leaving the player all raise "playbackstop", which is the event this listens to.
+     */
+    function hookPlaybackEvents() {
+        try {
+            var pm = window.playbackManager;
+            if (!pm || state.playbackHooked) {
+                return;
+            }
+
+            pm._callbacks = pm._callbacks || {};
+            ['playbackstop', 'playbackerror'].forEach(function (name) {
+                pm._callbacks[name] = pm._callbacks[name] || [];
+                pm._callbacks[name].push(function () {
+                    try {
+                        log('playback ended (' + name + '); closing the panel');
+                        closePanel();
+                    } catch (err) { /* never take playback down with the panel */ }
+                });
+            });
+
+            state.playbackHooked = true;
+        } catch (err) {
+            log('could not hook the playback events', err);
+        }
+    }
+
+    /*
+     * A NEW ITEM RESETS THE UPSCALE TARGET, AND ONLY THAT.
+     *
+     * The quality ladder is generated FOR THE SOURCE: its targets are filtered against this
+     * source's height and the server's own limits. 4K picked on a 540p file is not a choice that
+     * means anything on the next item, and can be outside the set this panel would even offer for
+     * it. The stage goes back to Automatic with it, because a stage IS a target plus a recipe.
+     *
+     * Everything else stays exactly as the viewer left it: sr, deblur, denoise, neural, game,
+     * refine, chroma, deband, kernel, jitter, depth and reactive are taste, not properties of the
+     * source, and none of them is filtered by the source height. Widening this to them would
+     * throw away a preference for no reason.
+     *
+     * Done here, on the PlaybackInfo for a source this script has not seen, rather than on a
+     * playback event: this runs BEFORE the parameters are written onto the TranscodingUrl, so the
+     * new item is negotiated with the reset value instead of one item's worth of the old one.
+     * (This reverses session 12, where a stage followed the viewer from item to item.)
+     */
+    function resetUpscaleForNewSource(info) {
+        try {
+            var sources = info && info.MediaSources;
+            var id = sources && sources.length ? sources[0].Id : null;
+            if (!id || id === state.lastSourceId) {
+                return;
+            }
+
+            state.lastSourceId = id;
+            if (state.stage === 'unset' && state.prefs.upscale === DEFAULT_PREFS.upscale) {
+                return;
+            }
+
+            log('new item: the upscale target goes back to Automatic');
+            state.stage = 'unset';
+            state.prefs.upscale = DEFAULT_PREFS.upscale;
+            savePrefs();
+        } catch (err) {
+            log('could not reset the upscale target', err);
         }
     }
 
@@ -1377,6 +1918,7 @@
      */
     function openEnhancePanel() {
         state.menuShown++;
+        hookPlaybackEvents();
         return probeServer().then(function (caps) {
             return fetchServerState().then(function () { return caps; },
                 function () { return caps; });
@@ -1399,8 +1941,15 @@
                 };
                 document.addEventListener('keydown', state.panelKeyHandler, true);
 
+                state.onPanelResize = function () { applyPanelPos(); };
+                window.addEventListener('resize', state.onPanelResize);
+
                 state.liveTimer = setInterval(function () {
                     try {
+                        // Never re-render out from under a drag or an open dropdown.
+                        if (state.drag) { return; }
+                        var a = document.activeElement;
+                        if (a && a.tagName === 'SELECT' && panel.contains(a)) { return; }
                         fetchServerState().then(function () {
                             var p = document.getElementById(PANEL_ID);
                             if (p) { renderPanel(p, caps); }
@@ -1623,6 +2172,17 @@
             // the URL at all, so choosing a level there did nothing.)
             params.neural = e.neural != null ? e.neural : (state.prefs.neural || 'off');
             params.game = e.game != null ? e.game : (state.prefs.game || 'off');
+
+            // The three game-upscaler inputs, on the same rule that hides their rows: sent only
+            // while the level in force is one the server says they act on, and only when the
+            // viewer picked something other than "Server default". Otherwise nothing is written
+            // and the dashboard value stands.
+            GAME_OPTION_KEYS.forEach(function (k) {
+                var acts = (state.serverCaps.levels && state.serverCaps.levels.GameOptionLevels) || [];
+                if (acts.indexOf(params.game) >= 0 && state.prefs[k] && state.prefs[k] !== 'default') {
+                    params[k] = state.prefs[k];
+                }
+            });
         }
 
         // Compatibility: the first server-side version of this plugin keyed off maxHeight. Sending
@@ -1692,6 +2252,7 @@
 
         // Before any early return: the menu needs this even for a session it does not mark.
         noteSourceHeight(info);
+        resetUpscaleForNewSource(info);
 
         var e = effective();
         if (!info.MediaSources || !e) {

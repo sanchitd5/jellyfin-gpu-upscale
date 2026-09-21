@@ -442,7 +442,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// inconsistency for the reactive mask.
         ///
         /// The jitter one is fatal by construction and it was measured here, not assumed
-        /// (the jitter measurements (see What was tried and rejected in the README)): FSR2's jitter is a single GLOBAL scalar, this
+        /// (the jitter measurements (see the README)): FSR2's jitter is a single GLOBAL scalar, this
         /// content's sub-pixel motion is LOCAL, and the median textured block departs from the
         /// global estimate by 0.29 px against FSR2's whole +/-0.5 px budget. With a near-null
         /// jitter sequence FSR2's lock creation picks the same display-resolution pixels every
@@ -688,6 +688,77 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return list;
         }
 
+        /// <summary>
+        /// The allowed values of the three game-upscaler input options, and their defaults. They
+        /// are public so the probe can serve them: the player panel must not carry its own copy of
+        /// a list that lives in the ffmpeg filter's own AVOption table.
+        /// </summary>
+        public static readonly string[] GameJitterValues = { "measured", "cancel", "zero", "halton" };
+
+        /// <summary>Allowed depth sources; "model" is the default.</summary>
+        public static readonly string[] GameDepthValues = { "model", "model-stable", "flat" };
+
+        /// <summary>Allowed reactive-mask sources; "flow" is the default.</summary>
+        public static readonly string[] GameReactiveValues = { "flow", "none" };
+
+        /// <summary>The built-in default jitter source, used when neither session nor dashboard says.</summary>
+        public const string GameJitterDefault = "measured";
+
+        /// <summary>The built-in default depth source.</summary>
+        public const string GameDepthDefault = "model";
+
+        /// <summary>The built-in default reactive-mask source.</summary>
+        public const string GameReactiveDefault = "flow";
+
+        /// <summary>
+        /// The game levels on which jitter / depth / reactive do anything. All three run the same
+        /// synthesised-input path in the filter, dlaa included - it is the same vf_dlss with
+        /// mode=dlaa, and it is handed the same depth, jitter and reactive mask - so every level
+        /// but "off" is listed. Served through the probe so the panel shows the rows only where
+        /// they act, instead of deciding that here.
+        /// </summary>
+        public static List<string> GameOptionLevels()
+        {
+            var list = new List<string>();
+            foreach (string level in AvailableGameLevels())
+            {
+                if (!string.Equals(level, "off", StringComparison.Ordinal))
+                {
+                    list.Add(level);
+                }
+            }
+
+            return list;
+        }
+
+        /// <summary>The wording the panel must show beside each jitter value. The server owns it.</summary>
+        public static string GameOptionLabel(string axis, string value)
+        {
+            switch ((axis ?? string.Empty) + ":" + (value ?? string.Empty))
+            {
+                case "jitter:measured":
+                    return "Measured (phase correlation, the default)";
+                case "jitter:cancel":
+                    return "Measured, and declared already in the motion vectors";
+                case "jitter:zero":
+                    return "None (skips the per-frame FFT, much faster)";
+                case "jitter:halton":
+                    return "Halton sequence (a renderer's pattern; fiction on recorded video)";
+                case "depth:model":
+                    return "Monocular estimate (the default)";
+                case "depth:model-stable":
+                    return "Monocular estimate, flow-warped and blended";
+                case "depth:flat":
+                    return "Flat plane (no depth-driven decisions)";
+                case "reactive:flow":
+                    return "Forward/backward flow inconsistency (the default)";
+                case "reactive:none":
+                    return "None";
+                default:
+                    return value ?? string.Empty;
+            }
+        }
+
         /// <summary>The wording a viewer must see beside one of these levels. Not decoration.</summary>
         public static string GameLabel(string level)
         {
@@ -715,9 +786,24 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// transformer on the CPU runs at about 1 fps, which is not a transcode filter.
         /// </summary>
         public static string GameFilter(
-            string level, int outWidth, int outHeight, UpscaleSettings cfg, out string levelUsed)
+            string level,
+            int outWidth,
+            int outHeight,
+            UpscaleSettings cfg,
+            string jitterOption,
+            string depthOption,
+            string reactiveOption,
+            out string levelUsed,
+            out string jitterUsed,
+            out string depthUsed,
+            out string reactiveUsed,
+            out bool depthDowngraded)
         {
             levelUsed = "off";
+            jitterUsed = null;
+            depthUsed = null;
+            reactiveUsed = null;
+            depthDowngraded = false;
             if (string.IsNullOrWhiteSpace(level)
                 || !_gameFilters.TryGetValue(level.Trim(), out string node)
                 || node == null)
@@ -754,15 +840,35 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 sb.Append(node.IndexOf('=') >= 0 ? ':' : '=');
             }
 
-            sb.Append("jitter=").Append(GameOption(cfg?.GameJitter, "measured", "measured", "cancel", "zero", "halton"));
-            sb.Append(":reactive=").Append(GameOption(cfg?.GameReactive, "flow", "flow", "none"));
-            string depth = GameOption(cfg?.GameDepth, depthModel ? "model" : "flat", "model", "model-stable", "flat");
+            // THREE LEVELS OF PRECEDENCE, and the same one for all three options: the session
+            // wins, the dashboard is the fallback, the built-in default is the last word. An
+            // unrecognised value at either level falls through to the next rather than reaching
+            // the filter: these strings are concatenated into an ffmpeg filter argument, where a
+            // name the filter does not know fails the whole job.
+            string jitter = GameOption(
+                jitterOption, GameOption(cfg?.GameJitter, GameJitterDefault, GameJitterValues), GameJitterValues);
+            string reactive = GameOption(
+                reactiveOption, GameOption(cfg?.GameReactive, GameReactiveDefault, GameReactiveValues), GameReactiveValues);
+            string depth = GameOption(
+                depthOption, GameOption(cfg?.GameDepth, GameDepthDefault, GameDepthValues), GameDepthValues);
+
+            // The weights are not shipped. Without them the filter would fall back to flat on its
+            // own; doing it here as well means the session record can SAY that it happened rather
+            // than reporting a depth mode that never ran. The filter's OTHER self-downgrade - no
+            // CUDA execution provider in ONNX Runtime - happens inside ffmpeg after this decision
+            // and is not observable from here, so it is not claimed either way.
+            depthDowngraded = !depthModel && depth != "flat";
             if (!depthModel)
             {
                 depth = "flat";
             }
 
+            sb.Append("jitter=").Append(jitter);
+            sb.Append(":reactive=").Append(reactive);
             sb.Append(":depth=").Append(depth);
+            jitterUsed = jitter;
+            reactiveUsed = reactive;
+            depthUsed = depth;
             if (depth != "flat")
             {
                 sb.Append(":dmodel=").Append(DepthModelPath);

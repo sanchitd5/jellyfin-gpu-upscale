@@ -42,7 +42,7 @@
  * never be supplied - FSR2's lock creation (ComputeHrPosFromLrPos) picks the
  * same display-resolution pixels every frame.  The locks never sweep the
  * display grid.  What is left is a temporal denoise plus a fixed Lanczos
- * upsample: not super-resolution.  the jitter measurements (see What was tried and rejected in the README) has the
+ * upsample: not super-resolution.  the jitter measurements (see the README) has the
  * measurements; FSR2.md has the summary that belongs in front of a user.
  *
  * This filter exists because it was asked for with that understood.  It is

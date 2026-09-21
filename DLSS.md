@@ -16,7 +16,7 @@ DLAA is DLSS at a **1:1 scale factor**. At 1:1 there is no resolution to recover
 gain has to come from two places:
 
 1. **accumulating samples taken at different sub-pixel positions across frames** - which is exactly
-   the input that cannot be supplied, measured in `the jitter measurements (see What was tried and rejected in the README)`; and
+   the input that cannot be supplied, measured in `the jitter measurements (see the README)`; and
 2. **the aliasing the network was trained to undo**, which is *rasterisation* aliasing. A camera
    does not produce rasterisation aliasing. It produces compression artefacts, sensor noise and
    lens blur, none of which the network has seen.

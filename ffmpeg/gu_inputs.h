@@ -222,7 +222,7 @@ static void gu_fft2(GUInputs *g, AVComplexFloat *dst, int inverse)
     }
 }
 
-/* Hanning-windowed phase correlation, the estimator the phase-correlation estimator used in those measurements
+/* Hanning-windowed phase correlation, the estimator the phase-correlation estimator
  * used through cv::phaseCorrelate, reimplemented on av_tx.  Returns the shift
  * that carries `prev` onto `cur`, sub-pixel, by the same 5x5 weighted centroid
  * OpenCV uses around the correlation peak. */
