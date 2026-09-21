@@ -380,7 +380,13 @@ static av_cold int nvof_init(AVFilterContext *ctx)
     return 0;
 }
 
-static int config_input(AVFilterLink *inlink)
+/* Everything below here needs the CUDA context current.  It is a separate
+ * function so that the push and the pop are a matched pair: CHECK_CU and
+ * CHECK_OPTIX return straight out of whatever function they sit in, so any
+ * failure between the two would otherwise leave this thread's context stack
+ * unbalanced - which then breaks uninit()'s own push/pop and anything else
+ * using CUDA on the thread. */
+static int config_input_pushed(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
     OptixContext *s = ctx->priv;
@@ -391,20 +397,6 @@ static int config_input(AVFilterLink *inlink)
     const size_t rgb_bytes = npix * 3 * sizeof(float);
     int ret;
 
-    s->w = inlink->w;
-    s->h = inlink->h;
-
-    if (cuda_load_functions(&s->cu, ctx) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "could not load the CUDA driver library\n");
-        return AVERROR_EXTERNAL;
-    }
-    CHECK_CU(ctx, s->cu->cuInit(0));
-    CHECK_CU(ctx, s->cu->cuDeviceGet(&s->cu_device, s->device_index));
-    /* The primary context is shared with anything else on this device in this
-     * process, which is what we want: nothing else here uses CUDA, and a private
-     * context would only add another set of allocations. */
-    CHECK_CU(ctx, s->cu->cuDevicePrimaryCtxRetain(&s->cu_ctx, s->cu_device));
-    CHECK_CU(ctx, s->cu->cuCtxPushCurrent(s->cu_ctx));
     CHECK_CU(ctx, s->cu->cuStreamCreate(&s->stream, 0));
 
     CHECK_OPTIX(ctx, optixInit());
@@ -455,7 +447,38 @@ static int config_input(AVFilterLink *inlink)
         }
     }
 
-    CHECK_CU(ctx, s->cu->cuCtxPopCurrent(&s->cu_ctx));
+    return 0;
+}
+
+static int config_input(AVFilterLink *inlink)
+{
+    AVFilterContext *ctx = inlink->dst;
+    OptixContext *s = ctx->priv;
+    CUcontext popped;
+    int ret;
+
+    s->w = inlink->w;
+    s->h = inlink->h;
+
+    if (cuda_load_functions(&s->cu, ctx) < 0) {
+        av_log(ctx, AV_LOG_ERROR, "could not load the CUDA driver library\n");
+        return AVERROR_EXTERNAL;
+    }
+    CHECK_CU(ctx, s->cu->cuInit(0));
+    CHECK_CU(ctx, s->cu->cuDeviceGet(&s->cu_device, s->device_index));
+    /* The primary context is shared with anything else on this device in this
+     * process, which is what we want: nothing else here uses CUDA, and a private
+     * context would only add another set of allocations. */
+    CHECK_CU(ctx, s->cu->cuDevicePrimaryCtxRetain(&s->cu_ctx, s->cu_device));
+    CHECK_CU(ctx, s->cu->cuCtxPushCurrent(s->cu_ctx));
+
+    ret = config_input_pushed(inlink);
+
+    /* Unconditional: the stack has to come back balanced whether the setup
+     * above succeeded or failed.  uninit() releases whatever was allocated. */
+    s->cu->cuCtxPopCurrent(&popped);
+    if (ret < 0)
+        return ret;
 
     av_log(ctx, AV_LOG_VERBOSE,
            "OptiX denoiser %dx%d mode=%s flow=%s state=%zuMiB scratch=%zuMiB\n",

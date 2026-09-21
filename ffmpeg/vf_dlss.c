@@ -105,6 +105,12 @@ typedef struct DLSSContext {
 
     NVSDK_NGX_Parameter *params;
     NVSDK_NGX_Handle    *dlss;
+    /* ngx_inited: Init succeeded, so Shutdown1 owes it a call.  ngx_ready: the
+     * whole feature came up and filter_frame may run.  They are not the same
+     * thing - everything between the two can fail - and shutting down on the
+     * second leaks NGX's per-process state, file lock included, on every
+     * partial init. */
+    int                  ngx_inited;
     int                  ngx_ready;
 } DLSSContext;
 
@@ -438,6 +444,7 @@ static int config_output(AVFilterLink *outlink)
                "(see DLSS.md)\n", (unsigned)r, s->sdk_path);
         return AVERROR_EXTERNAL;
     }
+    s->ngx_inited = 1;
     if (NVSDK_NGX_VULKAN_GetCapabilityParameters(&s->params) != NVSDK_NGX_Result_Success) {
         av_log(ctx, AV_LOG_ERROR, "NVSDK_NGX_VULKAN_GetCapabilityParameters failed\n");
         return AVERROR_EXTERNAL;
@@ -662,7 +669,7 @@ static av_cold void uninit(AVFilterContext *ctx)
     if (s->dev) vkDeviceWaitIdle(s->dev);
     if (s->dlss)   NVSDK_NGX_VULKAN_ReleaseFeature(s->dlss);
     if (s->params) NVSDK_NGX_VULKAN_DestroyParameters(s->params);
-    if (s->ngx_ready) NVSDK_NGX_VULKAN_Shutdown1(s->dev);
+    if (s->ngx_inited) NVSDK_NGX_VULKAN_Shutdown1(s->dev);
 
     image_destroy(s, &s->color);
     image_destroy(s, &s->depth);

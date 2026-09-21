@@ -270,7 +270,14 @@ static int config_input(AVFilterLink *inlink)
         ret = run_session(ctx, pw, ph, &ov, oshape);
         av_freep(&s->in_buf);
         s->in_buf = save; s->in_w = sw; s->in_h = sh;
-        if (ret < 0) return ret;
+        /* run_session can fail after Run() has already handed back a tensor -
+         * the shape queries come after it - so ov may be live on the error
+         * path too. */
+        if (ret < 0) {
+            if (ov)
+                s->ort->ReleaseValue(ov);
+            return ret;
+        }
         if (oshape[1] != 3 || oshape[2] % ph || oshape[3] % pw ||
             oshape[2] / ph != oshape[3] / pw || oshape[2] / ph < 1) {
             s->ort->ReleaseValue(ov);

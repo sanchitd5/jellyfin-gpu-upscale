@@ -424,7 +424,9 @@ static int gu_nvof_run(AVFilterContext *ctx, GUInputs *g,
     memset(&op, 0, sizeof(op));
     ip.inputFrame     = in;
     ip.referenceFrame = ref;
-    op.outputBuffer   = dst == g->grid_bwd ? g->nvof_out : g->nvof_out;
+    /* One output buffer serves both directions: the forward and backward runs are
+     * sequential and each is downloaded before the next overwrites it. */
+    op.outputBuffer   = g->nvof_out;
     if ((st = g->nvof.nvOFExecute(g->nvof_session, &ip, &op)) != NV_OF_SUCCESS) {
         av_log(ctx, AV_LOG_WARNING, "NVOFA execute failed (%d), assuming no motion\n", st);
         memset(dst, 0, (size_t)g->grid_w * g->grid_h * 2 * sizeof(int16_t));
@@ -594,8 +596,8 @@ static int gu_depth_init(AVFilterContext *ctx, GUInputs *g)
     GU_ORT_CHECK(GU_ORT->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "gu_depth",
                                    (OrtEnv **)&g->ort_env));
     GU_ORT_CHECK(GU_ORT->CreateSessionOptions((OrtSessionOptions **)&g->ort_opts));
-    GU_ORT->SetIntraOpNumThreads(g->ort_opts, 2);
-    GU_ORT->SetSessionGraphOptimizationLevel(g->ort_opts, ORT_ENABLE_ALL);
+    GU_ORT_CHECK(GU_ORT->SetIntraOpNumThreads(g->ort_opts, 2));
+    GU_ORT_CHECK(GU_ORT->SetSessionGraphOptimizationLevel(g->ort_opts, ORT_ENABLE_ALL));
     /* CUDA if the provider is there, CPU if not: a depth estimate is not worth
      * failing a transcode over. */
     st = GU_ORT->SessionOptionsAppendExecutionProvider_CUDA(g->ort_opts,
