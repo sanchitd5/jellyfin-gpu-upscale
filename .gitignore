@@ -15,3 +15,5 @@ shaders/Anime4K_*.glsl
 # local
 .DS_Store
 *.swp
+__pycache__/
+*.pyc
