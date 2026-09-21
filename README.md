@@ -67,14 +67,15 @@ a quarter of the pixels, which is why it costs roughly 1% where a `MAIN`-hooked 
 Level names carry **family and weight**, because these are different networks rather than rungs of
 one ladder:
 
-| Level | Shader |
-|---|---|
-| `off` | plain `ewa_lanczos` |
-| `fsrcnnx` *(default)* | `FSRCNNX_x2_8-0-4-1` |
-| `fsrcnnx-heavy` | `FSRCNNX_x2_16-0-4-1` |
-| `fsrcnnx-max` | `FSRCNN_x2_r1_32-0-2` (accepted by the API, not offered in the menu) |
-| `anime4k-s` | `Anime4K_Upscale_CNN_x2_S` |
-| `anime4k-m` | `Anime4K_Upscale_CNN_x2_M` |
+| Level | Shader | Licence |
+|---|---|---|
+| `off` | plain `ewa_lanczos` | — |
+| `fsrcnnx` *(default)* | `FSRCNNX_x2_8-0-4-1` | igv, LGPL-3.0-or-later |
+| `fsrcnnx-heavy` | `FSRCNNX_x2_16-0-4-1` | igv, LGPL-3.0-or-later |
+| `fsrcnnx-max` | `FSRCNN_x2_r1_32-0-2` (API only, not menued) | igv, LGPL-3.0-or-later |
+| `anime4k-s` | `Anime4K_Upscale_CNN_x2_S` | bloc97, MIT |
+| `anime4k-m` | `Anime4K_Upscale_CNN_x2_M` | bloc97, MIT |
+| `nvscaler` | `NVScaler` (NVIDIA Image Scaling v1.0.2) | NVIDIA, MIT |
 
 The legacy names `light` / `standard` / `max` still resolve.
 
@@ -218,6 +219,23 @@ mottle lifted into speckle.
 The CAS shaders are still installed and remain reachable through the API as `cas-low` / `cas-medium`
 / `cas-high` as a rollback path. They are not offered in the menu.
 
+**NVSharpen** (NVIDIA Image Scaling v1.0.2, MIT) is also available, as `nvsharpen` and
+`nvsharpen-strong` (SHARPNESS 0.25 and 0.65). It was measured against RCAS in the same slot, same
+clip, same run at 1.5x: FSRCNNX+NVSharpen 0.25 gave PSNR 43.012 / SSIM 0.98571 / detail 3.5720
+against a ground truth of 3.5179, versus FSRCNNX+RCAS-2.0 at 43.714 / 0.98591 / 3.4304, and cost
+1.54 s per 300 frames against RCAS's 1.34 s (plain 1.13 s). It lands detail slightly nearer ground
+truth but gives up 0.70 dB of fidelity for roughly ten times RCAS's overhead, and at 0.65 it
+overshoots badly (detail 4.0118). **RCAS keeps the default slot**; NVSharpen is offered because it is
+stable and the difference is a matter of taste.
+
+*Trap, same class as the EASU one:* NVSharpen ships with a `//!WHEN` guard that fires only when there
+is no scaling at all in either direction, so in this chain the pass would silently never run — a
+no-op that measures as "no difference" and reads like a result. The installer strips the guard and
+asserts it is gone.
+
+**NVScaler sharpens inside its own pass**, so when it is selected the server drops the separate
+sharpening pass rather than stacking two sharpeners into ringing, and reports that it did.
+
 ## Denoise
 
 | Level | Filter | Recovered |
@@ -253,15 +271,80 @@ session's unblur and denoise still run. The session record reports the bypass ra
 super-resolution ran.
 
 Snapping the target so the ratio lands nearer 2x was measured and **rejected** — worse on fidelity,
-worse on detail, and 78% more pixels shipped. What actually closes the gap at those ratios is the
-sharpener: plain scaling plus RCAS beat FSRCNNX alone, at about 1% of the throughput cost instead of
-15%.
+worse on detail, and 78% more pixels shipped.
+
+The full picture, measured on one clip in one run against a ground-truth detail of 3.5179:
+
+| Ratio | Chain | PSNR | SSIM | detail |
+|---|---|---|---|---|
+| 1.50 | plain | 43.684 | 0.98583 | 3.2818 |
+| 1.50 | plain + RCAS-2.0 | 43.518 | 0.98511 | **3.5950** |
+| 1.50 | FSRCNNX + RCAS-2.0 | **43.714** | **0.98591** | 3.4304 |
+| 1.50 | FSRCNNX alone | 43.766 | 0.98615 | 3.2726 |
+
+Two things are true at once, which is why earlier readings looked contradictory. On **detail energy**
+the network alone is worthless at 1.5x (3.2726 against plain scaling's 3.2818) and the sharpener alone
+lands nearest ground truth. On **fidelity** the network never loses: FSRCNNX+RCAS beats plain+RCAS by
+0.196 dB at 1.50x, 0.344 dB at 1.70x and 0.473 dB at 1.90x — the gain grows with the ratio and is
+smallest exactly where the bypass sits.
+
+So `SrMinScaleFactor = 1.60` is a **cost policy, not a quality cliff**: roughly 0.2 dB for about 15%
+GPU, on a card that is usually shared, where the ~1% sharpener already reaches ground-truth detail.
+Lower it on the dashboard with no rebuild and the quality ladder follows automatically.
+
+## The player menu
+
+The Enhance menu has three parts: **Quality** (Automatic / Off / a graded ladder / Custom),
+**Advanced**, and **What the server did**.
+
+The ladder is **generated per source**, not fixed, because the right ordering depends on the scale
+ratio. Stages are built by adding sharpening, then super-resolution *only where the server would
+actually run it*, then denoise, then stronger denoise at the top target — and are sorted by a cost
+index derived from measured throughput, so cost is monotonic by construction. Each carries a GPU
+cost hint. A stage is stored as a recipe (target rank, SR level, denoise), never as a bare number, so
+it survives a change of source.
+
+What that produces in practice:
+
+| Source | Rungs | Recommended |
+|---|---|---|
+| 960x540 | 10 | 1080p, FSRCNNX + sharpen |
+| 1280x720 | 9 | 1080p, sharpen only (1.5x — the network is bypassed, so there is no fake rung) |
+| 720x960 (portrait) | 6 | — |
+| 1920x1080 | 6 | — |
+| 2160p | 0 | "already above the server's upscale limit — nothing to offer" |
+
+Ten rungs need three eligible targets; a 1080p source has two, so it honestly gets six rather than a
+padded ten. Nothing that measured worse than the default appears in the ladder — no `fsrcnnx-heavy`,
+no Anime4K, no sharpening above `low`, no NVScaler. All of those remain available in **Advanced**,
+which exposes upscale target (filtered to what is above the source), unblur, denoise, detail level,
+debanding, and the libplacebo scaling kernel (whitelisted — an unknown kernel is ignored rather than
+tried, because it would fail the whole job). Choosing anything there flips the indicator to Custom.
+
+Targets are filtered using the server's own numbers from the probe, not values hardcoded in
+JavaScript. A target between `MinScaleFactor` and `SrMinScaleFactor` is still offered, labelled
+"(plain scaling at this ratio)", because the scale plus sharpener runs and measured well there.
+
+## Off means direct play
+
+The stored preference has three states, and "said nothing" is deliberately different from "said off":
+
+- **unset** — the viewer has never opened the menu. The client sends nothing at all, so the server's
+  own default applies (with `RequireClientOptIn = false`, eligible transcodes are still enhanced).
+- **off** — an explicit opinion. The client marks the request `upscale=off&deblur=off&denoise=off`
+  and **leaves direct play alone**, so the file direct plays exactly as stock Jellyfin would. The
+  markers exist only so that a session which transcodes for some unrelated reason knows this is Off
+  rather than silence. Server-side this suppresses the dashboard defaults too, so `ForceTranscode`
+  has no plan to act on and a would-be stream copy stays a copy. Status: `off-by-client`.
+- **a stage** — the client additionally sets `EnableDirectPlay=false` / `EnableDirectStream=false` on
+  the PlaybackInfo *request*, because a direct-play response contains no `TranscodingUrl` to mark.
 
 ## How a viewer's choice reaches the server
 
 Jellyfin's `ParseStreamOptions` copies **every lowercase-initial query parameter** into the request's
 `StreamOptions` dictionary, readable server-side via `GetOption(...)`. Nothing clamps or rewrites it.
-The injected client therefore appends `&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=light`.
+The injected client therefore appends
+`&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=light&deband=on&kernel=ewa_lanczos`.
 
 A requested *bitrate* would not survive — Jellyfin clamps it to the source bitrate before
 `EncodingHelper` sees it — which is why an earlier sentinel-bitrate approach was abandoned.

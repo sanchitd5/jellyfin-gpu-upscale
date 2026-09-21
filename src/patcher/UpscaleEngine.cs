@@ -53,6 +53,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public bool SrBypassed { get; set; }
 
+        /// <summary>
+        /// True when the SR level sharpens inside its own pass (NVScaler) and the separate
+        /// sharpening pass was therefore dropped rather than stacked on top of it.
+        /// </summary>
+        public bool SrOwnsSharpening { get; set; }
+
+        /// <summary>The libplacebo scaling kernel this job used.</summary>
+        public string Upscaler { get; set; }
+
         /// <summary>The SR level that was asked for, even when it was bypassed.</summary>
         public string SrRequested { get; set; }
 
@@ -64,7 +73,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// <summary>Why that encoder, in particular whether a configured encoder was refused.</summary>
         public string EncoderReason { get; set; }
 
-        /// <summary>applied | not-requested | concurrency-cap | subtitle-burn-in | stream-copy | disabled | ineligible.</summary>
+        /// <summary>applied | not-requested | off-by-client | concurrency-cap | subtitle-burn-in | stream-copy | disabled | ineligible.</summary>
         public string Status { get; set; }
 
         public string Reason { get; set; }
@@ -151,6 +160,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             /// <summary>The session explicitly asked for a larger picture.</summary>
             public bool ClientOptIn { get; set; }
+
+            /// <summary>True when the SR level does its own sharpening and the RCAS pass was dropped.</summary>
+            public bool SrOwnsSharpening { get; set; }
+
+            /// <summary>The libplacebo scaling kernel for this job.</summary>
+            public string Upscaler { get; set; }
 
             public string Status { get; set; } = "not-requested";
 
@@ -246,6 +261,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 SrLevel = plan.Act && plan.UpscaleApplied ? plan.SrLevel : "off",
                 SrRequested = plan.SrRequested ?? "off",
                 SrBypassed = plan.Act && plan.SrBypassed,
+                SrOwnsSharpening = plan.Act && plan.SrOwnsSharpening,
+                Upscaler = plan.Act ? plan.Upscaler : null,
                 DenoiseLevel = plan.Act && plan.DenoiseApplied ? plan.DenoiseLevel : "off",
                 Status = status,
                 Reason = reason,
@@ -265,6 +282,24 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return record;
         }
 
+        /// <summary>Which sharpener a deblur level actually is, for the honest report.</summary>
+        private static string SharpenerName(string level)
+        {
+            if (level == null)
+            {
+                return "RCAS";
+            }
+
+            if (level.StartsWith("cas-", StringComparison.OrdinalIgnoreCase))
+            {
+                return "CAS";
+            }
+
+            return level.StartsWith("nvsharpen", StringComparison.OrdinalIgnoreCase)
+                ? "NVIDIA Image Sharpening"
+                : "RCAS";
+        }
+
         private static string Summarise(SessionRecord r)
         {
             if (r.Status != "applied")
@@ -279,6 +314,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                         return "Enhancement not applied (video is being streamed as-is)";
                     case "disabled":
                         return "Enhancement disabled on the server";
+                    case "off-by-client":
+                        return "No enhancement (the viewer selected Off; playing as Jellyfin would)";
                     default:
                         return "No enhancement";
                 }
@@ -305,10 +342,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             if (r.DeblurApplied)
             {
-                parts.Add("Unblur " + r.DeblurLevel
-                    + (r.DeblurLevel != null && r.DeblurLevel.StartsWith("cas-", StringComparison.OrdinalIgnoreCase)
-                        ? " (CAS)"
-                        : " (RCAS)"));
+                parts.Add("Unblur " + r.DeblurLevel + " (" + SharpenerName(r.DeblurLevel) + ")");
             }
 
             // Say it out loud rather than quietly reporting "plain scaling": the viewer picked a
@@ -322,6 +356,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     r.SrRequested,
                     r.SourceHeight > 0 ? (double)r.OutputHeight / r.SourceHeight : 0,
                     Settings?.SrMinScaleFactor ?? 0));
+            }
+
+            if (r.SrOwnsSharpening)
+            {
+                parts.Add("unblur left to " + r.SrLevel + ", which sharpens internally");
             }
 
             if (r.DebandApplied)
@@ -383,11 +422,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // maxHeight it is never clamped or rewritten on the way through.
                 string upscaleOption = Option(state, "upscale");
                 int? requested = null;
+
+                // "SAID NOTHING" AND "SAID OFF" ARE DIFFERENT ANSWERS.
+                //
+                // A session carrying no upscale marker at all has expressed no opinion, so the
+                // dashboard defaults apply - that is what RequireClientOptIn=false means and it is
+                // deliberately left alone. A session carrying upscale=off has expressed one, and
+                // the only honest reading of it is stock Jellyfin behaviour: no upscale, and no
+                // server-side deblur or denoise default either, so nothing turns a would-be direct
+                // play or stream copy into a transcode. Only levels the session asked for BY NAME
+                // survive an explicit Off.
+                bool clientSaidOff = false;
                 if (upscaleOption != null)
                 {
                     if (string.Equals(upscaleOption, "off", StringComparison.OrdinalIgnoreCase))
                     {
                         requested = 0;
+                        clientSaidOff = true;
                     }
                     else if (int.TryParse(upscaleOption, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
                     {
@@ -452,7 +503,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 }
 
                 // ---- sharpening -----------------------------------------------------------
-                string deblurLevel = cfg.DeblurAllowed ? (Option(state, "deblur") ?? cfg.DeblurLevel) : "off";
+                string deblurDefault = clientSaidOff ? "off" : cfg.DeblurLevel;
+                string deblurLevel = cfg.DeblurAllowed ? (Option(state, "deblur") ?? deblurDefault) : "off";
                 if (!ShaderLibrary.IsDeblurLevel(deblurLevel))
                 {
                     deblurLevel = ShaderLibrary.IsDeblurLevel(cfg.DeblurLevel) ? cfg.DeblurLevel : "off";
@@ -491,7 +543,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // ---- denoise --------------------------------------------------------------
                 // Same carrier as the others: a lowercase query parameter survives Jellyfin's
                 // ParseStreamOptions into StreamOptions and is read back with GetOption.
-                string denoiseLevel = cfg.DenoiseAllowed ? (Option(state, "denoise") ?? cfg.DenoiseLevel) : "off";
+                string denoiseDefault = clientSaidOff ? "off" : cfg.DenoiseLevel;
+                string denoiseLevel = cfg.DenoiseAllowed ? (Option(state, "denoise") ?? denoiseDefault) : "off";
                 if (!ShaderLibrary.IsDenoiseLevel(denoiseLevel))
                 {
                     denoiseLevel = ShaderLibrary.IsDenoiseLevel(cfg.DenoiseLevel) ? cfg.DenoiseLevel : "off";
@@ -505,17 +558,40 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 bool wantDeblur = !string.Equals(deblurLevel, "off", StringComparison.OrdinalIgnoreCase);
                 if (!plan.UpscaleApplied && !wantDeblur && !plan.DenoiseApplied)
                 {
-                    return Plan.No("not-requested", upscaleReason ?? "nothing requested");
+                    return clientSaidOff
+                        ? Plan.No("off-by-client", "the viewer selected Off")
+                        : Plan.No("not-requested", upscaleReason ?? "nothing requested");
                 }
+
+                // ---- deband and the scaling kernel, both session-overridable ---------------
+                // Same lowercase-query-parameter carrier as everything else. The kernel is checked
+                // against a whitelist before it is used: an unknown string here would go straight
+                // into the ffmpeg command and fail the whole job, so an unrecognised value is
+                // ignored rather than tried.
+                string debandOption = Option(state, "deband");
+                bool wantDeband = cfg.Deband;
+                if (debandOption != null)
+                {
+                    wantDeband = !(string.Equals(debandOption, "off", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(debandOption, "0", StringComparison.Ordinal)
+                        || string.Equals(debandOption, "false", StringComparison.OrdinalIgnoreCase));
+                }
+
+                plan.Upscaler = ShaderLibrary.CanonicalUpscaler(Option(state, "kernel"))
+                    ?? ShaderLibrary.CanonicalUpscaler(cfg.Upscaler)
+                    ?? "ewa_lanczos";
 
                 plan.ShaderPath = ShaderLibrary.Resolve(cfg, srLevel, deblurLevel, out string srUsed, out string deblurUsed);
                 plan.SrLevel = srUsed;
                 plan.DeblurLevel = deblurUsed;
                 plan.DeblurApplied = !string.Equals(deblurUsed, "off", StringComparison.OrdinalIgnoreCase);
+                plan.SrOwnsSharpening = wantDeblur
+                    && !plan.DeblurApplied
+                    && string.Equals(srUsed, "nvscaler", StringComparison.OrdinalIgnoreCase);
 
                 // Debanding rides along on the libplacebo instance that is being built anyway, so
                 // it is only "applied" when there is a chain for it to ride on.
-                plan.DebandApplied = cfg.Deband;
+                plan.DebandApplied = wantDeband;
 
                 if (!plan.UpscaleApplied && !plan.DeblurApplied && !plan.DenoiseApplied)
                 {
@@ -962,7 +1038,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ",libplacebo=w={0}:h={1}:upscaler={2}",
                 plan.Width,
                 plan.Height,
-                string.IsNullOrWhiteSpace(cfg.Upscaler) ? "ewa_lanczos" : cfg.Upscaler);
+                string.IsNullOrWhiteSpace(plan.Upscaler) ? "ewa_lanczos" : plan.Upscaler);
 
             // Debanding. grain=0 is not a detail: libplacebo defaults it to 6, which dithers
             // synthetic grain over the picture. That is wrong for this content, which is already

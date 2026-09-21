@@ -44,6 +44,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             ["fsrcnnx-max"] = "FSRCNN_x2_r1_32-0-2.glsl",
             ["anime4k-s"] = "Anime4K_Upscale_CNN_x2_S.glsl",
             ["anime4k-m"] = "Anime4K_Upscale_CNN_x2_M.glsl",
+
+            // NVIDIA Image Scaling v1.0.2 (agyild's mpv port, MIT). An upscaler that ALSO sharpens
+            // internally (its own SHARPNESS, default 0.25), which is why Resolve() drops the
+            // separate sharpening pass for it rather than stacking two sharpeners into ringing.
+            // It measured +13.0% detail overshoot against the ground truth on this content, so it
+            // is deliberately not in any recommended preset - it is offered because the viewer can
+            // judge their own material, not because it won a benchmark.
+            ["nvscaler"] = "NVScaler.glsl",
         };
 
         /// <summary>
@@ -106,6 +114,21 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             ["cas-low"] = "CAS-low.glsl",
             ["cas-medium"] = "CAS-medium.glsl",
             ["cas-high"] = "CAS-high.glsl",
+
+            // NVIDIA Image Sharpening v1.0.2 (agyild's mpv port, MIT), installed with its shipped
+            // //!WHEN guard removed - as published it fires ONLY at exactly 1.0x scaling, so in
+            // this chain it would silently never run. Its SHARPNESS runs the normal direction
+            // (larger is sharper, 0.0-1.0), unlike RCAS which is inverted.
+            //
+            // Measured against RCAS in the same slot, same clip, same run, 1.5x, GT detail 3.5179:
+            //   FSRCNNX + RCAS-2.0      PSNR 43.714  SSIM 0.98591  detail 3.4304  300f in 1.34 s
+            //   FSRCNNX + NVSharpen .25 PSNR 43.012  SSIM 0.98571  detail 3.5720  300f in 1.54 s
+            //   FSRCNNX + NVSharpen .65 PSNR 40.727  SSIM 0.98409  detail 4.0118
+            // NVSharpen lands detail nearer the ground truth but costs 0.70 dB of fidelity and
+            // roughly ten times RCAS's GPU overhead, so RCAS keeps the default slot. NVSharpen is
+            // offered anyway: it is stable, and the difference is a matter of taste on real footage.
+            ["nvsharpen"] = "NVSharpen-0.25.glsl",
+            ["nvsharpen-strong"] = "NVSharpen-0.65.glsl",
         };
 
         /// <summary>
@@ -113,7 +136,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// rollback names are accepted but not listed: an option that measured worse than the one
         /// beside it does not belong in a menu.
         /// </summary>
-        private static readonly string[] _deblurMenu = { "off", "low", "medium", "high" };
+        private static readonly string[] _deblurMenu = { "off", "low", "medium", "high", "nvsharpen", "nvsharpen-strong" };
 
         /// <summary>
         /// Denoise levels. These are ffmpeg filter nodes, not shaders, so they carry their filter
@@ -146,6 +169,40 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         /// <summary>The names offered as real levels, in ladder order. Aliases are accepted but not listed.</summary>
         public static IEnumerable<string> SrLevels => _srFiles.Keys;
+
+        /// <summary>
+        /// The libplacebo scaling kernels this plugin will put in a command. A kernel name goes
+        /// straight into the ffmpeg filter string, so an unknown one does not degrade the picture -
+        /// it fails the whole job. Hence a whitelist of names verified to load on this build, and
+        /// an unrecognised request falls back rather than being tried.
+        /// </summary>
+        private static readonly string[] _upscalers =
+        {
+            "ewa_lanczos", "ewa_lanczossharp", "lanczos", "spline36", "spline16",
+            "catmull_rom", "mitchell", "bicubic", "gaussian", "nearest", "bilinear",
+        };
+
+        public static List<string> Upscalers => new List<string>(_upscalers);
+
+        /// <summary>The whitelisted kernel matching this name, or null when there is none.</summary>
+        public static string CanonicalUpscaler(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return null;
+            }
+
+            string trimmed = name.Trim();
+            foreach (string known in _upscalers)
+            {
+                if (string.Equals(known, trimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    return known;
+                }
+            }
+
+            return null;
+        }
 
         /// <summary>Maps an alias to its real level name, and leaves a real level alone.</summary>
         public static string CanonicalSr(string level)
@@ -243,6 +300,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 string srCanonical = CanonicalSr(srLevel);
                 string srFile = Lookup(_srFiles, cfg.ShaderDirectory, srCanonical);
                 string deblurFile = Lookup(_deblurFiles, cfg.ShaderDirectory, deblurLevel);
+
+                // NVScaler sharpens inside its own upscaling pass. Running a second sharpener over
+                // its output is not "more sharpening", it is ringing, so the separate pass is
+                // dropped here rather than being left for the viewer to discover. The session
+                // record says it happened (SrOwnsSharpening) instead of silently reporting a level
+                // that did not run.
+                if (srFile != null
+                    && string.Equals(srCanonical, "nvscaler", StringComparison.OrdinalIgnoreCase)
+                    && deblurFile != null)
+                {
+                    deblurFile = null;
+                }
 
                 if (srFile != null)
                 {

@@ -61,6 +61,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["SrMinScaleFactor"] = cfg?.SrMinScaleFactor ?? 0d,
                 ["MinScaleFactor"] = cfg?.MinScaleFactor ?? 0d,
                 ["MaxSourceHeight"] = cfg?.MaxSourceHeight ?? 0,
+
+                // MinScaleFactor / MaxSourceHeight / MaxTargetHeight are here so the player menu
+                // can offer only targets this server would actually accept. Hardcoding them in the
+                // script would drift away from the dashboard the first time anyone tuned one.
+                ["MaxTargetHeight"] = cfg?.MaxTargetHeight ?? 0,
+                ["Upscalers"] = ShaderLibrary.Upscalers,
             };
         }
 
@@ -115,6 +121,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["SrLevel"] = record.SrLevel ?? "off",
                 ["SrRequested"] = record.SrRequested ?? "off",
                 ["SrBypassed"] = record.SrBypassed,
+                ["SrOwnsSharpening"] = record.SrOwnsSharpening,
+                ["Upscaler"] = record.Upscaler,
                 ["DeblurLevel"] = record.DeblurLevel ?? "off",
                 ["Levels"] = Levels(),
                 ["Encoder"] = record.Encoder,
