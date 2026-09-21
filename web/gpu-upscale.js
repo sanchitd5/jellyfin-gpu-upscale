@@ -85,7 +85,12 @@
                 { id: 'off', name: 'Off' },
                 { id: 'light', name: 'Light (temporal)' },
                 { id: 'strong', name: 'Strong (spatial, slower)' },
-                { id: 'max', name: 'Max (slowest)' }
+                { id: 'max', name: 'Max (slowest)' },
+                // Intel Open Image Denoise, carried by a separate patched ffmpeg binary that only
+                // this level ever reaches. Offered here and nowhere else: it is not a ladder rung,
+                // because it is the most expensive level on offer and measures as a no-op on this
+                // library's normal bitrates. It earns its place only on grainy high-bitrate video.
+                { id: 'oidn', name: 'OIDN (Intel, grainy sources only - slow)' }
             ]
         },
         {
@@ -179,7 +184,10 @@
         2160: { off: 152, sr: 138 }
     };
     // Measured 720p -> 1440p on this GPU: no denoise 167.5 fps, atadenoise 124.3, nlmeans 59.5.
-    var DENOISE_COST = { off: 1, light: 1.35, strong: 2.8, max: 3.1 };
+    // OIDN re-measured in the deployed chain on a real source: 200 fps with denoise off against
+    // 36-42 fps with it, i.e. about 5x. It is not a ladder rung - the entry is here so that a
+    // Custom selection is costed honestly rather than silently treated as free.
+    var DENOISE_COST = { off: 1, light: 1.35, strong: 2.8, max: 3.1, oidn: 5.0 };
 
     var state = {
         version: 11,

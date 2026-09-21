@@ -308,7 +308,28 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private static string DenoiserName(string level)
         {
             string filter = ShaderLibrary.DenoiseFilter(level, out _, out _);
-            return string.IsNullOrWhiteSpace(filter) ? "none" : filter;
+            if (string.IsNullOrWhiteSpace(filter))
+            {
+                return "none";
+            }
+
+            // A level may be a small chain rather than one node - the OIDN levels carry the
+            // format= conversions the filter needs around them. Report the filter that actually
+            // denoises, not the plumbing, and name OIDN in full because it is the one level that
+            // does not run on the stock jellyfin-ffmpeg at all.
+            foreach (string node in SplitFilters(filter))
+            {
+                if (node.StartsWith("format=", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                return node.StartsWith("oidn", StringComparison.OrdinalIgnoreCase)
+                    ? node + ", Intel Open Image Denoise"
+                    : node;
+            }
+
+            return filter;
         }
 
         private static string Summarise(SessionRecord r)

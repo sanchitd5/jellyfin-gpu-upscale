@@ -125,11 +125,21 @@
                         <option value="light">Light - atadenoise (temporal, cheap)</option>
                         <option value="strong">Strong - nlmeans (spatial, slower)</option>
                         <option value="max">Max - nlmeans s=2.0 (slowest)</option>
+                        <option value="oidn">OIDN - Intel Open Image Denoise (advanced, slowest)</option>
                     </select>
                     <div class="fieldDescription">
                         Runs before the upscale, so the network is not asked to reconstruct noise into detail.
-                        Both levels are <code>nlmeans_vulkan</code>; on a visibly noisy source they recovered
-                        46% (Light) and 53% (Strong) of the structural damage the noise had done.
+                        Light is <code>atadenoise</code> (temporal, CPU); Strong and Max are
+                        <code>nlmeans_vulkan</code>, which recovered 46% and 53% of the structural damage
+                        noise had done to a visibly noisy source.
+                        <br /><br />
+                        <strong>OIDN is advanced, and slow.</strong> Intel Open Image Denoise, run through a
+                        separate patched ffmpeg build that only sessions choosing this level ever touch -
+                        no other playback goes near it. On a genuinely grainy high-bitrate source it is by
+                        far the best denoiser measured here (74-86% of the fidelity lost to noise recovered,
+                        against 34-53% for nlmeans and 4-6% for atadenoise, with no over-smoothing). On this
+                        library\'s normal material it measures as a no-op: within 0.01 dB of doing nothing.
+                        It is not in the quality ladder for that reason.
                         <br /><br />
                         <strong>hqdn3d used to be "Light" and has been retired.</strong> It recovered 0.00 dB
                         and 12% of the structural damage - it traded noise for blur one for one. Do not put it

@@ -243,6 +243,7 @@ sharpening pass rather than stacking two sharpeners into ringing, and reports th
 | `light` | `atadenoise` | adaptive **temporal**, CPU — runs before `hwupload` |
 | `strong` | `nlmeans_vulkan` | **spatial**, Vulkan — runs after `hwupload` |
 | `max` | `nlmeans_vulkan=s=2.0` | spatial, strongest |
+| `oidn` | Intel Open Image Denoise | neural, CUDA — **advanced only, needs a patched ffmpeg** |
 
 The ladder climbs in cost **and changes family**, which is deliberate: a temporal filter attacks
 flicker between frames, a spatial one attacks per-frame grain, and only the spatial one removed heavy
@@ -282,6 +283,43 @@ Denoise costs roughly 60% of throughput, so it is off by default and belongs as 
 **Guardrail, documented rather than automated:** sharpening a visibly noisy source *without*
 denoising first measured worse than not sharpening at all. There is no noise estimate available where
 the chain is built, so no heuristic was invented — the config page states it beside the control.
+
+## Intel Open Image Denoise (`denoise=oidn`)
+
+A neural denoiser, running OIDN's RT filter on CUDA. It is **advanced-only, off by default, and needs
+a separately built ffmpeg** — see [OIDN.md](OIDN.md) for the filter source, the build patch and full
+reproduction instructions.
+
+There is no OIDN filter in upstream FFmpeg and no maintained wrapper anywhere, so
+[`ffmpeg/vf_oidn.c`](ffmpeg/vf_oidn.c) is new work. It is published here because that gap is real.
+
+**How it is wired, and why it cannot break normal playback.** The stock `jellyfin-ffmpeg` is left
+untouched; the patched build lives beside it, and the ffmpeg shim routes per session — an `oidn` node
+in the filter chain goes to the patched binary, everything else to stock. If the patched binary is
+missing, the `oidn` node is **stripped from the chain** so that session plays without denoise instead
+of failing on an unknown filter name.
+
+**Placement.** OIDN 2.x has no Vulkan backend, so the level emits
+`format=gbrpf32le,oidn=quality=high:srgb=0,format=yuv420p` and runs **before** `hwupload`, alongside
+`atadenoise`. No hardware round trip is needed. (An after-`hwupload` variant with
+`hwdownload`/`hwupload` was also built and measured within ~5% — the round trip is not the expensive
+part.)
+
+**Performance, and the one thing that matters if you rewrite this filter.** Handing OIDN plain host
+memory via `oidnSetSharedFilterImage` gave **11 fps** at 720p→1080p. Allocating with
+`oidnNewBufferWithStorage(..., OIDN_STORAGE_MANAGED)` and packing into the mapped pointer gave
+**42 fps** on the same chain. That 4x is the difference between a demo and something borderline usable.
+
+**Is it usable?** Borderline, and it depends on your source framerate. OIDN holds 34–46 output fps
+regardless of target resolution — the filter sets the rate, not the scale. On 24–30 fps material that
+clears realtime for one session with no room for a second. On 47–60 fps sources it does not sustain
+realtime at all.
+
+**What it is actually for.** On compressed sources it is very close to a no-op: against the
+undenoised output it measures 56–65 dB with detail energy changed by under 2%, which is the same
+picture. On genuinely grainy material it removes the grain completely while leaving hair strands,
+highlights and lash lines intact and inventing nothing — where `atadenoise` leaves that grain
+visually untouched. A high bitrate alone is not grain, so most libraries will see nothing from it.
 
 ## The non-2x ratio problem
 

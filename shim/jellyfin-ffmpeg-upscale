@@ -25,6 +25,16 @@ import sys
 import time
 
 REAL_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+
+# A SECOND, PATCHED ffmpeg carrying the "oidn" video filter (Intel Open Image Denoise),
+# which does not exist in any upstream or Jellyfin ffmpeg. It is used for one thing only:
+# the sessions that explicitly asked for the OIDN denoise level. Everything else runs on
+# the stock binary above, untouched, so a broken OIDN build costs one opt-in feature
+# rather than all playback on this server.
+OIDN_FFMPEG = "/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg"
+
+# The node the plugin emits for that level, with the format conversions it needs around it.
+OIDN_NODE_RE = re.compile(r"(?:format=gbrpf32le,)?oidn(?:=[^,]*)?(?:,format=yuv420p)?")
 REAL_FFPROBE = "/usr/lib/jellyfin-ffmpeg/ffprobe"
 CONFIG_PATH = "/etc/jellyfin-upscale.json"
 LOG_PATH = "/var/log/jellyfin-upscale.log"
@@ -70,8 +80,46 @@ def log(cfg, msg):
         pass
 
 
+def wants_oidn(args):
+    """True when this command asks for the oidn filter, which only the patched binary has."""
+    for a in args:
+        if "oidn" in a and re.search(r"(^|,|\[)oidn(=|,|\]|$)", a):
+            return True
+    return False
+
+
+def strip_oidn(args):
+    """Remove the oidn node from the filter string, leaving a working chain without it.
+
+    Used only when the patched binary is missing or not runnable. Degrading to no denoise
+    is the right failure: the level is an opt-in extra, and the alternative is handing the
+    stock ffmpeg a filter name it does not know, which fails the whole session.
+    """
+    out = list(args)
+    for i, a in enumerate(out):
+        if not ("oidn" in a):
+            continue
+        chain = OIDN_NODE_RE.sub("", a)
+        chain = re.sub(r",{2,}", ",", chain).strip(",")
+        out[i] = chain
+    return out
+
+
+def pick_binary(cfg, args):
+    """The ffmpeg to run for this command, and the argument list to run it with."""
+    if not wants_oidn(args):
+        return REAL_FFMPEG, args
+    if os.access(OIDN_FFMPEG, os.X_OK):
+        log(cfg, "routing to the OIDN ffmpeg build for this session")
+        return OIDN_FFMPEG, args
+    log(cfg, "OIDN requested but %s is not executable; running stock without the denoise node"
+        % OIDN_FFMPEG)
+    return REAL_FFMPEG, strip_oidn(args)
+
+
 def passthrough(args):
-    os.execv(REAL_FFMPEG, [REAL_FFMPEG] + args)
+    binary, argv = pick_binary(load_config(), args)
+    os.execv(binary, [binary] + argv)
 
 
 def input_path(args):
@@ -306,7 +354,8 @@ def main():
 
     rc = 1
     try:
-        proc = subprocess.Popen([REAL_FFMPEG] + new_args, stderr=subprocess.PIPE, text=True)
+        _binary, new_args = pick_binary(cfg, new_args)
+        proc = subprocess.Popen([_binary] + new_args, stderr=subprocess.PIPE, text=True)
         tail = []
         errfh = open("/tmp/upscale-last.err", "w")
         for line in proc.stderr:
