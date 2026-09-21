@@ -40,12 +40,10 @@ OIDN_FFMPEG = PATCHED_FFMPEG          # old name, kept for anything that still r
 # The filters only that binary has.
 PATCHED_FILTERS = ("oidn", "optix", "ort", "fsr2", "dlss")
 
-# The nodes the plugin emits for those levels, with the format conversions each needs
-# around it. Stripping the conversions too matters: leaving a lone format=gbrpf32le in
-# the chain would hand libplacebo a pixel format it has no reason to be given.
-PATCHED_NODE_RE = re.compile(
-    r"(?:format=gbrpf32le,)?(?:%s)(?:=[^,]*)?(?:,format=yuv420p)?"
-    % "|".join(PATCHED_FILTERS))
+# Exact node-name match for a patched filter, same boundary rule as wants_patched:
+# a bare substring match would also catch "transport" or "distort" in an unrelated
+# drawtext arg and corrupt a chain that never asked for a patched node.
+PATCHED_NODE_RE = re.compile(r"^(?:%s)(=.*)?$" % "|".join(PATCHED_FILTERS))
 REAL_FFPROBE = "/usr/lib/jellyfin-ffmpeg/ffprobe"
 CONFIG_PATH = "/etc/jellyfin-upscale.json"
 LOG_PATH = "/var/log/jellyfin-upscale.log"
@@ -116,9 +114,17 @@ def strip_patched(args):
     for i, a in enumerate(out):
         if not any(name in a for name in PATCHED_FILTERS):
             continue
-        chain = PATCHED_NODE_RE.sub("", a)
-        chain = re.sub(r",{2,}", ",", chain).strip(",")
-        out[i] = chain
+        nodes = split_filters(a)
+        drop = set()
+        for j, n in enumerate(nodes):
+            if not PATCHED_NODE_RE.match(n.strip()):
+                continue
+            drop.add(j)
+            if j > 0 and nodes[j - 1].strip() == "format=gbrpf32le":
+                drop.add(j - 1)
+            if j + 1 < len(nodes) and nodes[j + 1].strip() == "format=yuv420p":
+                drop.add(j + 1)
+        out[i] = ",".join(n for j, n in enumerate(nodes) if j not in drop)
     return out
 
 
@@ -244,7 +250,13 @@ def target_from_filter(args):
     idx = filter_index(args)
     if idx is None:
         return None
-    consts = [int(c) for c in MIN_CONST.findall(args[idx + 1])]
+    # Anchor to the scale node itself: scanning the whole -vf string lets any other
+    # min(...) in the chain shift the indices and silently target the wrong resolution.
+    scale_node = next((n for n in split_filters(args[idx + 1])
+                        if re.match(r"scale\w*\s*(=|$)", n.strip())), None)
+    if scale_node is None:
+        return None
+    consts = [int(c) for c in MIN_CONST.findall(scale_node)]
     if len(consts) < 2:
         return None
     return consts[0], consts[1]      # first min() caps width, second caps height
@@ -325,6 +337,11 @@ def take_slot(cfg):
     """Cheap concurrency cap. Returns the slot path, or None when full."""
     try:
         os.makedirs(SLOT_DIR, exist_ok=True)
+        slot = os.path.join(SLOT_DIR, str(os.getpid()))
+        # Claim the slot before counting: check-then-act would let two shims
+        # started together both pass the "live < max_concurrent" check.
+        fd = os.open(slot, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
         now = time.time()
         live = 0
         for name in os.listdir(SLOT_DIR):
@@ -337,10 +354,9 @@ def take_slot(cfg):
                     os.unlink(p)
             except Exception:
                 pass
-        if live >= int(cfg["max_concurrent"]):
+        if live > int(cfg["max_concurrent"]):    # own slot is already counted above
+            os.unlink(slot)
             return None
-        slot = os.path.join(SLOT_DIR, str(os.getpid()))
-        open(slot, "w").close()
         return slot
     except Exception:
         return None
@@ -418,7 +434,16 @@ def main():
         _binary, new_args = pick_binary(cfg, new_args)
         proc = subprocess.Popen([_binary] + new_args, stderr=subprocess.PIPE, text=True)
         tail = []
-        errfh = open("/tmp/upscale-last.err", "w")
+        # Per-pid path under SLOT_DIR, not a fixed name in world-writable /tmp: a shared
+        # path lets concurrent transcodes stomp each other's log, and a symlink planted
+        # at a fixed path would let this process truncate whatever it points to.
+        err_path = os.path.join(SLOT_DIR, "%d.err" % os.getpid())
+        try:
+            os.unlink(err_path)
+        except FileNotFoundError:
+            pass
+        err_fd = os.open(err_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        errfh = os.fdopen(err_fd, "w")
         for line in proc.stderr:
             sys.stderr.write(line)
             errfh.write(line)

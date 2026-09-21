@@ -6,7 +6,7 @@
 # quality menu. That fails safe (playback keeps working, nothing is upscaled unless the server
 # plugin is set to RequireClientOptIn = false); run this script again to restore it. The apt hook
 # in /etc/apt/apt.conf.d/99-jellyfin-gpuupscale runs it automatically after package operations.
-set -eu
+set -euo pipefail
 
 WEB=/usr/share/jellyfin/web
 SRC=/usr/lib/jellyfin-gpuupscale/gpu-upscale.js
@@ -21,7 +21,9 @@ TAG="<script defer=\"defer\" src=\"gpu-upscale.js?v=$VERSION\"></script>"
 # One pristine backup, taken the first time only.
 [ -f "$WEB/index.html.gpuupscale-orig" ] || cp -a "$WEB/index.html" "$WEB/index.html.gpuupscale-orig"
 
-install -m 0644 "$SRC" "$WEB/gpu-upscale.js"
+# Install to a temp name then rename into place, so a request mid-write never sees a truncated file.
+install -m 0644 "$SRC" "$WEB/gpu-upscale.js.tmp.$$"
+mv "$WEB/gpu-upscale.js.tmp.$$" "$WEB/gpu-upscale.js"
 
 if grep -q "gpu-upscale.js?v=$VERSION" "$WEB/index.html"; then
     echo "gpu-upscale: index.html already hooked at v$VERSION"
@@ -33,6 +35,7 @@ cp -a "$WEB/index.html" "$WEB/index.html.gpuupscale-bak"
 # Injected as the first script in <head> so the webpack chunk hook is in place before any chunk
 # loads, whichever order the deferred bundles run in. An older tag is replaced in place.
 python3 - "$WEB/index.html" "$TAG" <<'PYEOF'
+import os
 import re
 import sys
 
@@ -43,6 +46,9 @@ if replaced == 0:
     i = html.index('<script defer="defer"')
     html = html[:i] + tag + html[i:]
 
-open(path, 'w').write(html)
+# Write to a temp file then rename into place, so a request mid-write never sees a truncated file.
+tmp = path + '.tmp'
+open(tmp, 'w').write(html)
+os.replace(tmp, path)
 PYEOF
 echo "gpu-upscale: index.html hooked at v$VERSION"

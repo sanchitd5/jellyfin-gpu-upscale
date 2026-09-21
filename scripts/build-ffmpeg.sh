@@ -30,7 +30,7 @@ set -euo pipefail
 
 FFMPEG_VER="${FFMPEG_VER:-8.1.2}"
 PREFIX="${PREFIX:-/usr/lib/jellyfin-ffmpeg-oidn}"
-BUILD="${BUILD:-/tmp/ffbuild.$$}"
+BUILD="${BUILD:-$(mktemp -d)}"
 WITH_OIDN="${WITH_OIDN:-1}"
 WITH_OPTIX="${WITH_OPTIX:-0}"
 OIDN_VER="${OIDN_VER:-2.5.1}"
@@ -68,10 +68,11 @@ apt-get install -y -qq --no-install-recommends \
     build-essential git curl ca-certificates pkg-config nasm yasm meson ninja-build \
     python3 libx264-dev libxcb1-dev libvulkan-dev libshaderc-dev glslang-tools >/dev/null
 
-mkdir -p "$BUILD"
 cleanup () { [[ "$KEEP_BUILD" == "1" ]] || rm -rf "$BUILD"; }
 trap cleanup EXIT
 
+# mktemp -d already made its own directory; this is here for a caller-supplied BUILD.
+mkdir -p "$BUILD"
 cd "$BUILD"
 
 # --- vulkan headers -------------------------------------------------------------------------------

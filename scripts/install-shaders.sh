@@ -10,7 +10,7 @@
 #
 # The CAS shaders that RCAS replaced are left alone if they are already installed: they stay
 # reachable under the cas-low / cas-medium / cas-high level names as a rollback path.
-set -eu
+set -eu -o pipefail
 
 DIR=${1:-/usr/share/jellyfin-shaders}
 HERE=$(cd "$(dirname "$0")" && pwd)

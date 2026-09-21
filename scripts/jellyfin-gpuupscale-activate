@@ -5,8 +5,11 @@
 #
 # Run this when a service restart is acceptable. It backs up the live assemblies first and can be
 # rolled back with --rollback.
-set -eu
+set -eu -o pipefail
 
+# Each assembly is copied to a .new name beside its destination first, then mv'd into place.
+# mv within the same directory is atomic, so a crash or kill mid-deploy leaves either the old
+# or the new file at the real name, never a mismatched plugin/patcher pair.
 PLUGIN_DIR=/var/lib/jellyfin/plugins/GpuUpscale_1.0.0.0
 PATCH_DIR=/usr/lib/jellyfin-gpuupscale
 STAGE=$PATCH_DIR/staged
@@ -14,8 +17,14 @@ BACKUP=$PATCH_DIR/previous
 
 if [ "${1:-}" = "--rollback" ]; then
     [ -d "$BACKUP" ] || { echo "no backup to roll back to"; exit 1; }
-    cp -a "$BACKUP/Jellyfin.Plugin.GpuUpscale.dll" "$BACKUP/Jellyfin.Plugin.GpuUpscale.deps.json" "$PLUGIN_DIR/"
-    cp -a "$BACKUP/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$BACKUP/0Harmony.dll" "$PATCH_DIR/"
+    cp -a "$BACKUP/Jellyfin.Plugin.GpuUpscale.dll" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll.new"
+    cp -a "$BACKUP/Jellyfin.Plugin.GpuUpscale.deps.json" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json.new"
+    cp -a "$BACKUP/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll.new"
+    cp -a "$BACKUP/0Harmony.dll" "$PATCH_DIR/0Harmony.dll.new"
+    mv "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll.new" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll"
+    mv "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json.new" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json"
+    mv "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll.new" "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll"
+    mv "$PATCH_DIR/0Harmony.dll.new" "$PATCH_DIR/0Harmony.dll"
     chown -R jellyfin:jellyfin "$PLUGIN_DIR"
     systemctl restart jellyfin
     echo "rolled back to the previous build"
@@ -25,11 +34,23 @@ fi
 [ -d "$STAGE" ] || { echo "nothing staged in $STAGE"; exit 1; }
 
 mkdir -p "$BACKUP"
-cp -a "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json" "$BACKUP/"
-cp -a "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$PATCH_DIR/0Harmony.dll" "$BACKUP/"
+cp -a "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll" "$BACKUP/Jellyfin.Plugin.GpuUpscale.dll.new"
+cp -a "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json" "$BACKUP/Jellyfin.Plugin.GpuUpscale.deps.json.new"
+cp -a "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$BACKUP/Jellyfin.Plugin.GpuUpscale.Patcher.dll.new"
+cp -a "$PATCH_DIR/0Harmony.dll" "$BACKUP/0Harmony.dll.new"
+mv "$BACKUP/Jellyfin.Plugin.GpuUpscale.dll.new" "$BACKUP/Jellyfin.Plugin.GpuUpscale.dll"
+mv "$BACKUP/Jellyfin.Plugin.GpuUpscale.deps.json.new" "$BACKUP/Jellyfin.Plugin.GpuUpscale.deps.json"
+mv "$BACKUP/Jellyfin.Plugin.GpuUpscale.Patcher.dll.new" "$BACKUP/Jellyfin.Plugin.GpuUpscale.Patcher.dll"
+mv "$BACKUP/0Harmony.dll.new" "$BACKUP/0Harmony.dll"
 
-cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.dll" "$STAGE/Jellyfin.Plugin.GpuUpscale.deps.json" "$PLUGIN_DIR/"
-cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$STAGE/0Harmony.dll" "$PATCH_DIR/"
+cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.dll" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll.new"
+cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.deps.json" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json.new"
+cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll.new"
+cp -a "$STAGE/0Harmony.dll" "$PATCH_DIR/0Harmony.dll.new"
+mv "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll.new" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.dll"
+mv "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json.new" "$PLUGIN_DIR/Jellyfin.Plugin.GpuUpscale.deps.json"
+mv "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll.new" "$PATCH_DIR/Jellyfin.Plugin.GpuUpscale.Patcher.dll"
+mv "$PATCH_DIR/0Harmony.dll.new" "$PATCH_DIR/0Harmony.dll"
 chown -R jellyfin:jellyfin "$PLUGIN_DIR"
 chmod 644 "$PATCH_DIR"/*.dll
 
