@@ -38,6 +38,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// <summary>Master switch for denoise. When false, no session can turn it on.</summary>
         public bool DenoiseAllowed { get; set; } = true;
 
+        /// <summary>
+        /// Post-scale refinement used when a session does not name one: off, ssimsuperres.
+        /// Composes with any super-resolution level instead of replacing one.
+        /// </summary>
+        public string RefineLevel { get; set; } = "off";
+
+        /// <summary>
+        /// Chroma upscaling used when a session does not name one: off, krigbilateral.
+        /// Composes with any super-resolution level instead of replacing one.
+        /// </summary>
+        public string ChromaLevel { get; set; } = "off";
+
         /// <summary>libplacebo debanding, with synthetic grain forced off.</summary>
         public bool Deband { get; set; } = true;
 

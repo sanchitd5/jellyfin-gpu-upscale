@@ -43,6 +43,11 @@
                         <option value="anime4k-s">Anime4K S - Upscale CNN x2 (small)</option>
                         <option value="anime4k-m">Anime4K M - Upscale CNN x2 (medium)</option>
                         <option value="nvscaler">NVScaler - NVIDIA Image Scaling (sharpens internally; the separate unblur pass is dropped for it)</option>
+                        <option value="ravu-zoom">RAVU-Zoom r3 - scales to the requested size at any ratio, so it is not skipped below the super-resolution threshold (GPU light, ~2% under plain scaling)</option>
+                        <option value="cunny-fast">CuNNy fast - int8 dp4a, the cheapest CuNNy build (GPU light, ~5%)</option>
+                        <option value="cunny">CuNNy 4x16 - int8 dp4a (GPU light, ~8%)</option>
+                        <option value="cunny-heavy">CuNNy 4x32 - int8 dp4a, the largest offered (GPU moderate, ~24%)</option>
+                        <option value="cunny-ds">CuNNy 4x16 DS - the denoise-and-sharpen training (GPU moderate, ~14%)</option>
                     </select>
                     <div class="fieldDescription">
                         Used when a playback session does not pick its own shader. Two different networks
@@ -116,6 +121,47 @@
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
                         Master switch. When off, no playback session can turn denoise on.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="RefineLevel" label="Post-scale refinement (default)">
+                        <option value="off">Off</option>
+                        <option value="ssimsuperres">SSimSuperRes - adjust the scaled image to match the source when downscaled (GPU light, ~9%)</option>
+                    </select>
+                    <div class="fieldDescription">
+                        <strong>Not a super-resolution level, and not an alternative to one.</strong> It hooks
+                        <code>POSTKERNEL</code>, so it runs after the scale and corrects an enlargement rather
+                        than producing one - it composes with FSRCNNX, Anime4K, CuNNy, ravu-zoom or plain
+                        scaling, and with the unblur pass, instead of replacing any of them.
+                        <br /><br />
+                        It is also ratio-agnostic, so unlike the fixed-2x networks it is <em>not</em> skipped
+                        below the super-resolution threshold below. That is the reason it is here: between the
+                        minimum scale factor and the super-resolution threshold - 720p to 1080p is 1.5x and
+                        lands in that band - the chain is otherwise plain scaling plus a sharpener.
+                        <br /><br />
+                        Off by default. It costs a pass, and nothing on this server has measured whether it is
+                        worth one on this material - which is also why it is not in the player's quality ladder.
+                        <br /><br />
+                        The percentages beside these options are one throughput reading each, 854x480 to
+                        1920x1080, 300 frames, on a shared GPU whose encoder capped that run at about 120 fps.
+                        They order the options by cost and say nothing at all about how they look.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="ChromaLevel" label="Chroma upscaling (default)">
+                        <option value="off">Off</option>
+                        <option value="krigbilateral">KrigBilateral - reconstruct 4:2:0 chroma guided by the luma plane (GPU moderate, ~24%)</option>
+                    </select>
+                    <div class="fieldDescription">
+                        A different axis from everything else on this page: every other shader here works on the
+                        luma plane only. These sources are 4:2:0, so the colour planes are stored at a quarter of
+                        the luma resolution and are enlarged by the plain kernel while luma gets a trained
+                        network. This hooks <code>CHROMA</code> and reconstructs them using luma as a guide, so
+                        it composes with any super-resolution level rather than replacing one.
+                        <br /><br />
+                        Off by default, and unmeasured here, for the same reason as the refinement pass above.
                     </div>
                 </div>
 
@@ -337,6 +383,8 @@
                     page.querySelector('#SrLevel').value = SR_ALIASES[config.SrLevel] || config.SrLevel || 'anime4k-m';
                     page.querySelector('#DeblurLevel').value = config.DeblurLevel || 'off';
                     page.querySelector('#DeblurAllowed').checked = config.DeblurAllowed !== false;
+                    page.querySelector('#RefineLevel').value = config.RefineLevel || 'off';
+                    page.querySelector('#ChromaLevel').value = config.ChromaLevel || 'off';
                     page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
                     page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
                     page.querySelector('#Deband').checked = config.Deband !== false;
@@ -369,6 +417,8 @@
                     if (srPicked) { config.SrLevel = srPicked; }
                     config.DeblurLevel = page.querySelector('#DeblurLevel').value;
                     config.DeblurAllowed = page.querySelector('#DeblurAllowed').checked;
+                    config.RefineLevel = page.querySelector('#RefineLevel').value;
+                    config.ChromaLevel = page.querySelector('#ChromaLevel').value;
                     config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
                     config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
                     config.Deband = page.querySelector('#Deband').checked;

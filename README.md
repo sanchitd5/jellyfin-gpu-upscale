@@ -49,6 +49,13 @@ ffmpeg's `sr`/`dnn_processing` filters are not used; everything is GLSL through 
 ## Install
 
 **Full step-by-step guide, including environment checks and troubleshooting: [INSTALL.md](INSTALL.md).**
+
+The custom filters (`oidn`, `optix`) need a patched FFmpeg, which
+[`scripts/build-ffmpeg.sh`](scripts/build-ffmpeg.sh) builds in one command. **No binary is
+distributed, deliberately**: the build is `--enable-gpl --enable-libx264` so it is GPLv2+, and it
+links Apache-2.0 code, which GPLv2 is not compatible with. Building it for yourself carries no such
+obligation; publishing it would. The OptiX path additionally sits under NVIDIA's EULA.
+
 The short version:
 
 ```bash
@@ -132,6 +139,8 @@ one ladder:
 | `anime4k-s` | `Anime4K_Upscale_CNN_x2_S` | bloc97, MIT |
 | `anime4k-m` | `Anime4K_Upscale_CNN_x2_M` | bloc97, MIT |
 | `nvscaler` | `NVScaler` (NVIDIA Image Scaling v1.0.2) | NVIDIA, MIT |
+| `ravu-zoom` | `ravu-zoom-r3` — **ratio-agnostic**, exempt from the SR bypass | bjin, LGPL-3.0-or-later |
+| `cunny-fast` / `cunny` / `cunny-heavy` / `cunny-ds` | CuNNy int8 dp4a builds | funnyplanter, LGPL-3.0 |
 
 The legacy names `light` / `standard` / `max` still resolve.
 
@@ -191,6 +200,30 @@ smallest exactly where the bypass sits.
 So `SrMinScaleFactor = 1.60` is a **cost policy, not a quality cliff**: roughly 0.2 dB for about 15%
 GPU, on a card that is usually shared, where the ~1% sharpener already reaches ground-truth detail.
 Lower it on the dashboard with no rebuild and the quality ladder follows automatically.
+
+## Two more axes: refine and chroma
+
+Not every shader is a super-resolution level. Two hook different stages and therefore **compose with**
+an SR level rather than replacing one, so each has its own control.
+
+**`refine=ssimsuperres`** — SSimSuperRes (Shiandow, via igv; LGPL-3.0-or-later). Hooks `POSTKERNEL`:
+it corrects an enlargement rather than producing one, adjusting the upscaled image so that downscaling
+it reproduces the source. Because it is ratio-agnostic it is **exempt from `SrMinScaleFactor`**, so it
+runs in the 1.15–1.60 band where the fixed-2x networks are bypassed — a band that previously had
+nothing but plain scaling plus a sharpener.
+
+**`chroma=krigbilateral`** — KrigBilateral (Shiandow, via igv; LGPL-3.0-or-later). Hooks `CHROMA`.
+Every other shader here is luma-only, and these sources are 4:2:0, so chroma arrives at quarter
+resolution and is otherwise left to libplacebo's default. This is the only level that touches it.
+
+All four compose: `sr=fsrcnnx&deblur=low&refine=ssimsuperres&chroma=krigbilateral` resolves to a
+single composed shader file, because the four hook points (LUMA, LUMA, POSTKERNEL, CHROMA) make
+concatenation order bookkeeping rather than semantics. Only `sr` and `deblur` share a hook and remain
+order-sensitive.
+
+**`ravu-zoom` is exempt from the SR bypass too**, for a different reason: it is handed its output size
+rather than being a fixed-2x network whose result gets shrunk back, which is the whole reason
+`SrMinScaleFactor` exists.
 
 ## Sharpening: RCAS
 

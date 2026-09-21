@@ -58,6 +58,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["Sr"] = ShaderLibrary.AvailableSrLevels(cfg),
                 ["Deblur"] = ShaderLibrary.AvailableDeblurLevels(cfg),
                 ["Denoise"] = ShaderLibrary.AvailableDenoiseLevels(),
+
+                // Two axes of their own, not extra rungs of the SR list: the refinement pass
+                // hooks POSTKERNEL and the chroma pass hooks CHROMA, so each composes with
+                // whatever SR level is chosen. They are listed separately so the menu can
+                // render them as separate controls rather than folding them into one list.
+                ["Refine"] = ShaderLibrary.AvailableRefineLevels(cfg),
+                ["Chroma"] = ShaderLibrary.AvailableChromaLevels(cfg),
                 ["SrMinScaleFactor"] = cfg?.SrMinScaleFactor ?? 0d,
                 ["MinScaleFactor"] = cfg?.MinScaleFactor ?? 0d,
                 ["MaxSourceHeight"] = cfg?.MaxSourceHeight ?? 0,
@@ -100,6 +107,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ["DenoiseLevel"] = "off",
                     ["DebandApplied"] = false,
                     ["SrLevel"] = "off",
+                    ["RefineLevel"] = "off",
+                    ["ChromaLevel"] = "off",
                     ["SrBypassed"] = false,
                     ["Encoder"] = null,
                     ["Status"] = UpscalePatches.Active ? "unknown" : "patches-inactive",
@@ -119,6 +128,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["DenoiseLevel"] = record.DenoiseLevel ?? "off",
                 ["DebandApplied"] = record.DebandApplied,
                 ["SrLevel"] = record.SrLevel ?? "off",
+                ["RefineLevel"] = record.RefineLevel ?? "off",
+                ["RefineApplied"] = record.RefineApplied,
+                ["ChromaLevel"] = record.ChromaLevel ?? "off",
+                ["ChromaApplied"] = record.ChromaApplied,
                 ["SrRequested"] = record.SrRequested ?? "off",
                 ["SrBypassed"] = record.SrBypassed,
                 ["SrOwnsSharpening"] = record.SrOwnsSharpening,

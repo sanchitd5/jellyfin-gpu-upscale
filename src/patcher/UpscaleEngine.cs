@@ -46,6 +46,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         public string SrLevel { get; set; }
 
+        /// <summary>The post-scale refinement pass that ran (SSimSuperRes), or "off".</summary>
+        public string RefineLevel { get; set; }
+
+        /// <summary>Whether a refinement pass was actually put in the shader.</summary>
+        public bool RefineApplied { get; set; }
+
+        /// <summary>The chroma upscaling pass that ran (KrigBilateral), or "off".</summary>
+        public string ChromaLevel { get; set; }
+
+        /// <summary>Whether a chroma pass was actually put in the shader.</summary>
+        public bool ChromaApplied { get; set; }
+
         /// <summary>
         /// True when an SR level was asked for and deliberately not run because the upscale ratio
         /// was below SrMinScaleFactor. Reported so the player can say the level is inactive for
@@ -147,6 +159,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             public bool SrBypassed { get; set; }
 
             public string DeblurLevel { get; set; } = "off";
+
+            public string RefineLevel { get; set; } = "off";
+
+            public bool RefineApplied { get; set; }
+
+            public string ChromaLevel { get; set; } = "off";
+
+            public bool ChromaApplied { get; set; }
 
             public string DenoiseLevel { get; set; } = "off";
 
@@ -259,6 +279,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 DebandApplied = plan.Act && plan.DebandApplied,
                 DeblurLevel = plan.Act && plan.DeblurApplied ? plan.DeblurLevel : "off",
                 SrLevel = plan.Act && plan.UpscaleApplied ? plan.SrLevel : "off",
+                RefineLevel = plan.Act && plan.RefineApplied ? plan.RefineLevel : "off",
+                RefineApplied = plan.Act && plan.RefineApplied,
+                ChromaLevel = plan.Act && plan.ChromaApplied ? plan.ChromaLevel : "off",
+                ChromaApplied = plan.Act && plan.ChromaApplied,
                 SrRequested = plan.SrRequested ?? "off",
                 SrBypassed = plan.Act && plan.SrBypassed,
                 SrOwnsSharpening = plan.Act && plan.SrOwnsSharpening,
@@ -393,6 +417,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (r.DeblurApplied)
             {
                 parts.Add("Unblur " + r.DeblurLevel + " (" + SharpenerName(r.DeblurLevel) + ")");
+            }
+
+            // These two are named in full because neither is an SR level and a viewer reading
+            // "Upscaled ... (fsrcnnx)" would otherwise have no way to tell that a second and a
+            // third shader pass also ran.
+            if (r.RefineApplied)
+            {
+                parts.Add("Refine " + r.RefineLevel + " (SSimSuperRes, post-scale)");
+            }
+
+            if (r.ChromaApplied)
+            {
+                parts.Add("Chroma " + r.ChromaLevel + " (KrigBilateral, 4:2:0 chroma upscaling)");
             }
 
             // Say it out loud rather than quietly reporting "plain scaling": the viewer picked a
@@ -569,14 +606,40 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
                 plan.SrRequested = ShaderLibrary.CanonicalSr(srLevel) ?? "off";
 
+                // ---- post-scale refinement and chroma upscaling ---------------------------
+                // Two axes of their own, carried on the same lowercase-query-parameter channel as
+                // everything else. Neither is an SR level: the refinement hooks POSTKERNEL and the
+                // chroma pass hooks CHROMA, so both compose with whatever SR level is in force
+                // rather than replacing it. See ShaderLibrary._refineFiles / _chromaFiles.
+                string refineDefault = clientSaidOff ? "off" : cfg.RefineLevel;
+                string refineLevel = Option(state, "refine") ?? refineDefault;
+                if (!ShaderLibrary.IsRefineLevel(refineLevel))
+                {
+                    refineLevel = ShaderLibrary.IsRefineLevel(cfg.RefineLevel) ? cfg.RefineLevel : "off";
+                }
+
+                string chromaDefault = clientSaidOff ? "off" : cfg.ChromaLevel;
+                string chromaLevel = Option(state, "chroma") ?? chromaDefault;
+                if (!ShaderLibrary.IsChromaLevel(chromaLevel))
+                {
+                    chromaLevel = ShaderLibrary.IsChromaLevel(cfg.ChromaLevel) ? cfg.ChromaLevel : "off";
+                }
+
                 if (!plan.UpscaleApplied)
                 {
                     // The SR shaders only earn their pass when the output is meaningfully larger
-                    // than the source, so at 1:1 they would cost a pass for nothing.
+                    // than the source, so at 1:1 they would cost a pass for nothing. The same is
+                    // true of the refinement pass: SSimSuperRes corrects an enlargement, and its
+                    // own //!WHEN guard would not fire at 1:1 anyway, so offering it there would be
+                    // offering a pass that silently does nothing. The chroma pass is different -
+                    // 4:2:0 chroma is subsampled whether or not the frame is being enlarged - so it
+                    // is deliberately left alone here.
                     srLevel = "off";
+                    refineLevel = "off";
                 }
                 else if (cfg.SrMinScaleFactor > 1.0
                     && !string.Equals(srLevel, "off", StringComparison.OrdinalIgnoreCase)
+                    && !ShaderLibrary.SrIsRatioAgnostic(srLevel)
                     && plan.Height < sh * cfg.SrMinScaleFactor)
                 {
                     // BELOW THE RATIO THE NETWORK IS WORTH RUNNING. Both shipped SR networks are
@@ -586,6 +649,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     // network and keep the rest of the chain: the upscale still happens, and the
                     // sharpener (RCAS, which costs about nothing) recovers more detail at these
                     // ratios than the network did. See UpscaleSettings.SrMinScaleFactor.
+                    //
+                    // NOT every SR level is fixed-2x. ravu-zoom is handed the output size directly
+                    // and scales to it at any ratio, so the shrink-back argument above is simply
+                    // untrue of it and SrIsRatioAgnostic exempts it. The refinement pass
+                    // (SSimSuperRes) is exempt for the same reason and is not touched here at all -
+                    // filling this gap with something better than a sharpener is the whole reason
+                    // it was added.
                     plan.SrBypassed = true;
                     srLevel = "off";
                 }
@@ -606,7 +676,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.DenoiseApplied = plan.DenoiseFilter != null;
 
                 bool wantDeblur = !string.Equals(deblurLevel, "off", StringComparison.OrdinalIgnoreCase);
-                if (!plan.UpscaleApplied && !wantDeblur && !plan.DenoiseApplied)
+                bool wantRefine = !string.Equals(refineLevel, "off", StringComparison.OrdinalIgnoreCase);
+                bool wantChroma = !string.Equals(chromaLevel, "off", StringComparison.OrdinalIgnoreCase);
+                if (!plan.UpscaleApplied && !wantDeblur && !wantRefine && !wantChroma && !plan.DenoiseApplied)
                 {
                     return clientSaidOff
                         ? Plan.No("off-by-client", "the viewer selected Off")
@@ -631,10 +703,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ?? ShaderLibrary.CanonicalUpscaler(cfg.Upscaler)
                     ?? "ewa_lanczos";
 
-                plan.ShaderPath = ShaderLibrary.Resolve(cfg, srLevel, deblurLevel, out string srUsed, out string deblurUsed);
+                plan.ShaderPath = ShaderLibrary.Resolve(
+                    cfg,
+                    srLevel,
+                    deblurLevel,
+                    refineLevel,
+                    chromaLevel,
+                    out string srUsed,
+                    out string deblurUsed,
+                    out string refineUsed,
+                    out string chromaUsed);
                 plan.SrLevel = srUsed;
                 plan.DeblurLevel = deblurUsed;
                 plan.DeblurApplied = !string.Equals(deblurUsed, "off", StringComparison.OrdinalIgnoreCase);
+                plan.RefineLevel = refineUsed;
+                plan.RefineApplied = !string.Equals(refineUsed, "off", StringComparison.OrdinalIgnoreCase);
+                plan.ChromaLevel = chromaUsed;
+                plan.ChromaApplied = !string.Equals(chromaUsed, "off", StringComparison.OrdinalIgnoreCase);
                 plan.SrOwnsSharpening = wantDeblur
                     && !plan.DeblurApplied
                     && string.Equals(srUsed, "nvscaler", StringComparison.OrdinalIgnoreCase);
@@ -643,7 +728,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // it is only "applied" when there is a chain for it to ride on.
                 plan.DebandApplied = wantDeband;
 
-                if (!plan.UpscaleApplied && !plan.DeblurApplied && !plan.DenoiseApplied)
+                if (!plan.UpscaleApplied && !plan.DeblurApplied && !plan.RefineApplied
+                    && !plan.ChromaApplied && !plan.DenoiseApplied)
                 {
                     // Sharpening was asked for but its shader is missing: nothing left to do.
                     return Plan.No("not-requested", "requested shaders unavailable");

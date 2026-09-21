@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace Jellyfin.Plugin.GpuUpscale.Patcher
 {
@@ -52,6 +53,87 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             // is deliberately not in any recommended preset - it is offered because the viewer can
             // judge their own material, not because it won a benchmark.
             ["nvscaler"] = "NVScaler.glsl",
+
+            // RAVU-Zoom r3 (gather build), bjin's mpv-prescalers, LGPL-3.0-or-later. The one SR
+            // level here that is NOT a fixed-2x network: it hooks LUMA with //!WIDTH OUTPUT.w /
+            // //!HEIGHT OUTPUT.h, so it scales straight to the requested size at whatever ratio was
+            // asked for, and its only guard is "output bigger than source in both axes". That is
+            // why _srRatioAgnostic lists it and why the SrMinScaleFactor bypass - which exists
+            // because a fixed-2x network gets shrunk back below ~1.5x - does not apply to it.
+            ["ravu-zoom"] = "ravu-zoom-r3.glsl",
+
+            // CuNNy, funnyplanter, LGPL-3.0. int8 dp4a builds; this GPU has native dp4a and
+            // libplacebo is the Vulkan backend upstream requires for them. Fixed 2x, and they
+            // carry upstream's honest 1.3x guard, so they sit under SrMinScaleFactor like FSRCNNX.
+            // The SOFT family is trained to anti-alias and not to sharpen, which is the safer
+            // choice next to a sharpening pass; the DS build is offered for anyone who wants its
+            // denoise-and-sharpen training instead. Ordered small to large.
+            ["cunny-fast"] = "CuNNy-fast-SOFT-Q.glsl",
+            ["cunny"] = "CuNNy-4x16-SOFT-Q.glsl",
+            ["cunny-heavy"] = "CuNNy-4x32-SOFT-Q.glsl",
+            ["cunny-ds"] = "CuNNy-4x16-DS-Q.glsl",
+        };
+
+        /// <summary>
+        /// SR levels that scale to the requested size themselves instead of being a fixed-2x
+        /// network that libplacebo shrinks back down.
+        ///
+        /// SrMinScaleFactor exists for the fixed-2x case: below about 1.5x so little of a 2x
+        /// network's output survives the shrink that it measured no better than plain scaling.
+        /// That reasoning does not apply to a prescaler that is handed the output size directly,
+        /// so bypassing one of these below the threshold would be switching off a level for a
+        /// reason that is not true of it. Decide() consults this before applying the bypass.
+        /// </summary>
+        private static readonly HashSet<string> _srRatioAgnostic = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ravu-zoom",
+        };
+
+        /// <summary>
+        /// POST-SCALE REFINEMENT. A different axis from the SR list, not another rung of it.
+        ///
+        /// SSimSuperRes (Shiandow, published by igv, LGPL-3.0-or-later) hooks POSTKERNEL: it runs
+        /// AFTER libplacebo's scaling kernel and adjusts the already-enlarged image so that
+        /// downscaling it reproduces the source. Three consequences decided the shape of this
+        /// control rather than making it an SR level:
+        ///
+        ///  1. It does not produce the enlargement, it corrects one, so it has nothing to replace.
+        ///     Every SR level here hooks LUMA or MAIN; POSTKERNEL is a third group, so it composes
+        ///     with all of them and with the RCAS/NVSharpen pass rather than competing for a slot.
+        ///  2. It is ratio-agnostic, and its guard (NATIVE_CROPPED.h OUTPUT.h &lt;) fires whenever the
+        ///     output is taller than the source. So it runs BELOW SrMinScaleFactor, where the
+        ///     fixed-2x networks are deliberately bypassed and the chain is otherwise plain
+        ///     scaling plus a sharpener. That gap is a real share of sessions (720p to 1080p is
+        ///     1.5x) and this is the only thing here that fills it with more than a sharpener.
+        ///  3. Making it an SR level would have made it mutually exclusive with FSRCNNX, which is
+        ///     exactly the combination worth having.
+        ///
+        /// It is therefore its own session option ("refine"), off by default, Advanced only, and
+        /// not a rung of the graded ladder - nothing here has been measured for quality.
+        /// </summary>
+        private static readonly Dictionary<string, string> _refineFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["off"] = null,
+            ["ssimsuperres"] = "SSimSuperRes.glsl",
+        };
+
+        /// <summary>
+        /// CHROMA upscaling. Another axis again: every other shader in this plugin is luma-only.
+        ///
+        /// These sources are 4:2:0, so the chroma planes are stored at a quarter of the luma
+        /// resolution and are enlarged by libplacebo's ordinary kernel while the luma plane gets a
+        /// trained network. KrigBilateral (Shiandow, published by igv, LGPL-3.0-or-later) hooks
+        /// CHROMA and reconstructs the chroma planes guided by the luma plane. Its guard,
+        /// CHROMA.w LUMA.w &lt;, fires exactly when chroma is subsampled, so it is correct as
+        /// published and nothing is stripped.
+        ///
+        /// It composes with any SR level rather than replacing one, which is why it has its own
+        /// control instead of a place in the SR list. Off by default, Advanced only.
+        /// </summary>
+        private static readonly Dictionary<string, string> _chromaFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["off"] = null,
+            ["krigbilateral"] = "KrigBilateral.glsl",
         };
 
         /// <summary>
@@ -328,6 +410,62 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public static bool IsSrLevel(string level) => CanonicalSr(level) != null;
 
         /// <summary>
+        /// Does this SR level scale to the requested size itself? See _srRatioAgnostic: the
+        /// SrMinScaleFactor bypass is aimed at fixed-2x networks and must not disable a prescaler
+        /// that was handed the output size in the first place.
+        /// </summary>
+        public static bool SrIsRatioAgnostic(string level)
+        {
+            string canonical = CanonicalSr(level);
+            return canonical != null && _srRatioAgnostic.Contains(canonical);
+        }
+
+        /// <summary>Maps a refinement level name to itself, or null when there is no such level.</summary>
+        public static string CanonicalRefine(string level) => Canonical(_refineFiles, level);
+
+        /// <summary>Maps a chroma level name to itself, or null when there is no such level.</summary>
+        public static string CanonicalChroma(string level) => Canonical(_chromaFiles, level);
+
+        public static bool IsRefineLevel(string level) => CanonicalRefine(level) != null;
+
+        public static bool IsChromaLevel(string level) => CanonicalChroma(level) != null;
+
+        private static string Canonical(Dictionary<string, string> table, string level)
+        {
+            if (string.IsNullOrWhiteSpace(level))
+            {
+                return null;
+            }
+
+            string trimmed = level.Trim();
+            return table.ContainsKey(trimmed) ? trimmed.ToLowerInvariant() : null;
+        }
+
+        /// <summary>
+        /// The refinement levels whose shader file is present. Same rule as the SR list: a level
+        /// whose file was never installed is not offered, because an option that silently does
+        /// nothing is worse than an absent one.
+        /// </summary>
+        public static List<string> AvailableRefineLevels(UpscaleSettings cfg) => Available(_refineFiles, cfg);
+
+        /// <summary>The chroma levels whose shader file is present.</summary>
+        public static List<string> AvailableChromaLevels(UpscaleSettings cfg) => Available(_chromaFiles, cfg);
+
+        private static List<string> Available(Dictionary<string, string> table, UpscaleSettings cfg)
+        {
+            var found = new List<string>();
+            foreach (var pair in table)
+            {
+                if (pair.Value == null || Lookup(table, cfg?.ShaderDirectory, pair.Key) != null)
+                {
+                    found.Add(pair.Key);
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>
         /// The super-resolution levels whose shader file is actually present on this server, in
         /// ladder order. The player menu is built from this rather than from a hard-coded list, so
         /// a level whose file was never installed is not offered - an option that silently does
@@ -394,16 +532,29 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// Returns null rather than throwing if anything is missing, so an unknown or unreadable
         /// level degrades to plain scaling instead of breaking the transcode.
         /// </summary>
-        public static string Resolve(UpscaleSettings cfg, string srLevel, string deblurLevel, out string srUsed, out string deblurUsed)
+        public static string Resolve(
+            UpscaleSettings cfg,
+            string srLevel,
+            string deblurLevel,
+            string refineLevel,
+            string chromaLevel,
+            out string srUsed,
+            out string deblurUsed,
+            out string refineUsed,
+            out string chromaUsed)
         {
             srUsed = "off";
             deblurUsed = "off";
+            refineUsed = "off";
+            chromaUsed = "off";
 
             try
             {
                 string srCanonical = CanonicalSr(srLevel);
                 string srFile = Lookup(_srFiles, cfg.ShaderDirectory, srCanonical);
                 string deblurFile = Lookup(_deblurFiles, cfg.ShaderDirectory, deblurLevel);
+                string refineFile = Lookup(_refineFiles, cfg.ShaderDirectory, CanonicalRefine(refineLevel));
+                string chromaFile = Lookup(_chromaFiles, cfg.ShaderDirectory, CanonicalChroma(chromaLevel));
 
                 // NVScaler sharpens inside its own upscaling pass. Running a second sharpener over
                 // its output is not "more sharpening", it is ringing, so the separate pass is
@@ -417,37 +568,67 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     deblurFile = null;
                 }
 
+                // ORDER IS THE HOOK ORDER, and these four occupy four groups, so the concatenation
+                // order below is bookkeeping rather than semantics. libplacebo runs LUMA hooks
+                // before it scales, MAIN hooks after, POSTKERNEL after the scaling kernel, and
+                // CHROMA on the chroma planes:
+                //
+                //   sr      LUMA (FSRCNNX, CuNNy, ravu-zoom, NVScaler) or MAIN (Anime4K)
+                //   deblur  LUMA (RCAS, NVSharpen)
+                //   refine  POSTKERNEL (SSimSuperRes) - always after the scale, whatever precedes it
+                //   chroma  CHROMA (KrigBilateral)   - a different plane entirely
+                //
+                // The one pairing where file order really does decide anything is sr+deblur when
+                // both hook LUMA, and that is the existing arrangement documented at Compose().
+                var files = new List<string>();
+                var names = new List<string>();
+
                 if (srFile != null)
                 {
                     srUsed = srCanonical;
+                    files.Add(srFile);
+                    names.Add(srUsed);
                 }
 
                 if (deblurFile != null)
                 {
                     deblurUsed = deblurLevel.Trim().ToLowerInvariant();
+                    files.Add(deblurFile);
+                    names.Add(deblurUsed);
                 }
 
-                if (srFile == null && deblurFile == null)
+                if (refineFile != null)
+                {
+                    refineUsed = CanonicalRefine(refineLevel);
+                    files.Add(refineFile);
+                    names.Add(refineUsed);
+                }
+
+                if (chromaFile != null)
+                {
+                    chromaUsed = CanonicalChroma(chromaLevel);
+                    files.Add(chromaFile);
+                    names.Add(chromaUsed);
+                }
+
+                if (files.Count == 0)
                 {
                     return null;
                 }
 
-                if (deblurFile == null)
+                if (files.Count == 1)
                 {
-                    return srFile;
+                    return files[0];
                 }
 
-                if (srFile == null)
-                {
-                    return deblurFile;
-                }
-
-                return Compose(cfg, srUsed, deblurUsed, srFile, deblurFile);
+                return Compose(cfg, names, files);
             }
             catch (Exception)
             {
                 srUsed = "off";
                 deblurUsed = "off";
+                refineUsed = "off";
+                chromaUsed = "off";
                 return null;
             }
         }
@@ -463,17 +644,29 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return File.Exists(path) ? path : null;
         }
 
-        private static string Compose(UpscaleSettings cfg, string srLevel, string deblurLevel, string srFile, string deblurFile)
+        private static string Compose(UpscaleSettings cfg, List<string> names, List<string> files)
         {
             string dir = cfg.ShaderCacheDirectory;
             Directory.CreateDirectory(dir);
-            string composed = Path.Combine(dir, srLevel + "+" + deblurLevel + ".glsl");
+            string composed = Path.Combine(dir, string.Join("+", names) + ".glsl");
 
-            if (File.Exists(composed)
-                && File.GetLastWriteTimeUtc(composed) > File.GetLastWriteTimeUtc(srFile)
-                && File.GetLastWriteTimeUtc(composed) > File.GetLastWriteTimeUtc(deblurFile))
+            if (File.Exists(composed))
             {
-                return composed;
+                DateTime stamp = File.GetLastWriteTimeUtc(composed);
+                bool stale = false;
+                foreach (string file in files)
+                {
+                    if (File.GetLastWriteTimeUtc(file) >= stamp)
+                    {
+                        stale = true;
+                        break;
+                    }
+                }
+
+                if (!stale)
+                {
+                    return composed;
+                }
             }
 
             // The SR shader is written first, but file order is NOT what decides the running
@@ -494,7 +687,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             //     its detail energy landed at 4.0065 against CAS-medium's 4.9302 for a ground
             //     truth of 3.5179. So the pairing is allowed for every SR family.
             string tmp = composed + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            File.WriteAllText(tmp, File.ReadAllText(srFile) + "\n\n" + File.ReadAllText(deblurFile));
+            var sb = new StringBuilder();
+            foreach (string file in files)
+            {
+                if (sb.Length > 0)
+                {
+                    sb.Append("\n\n");
+                }
+
+                sb.Append(File.ReadAllText(file));
+            }
+
+            File.WriteAllText(tmp, sb.ToString());
             File.Move(tmp, composed, true);
             return composed;
         }

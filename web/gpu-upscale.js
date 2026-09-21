@@ -114,7 +114,42 @@
                 // unblur pass for it rather than stacking two sharpeners into ringing. It measured
                 // +13% detail overshoot against the ground truth here, which is why it is offered
                 // but never used by a quality stage.
-                { id: 'nvscaler', name: 'NVScaler (NVIDIA, sharpens itself)' }
+                { id: 'nvscaler', name: 'NVScaler (NVIDIA, sharpens itself)' },
+                // The one entry here that is not a fixed-2x network: ravu-zoom is handed the
+                // output size and scales to it at any ratio, so the server does not apply the
+                // super-resolution ratio bypass to it.
+                { id: 'ravu-zoom', name: 'RAVU-Zoom r3 (any ratio, GPU light)' },
+                // CuNNy, int8 dp4a. Fixed 2x like FSRCNNX, so the ratio bypass applies to these
+                // exactly as it does to FSRCNNX. Small to large.
+                { id: 'cunny-fast', name: 'CuNNy fast (GPU light)' },
+                { id: 'cunny', name: 'CuNNy 4x16 (GPU light)' },
+                { id: 'cunny-heavy', name: 'CuNNy 4x32 (GPU moderate)' },
+                { id: 'cunny-ds', name: 'CuNNy 4x16 DS, denoise + sharpen (GPU moderate)' }
+            ]
+        },
+        {
+            // POST-SCALE REFINEMENT, and a separate axis rather than another super-resolution
+            // level: it hooks POSTKERNEL, so it corrects the enlargement the chain already made
+            // and composes with whichever network (or none) produced it. Being ratio-agnostic, it
+            // is also the only thing here that runs below the server's super-resolution threshold,
+            // where the fixed-2x networks are bypassed and the chain is plain scaling plus a
+            // sharpener. "Server default" sends nothing, like Debanding.
+            key: 'refine', label: 'Refine (post-scale)', fallback: 'default',
+            options: [
+                { id: 'default', name: 'Server default' },
+                { id: 'off', name: 'Off' },
+                { id: 'ssimsuperres', name: 'SSimSuperRes (GPU light)' }
+            ]
+        },
+        {
+            // CHROMA upscaling - the colour planes, which every other control here leaves to the
+            // plain kernel. These sources are 4:2:0, so chroma is stored at quarter resolution.
+            // Composes with any super-resolution level rather than replacing one.
+            key: 'chroma', label: 'Chroma upscaling', fallback: 'default',
+            options: [
+                { id: 'default', name: 'Server default' },
+                { id: 'off', name: 'Off' },
+                { id: 'krigbilateral', name: 'KrigBilateral (GPU moderate)' }
             ]
         },
         {
@@ -142,7 +177,7 @@
 
     var DEFAULT_PREFS = {
         upscale: 'off', deblur: 'off', denoise: 'off', sr: 'fsrcnnx',
-        deband: 'default', kernel: 'default'
+        deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
     };
 
     /*
@@ -220,7 +255,10 @@
         // 'unset' (no opinion - the server's own defaults stand), 'off' (an opinion: play it as
         // it is), 'custom' (the Advanced controls own it), or a stage recipe object.
         stage: 'unset',
-        prefs: { upscale: 'off', deblur: 'off', denoise: 'off', sr: 'fsrcnnx', deband: 'default', kernel: 'default' }
+        prefs: {
+            upscale: 'off', deblur: 'off', denoise: 'off', sr: 'fsrcnnx',
+            deband: 'default', kernel: 'default', refine: 'default', chroma: 'default'
+        }
     };
     window.__gpuUpscale = state;
 
@@ -268,7 +306,9 @@
                 denoise: state.prefs.denoise,
                 sr: state.prefs.sr,
                 deband: state.prefs.deband,
-                kernel: state.prefs.kernel
+                kernel: state.prefs.kernel,
+                refine: state.prefs.refine,
+                chroma: state.prefs.chroma
             }));
         } catch (e) { /* ignore */ }
     }
@@ -522,6 +562,14 @@
         if (e.sr && e.sr !== 'off' && e.upscale !== 'off') { bits.push(e.sr); }
         if (e.deblur !== 'off') { bits.push('unblur ' + e.deblur); }
         if (e.denoise !== 'off') { bits.push('denoise ' + e.denoise); }
+        if (state.prefs.refine && state.prefs.refine !== 'default' && state.prefs.refine !== 'off') {
+            bits.push('refine ' + state.prefs.refine);
+        }
+
+        if (state.prefs.chroma && state.prefs.chroma !== 'default' && state.prefs.chroma !== 'off') {
+            bits.push('chroma ' + state.prefs.chroma);
+        }
+
         return bits.length ? bits.join(', ') : 'Off';
     }
 
@@ -640,7 +688,10 @@
      * The key names are the server's: Sr, Deblur, Denoise.
      */
     function serverLevels(caps, key) {
-        var map = { sr: 'Sr', deblur: 'Deblur', denoise: 'Denoise', kernel: 'Upscalers' };
+        var map = {
+            sr: 'Sr', deblur: 'Deblur', denoise: 'Denoise', kernel: 'Upscalers',
+            refine: 'Refine', chroma: 'Chroma'
+        };
         var list = caps && caps.levels && map[key] ? caps.levels[map[key]] : null;
         return (list && list.length) ? list : null;
     }
@@ -777,7 +828,11 @@
             .map(function (c) {
                 var allowed = serverLevels(caps, c.key);
                 var options = allowed
-                    ? c.options.filter(function (o) { return allowed.indexOf(o.id) >= 0; })
+                    // "default" is this script's own id, not a server level: it means "send no
+                    // marker and let the dashboard decide". It is never in the server's list, so it
+                    // has to survive the intersection or the Refine, Chroma and Debanding rows
+                    // would lose their only neutral option.
+                    ? c.options.filter(function (o) { return o.id === 'default' || allowed.indexOf(o.id) >= 0; })
                     : c.options;
                 // Never end up with an empty control: if the server and this script agree on
                 // nothing, showing the built-in list is better than showing a dead row.
@@ -1129,6 +1184,18 @@
 
             if (state.prefs.kernel && state.prefs.kernel !== 'default') {
                 params.kernel = state.prefs.kernel;
+            }
+
+            // Refine and chroma ride alongside the ladder rather than inside it: they compose with
+            // every stage, so they are sent from the preference regardless of which stage is in
+            // force, exactly as Debanding and the scaling kernel already are. 'default' sends
+            // nothing at all, so the dashboard's own value applies.
+            if (state.prefs.refine && state.prefs.refine !== 'default') {
+                params.refine = state.prefs.refine;
+            }
+
+            if (state.prefs.chroma && state.prefs.chroma !== 'default') {
+                params.chroma = state.prefs.chroma;
             }
         }
 

@@ -109,6 +109,21 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public bool DenoiseAllowed { get; set; } = true;
 
         /// <summary>
+        /// Post-scale refinement applied by default: off, ssimsuperres. A separate axis from
+        /// SrLevel - it hooks POSTKERNEL and composes with every SR level rather than replacing
+        /// one, and it is not subject to SrMinScaleFactor. Off by default: it costs a pass and
+        /// nothing here has measured whether it is worth one on this content.
+        /// </summary>
+        public string RefineLevel { get; set; } = "off";
+
+        /// <summary>
+        /// Chroma upscaling applied by default: off, krigbilateral. Also a separate axis: it
+        /// hooks CHROMA, so it touches planes no other level here touches and composes with all
+        /// of them. Off by default, for the same reason.
+        /// </summary>
+        public string ChromaLevel { get; set; } = "off";
+
+        /// <summary>
         /// libplacebo debanding. Measured within run-to-run variance of free, and low-bitrate
         /// webcam h264 bands visibly in dark gradients. Grain is forced to 0: libplacebo's default
         /// of 6 adds synthetic grain, which is wrong for this content.
