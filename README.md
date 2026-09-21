@@ -108,6 +108,9 @@ ffmpeg's `sr`/`dnn_processing` filters are not used; everything is GLSL through 
 
 ## Install
 
+**Full step-by-step guide, including environment checks and troubleshooting: [INSTALL.md](INSTALL.md).**
+The short version:
+
 ```bash
 # 1. shaders (fetches FSRCNNX and Anime4K from upstream, installs the bundled CAS shaders)
 sudo ./scripts/install-shaders.sh
