@@ -22,6 +22,43 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         public double MinScaleFactor { get; set; } = 1.15;
 
+        /// <summary>
+        /// Run the super-resolution network only when the output is at least this multiple of the
+        /// source. Below it the upscale still happens, with plain ewa_lanczos plus whatever
+        /// sharpening the session asked for, and the GPU cost of the network is not spent.
+        ///
+        /// WHY 1.60, MEASURED, NOT GUESSED. Both shipped SR networks are fixed-2x: below 2x
+        /// libplacebo shrinks their output back down, and the further below 2x the less of the
+        /// network survives. Against a clean ground truth (720p GT, LR by lanczos downscale, 100
+        /// frames), FSRCNNX against plain ewa_lanczos:
+        ///
+        ///   ratio   PSNR gain    detail energy vs plain   (ground truth detail = 3.5179)
+        ///   1.41    +0.041 dB    3.2721 vs 3.3445   -2.2%   network LOSES detail
+        ///   1.50    +0.079 dB    3.2726 vs 3.2822   -0.3%   break-even
+        ///   1.70    +0.306 dB    3.2481 vs 3.1355   +3.6%   network earns its pass
+        ///   1.90    +0.480 dB    3.2140 vs 2.9982   +7.2%
+        ///   2.00    +0.181 dB    3.5158 vs 2.9466  +19.3%
+        ///
+        /// The detail crossover is at about 1.52. The network costs ~15% of throughput at 1080p
+        /// out, so at 1.5x - which is exactly 720p to 1080p, a large share of real sessions - it
+        /// was being paid for a result inside measurement noise. 1.60 puts the threshold on the
+        /// far side of the crossover rather than on top of it.
+        ///
+        /// What fills the gap is the sharpener, not a bigger network: at 1.5x, plain scaling plus
+        /// RCAS-2.0 ("low") measured detail energy 3.5950 against a ground truth of 3.5179, where
+        /// FSRCNNX alone managed 3.2726 - nearer the truth, for about 1% of the throughput
+        /// instead of 15%.
+        ///
+        /// Snapping the target height up so the ratio lands nearer 2x was measured as the
+        /// alternative and is worse on every axis: from a 1.5x source, FSRCNNX to 2x then shrunk
+        /// to the requested size scored PSNR 43.547 / SSIM 0.98584 / detail 3.4420, against
+        /// 43.668 / 0.98579 / 3.4981 for FSRCNNX+RCAS straight to the requested size - and it
+        /// ships 78% more pixels to do it.
+        ///
+        /// Set to 0 (or anything at or below 1) to disable the bypass and always run the network.
+        /// </summary>
+        public double SrMinScaleFactor { get; set; } = 1.60;
+
         public int MaxSourceHeight { get; set; } = 1440;
 
         public int MaxConcurrent { get; set; } = 4;

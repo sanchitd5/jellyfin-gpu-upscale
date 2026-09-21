@@ -46,6 +46,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         public string SrLevel { get; set; }
 
+        /// <summary>
+        /// True when an SR level was asked for and deliberately not run because the upscale ratio
+        /// was below SrMinScaleFactor. Reported so the player can say the level is inactive for
+        /// this combination instead of claiming a network ran.
+        /// </summary>
+        public bool SrBypassed { get; set; }
+
+        /// <summary>The SR level that was asked for, even when it was bypassed.</summary>
+        public string SrRequested { get; set; }
+
         public string DenoiseLevel { get; set; }
 
         /// <summary>The video encoder that went into the command, when this plugin chose it.</summary>
@@ -120,6 +130,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             public int SourceHeight { get; set; }
 
             public string SrLevel { get; set; } = "off";
+
+            /// <summary>The SR level the session or the dashboard asked for, before any bypass.</summary>
+            public string SrRequested { get; set; } = "off";
+
+            /// <summary>True when that level was dropped because the ratio was below SrMinScaleFactor.</summary>
+            public bool SrBypassed { get; set; }
 
             public string DeblurLevel { get; set; } = "off";
 
@@ -228,6 +244,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 DebandApplied = plan.Act && plan.DebandApplied,
                 DeblurLevel = plan.Act && plan.DeblurApplied ? plan.DeblurLevel : "off",
                 SrLevel = plan.Act && plan.UpscaleApplied ? plan.SrLevel : "off",
+                SrRequested = plan.SrRequested ?? "off",
+                SrBypassed = plan.Act && plan.SrBypassed,
                 DenoiseLevel = plan.Act && plan.DenoiseApplied ? plan.DenoiseLevel : "off",
                 Status = status,
                 Reason = reason,
@@ -287,7 +305,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             if (r.DeblurApplied)
             {
-                parts.Add("Unblur " + r.DeblurLevel + " (CAS)");
+                parts.Add("Unblur " + r.DeblurLevel
+                    + (r.DeblurLevel != null && r.DeblurLevel.StartsWith("cas-", StringComparison.OrdinalIgnoreCase)
+                        ? " (CAS)"
+                        : " (RCAS)"));
+            }
+
+            // Say it out loud rather than quietly reporting "plain scaling": the viewer picked a
+            // super-resolution level and is entitled to know it was not run, and why.
+            if (r.SrBypassed)
+            {
+                parts.Add(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} not run at {1:0.00}x (below the {2:0.00}x super-resolution threshold; "
+                        + "plain scaling measured as good there and costs far less)",
+                    r.SrRequested,
+                    r.SourceHeight > 0 ? (double)r.OutputHeight / r.SourceHeight : 0,
+                    Settings?.SrMinScaleFactor ?? 0));
             }
 
             if (r.DebandApplied)
@@ -431,10 +465,26 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     srLevel = ShaderLibrary.IsSrLevel(cfg.SrLevel) ? cfg.SrLevel : "fsrcnnx";
                 }
 
+                plan.SrRequested = ShaderLibrary.CanonicalSr(srLevel) ?? "off";
+
                 if (!plan.UpscaleApplied)
                 {
                     // The SR shaders only earn their pass when the output is meaningfully larger
                     // than the source, so at 1:1 they would cost a pass for nothing.
+                    srLevel = "off";
+                }
+                else if (cfg.SrMinScaleFactor > 1.0
+                    && !string.Equals(srLevel, "off", StringComparison.OrdinalIgnoreCase)
+                    && plan.Height < sh * cfg.SrMinScaleFactor)
+                {
+                    // BELOW THE RATIO THE NETWORK IS WORTH RUNNING. Both shipped SR networks are
+                    // fixed 2x, and below about 1.5x their output is shrunk back far enough that
+                    // they measured no better than plain ewa_lanczos - at 1.41x they measured
+                    // WORSE on detail energy - while costing ~15% of throughput. So drop the
+                    // network and keep the rest of the chain: the upscale still happens, and the
+                    // sharpener (RCAS, which costs about nothing) recovers more detail at these
+                    // ratios than the network did. See UpscaleSettings.SrMinScaleFactor.
+                    plan.SrBypassed = true;
                     srLevel = "off";
                 }
 
@@ -879,12 +929,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// <summary>
         /// The libplacebo chain for this plan.
         ///
-        /// Ordering: the super-resolution shader hooks LUMA, which libplacebo runs before scaling,
-        /// and the sharpening shader hooks MAIN, which runs after. So the picture is restored to
-        /// its target size first and only then sharpened, once, at output resolution. Sharpening
-        /// before the upscale would feed the network its own halos and get them magnified; running
-        /// both as LUMA hooks would sharpen twice, since FSRCNNX already sharpens on the way up.
-        /// That is also why the default sharpening level is conservative.
+        /// Ordering inside the shader file is decided by the hook points, not by this method -
+        /// see ShaderLibrary.Compose. Both FSRCNNX and RCAS hook LUMA, so the sharpening runs on
+        /// the network's enlarged luma plane, before the final scale, and therefore at 2x the
+        /// source size rather than at output size. That is what makes RCAS nearly free.
+        /// The one thing this method does own is that DENOISE runs first, before the upscale.
         /// </summary>
         public static string BuildChain(Plan plan)
         {

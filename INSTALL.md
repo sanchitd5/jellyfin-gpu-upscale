@@ -58,16 +58,21 @@ sudo ./scripts/install-shaders.sh
 ```
 
 This fetches FSRCNNX (igv, LGPL-3.0-or-later) and Anime4K (bloc97, MIT) from their upstream
-releases and installs the bundled CAS sharpening shaders. They are fetched rather than vendored so
-the licences stay with their authors.
+releases, derives the RCAS sharpening shaders from AMD's FSR (MIT, via agyild's mpv port) using
+`shaders/make-rcas.sh`, and installs this project's CAS shaders as a rollback path. Nothing upstream
+is vendored, so each licence stays attached to the file it belongs to.
 
 Result, in `/usr/share/jellyfin-shaders/`:
 
 ```
-FSRCNNX_x2_8-0-4-1.glsl      FSRCNNX_x2_16-0-4-1.glsl
+FSRCNNX_x2_8-0-4-1.glsl        FSRCNNX_x2_16-0-4-1.glsl
 Anime4K_Upscale_CNN_x2_S.glsl  Anime4K_Upscale_CNN_x2_M.glsl
-CAS-low.glsl  CAS-medium.glsl  CAS-high.glsl
+RCAS-2.0.glsl  RCAS-1.7.glsl  RCAS-1.4.glsl
+CAS-low.glsl   CAS-medium.glsl  CAS-high.glsl
 ```
+
+The installer verifies the fetched FSR file carries AMD's version string and MIT header before
+deriving anything. `FSR_GLSL=/path/to/FSR.glsl` installs from a local copy for an offline build.
 
 The directory must be readable by the Jellyfin service user.
 
@@ -190,6 +195,8 @@ If instead it names methods it could not resolve, your Jellyfin version has move
 Dashboard → Plugins → **GPU Upscale**. Sensible starting point:
 
 - `SrLevel` = `fsrcnnx` (the default; Anime4K only competes at its native 2x ratio)
+- `SrMinScaleFactor` = 1.60 — below this ratio the SR network is skipped, because fixed-2x networks
+  measure at or below plain scaling there. Sharpening and denoise still run
 - `MaxConcurrent` = 2 to start, raise once you have watched real GPU load
 - `RequireClientOptIn` = true, so nothing is enhanced until a viewer asks
 - `ForceTranscodeForDirectPlay` = false until you have read what it costs
@@ -286,7 +293,8 @@ refactor them; the five core patches are all-or-nothing on purpose, because a pa
 emit ffmpeg commands that fail outright. Upscaling stops; playback keeps working.
 
 **Nothing is upscaled but everything looks fine.** Check `MinScaleFactor` (a target too close to the
-source is skipped), `MaxSourceHeight`, and the shaders' own `//!WHEN` guards — FSRCNNX needs 1.300x
+source is skipped), `SrMinScaleFactor` (below it the SR network is deliberately bypassed — the
+session record will say so), `MaxSourceHeight`, and the shaders' own `//!WHEN` guards — FSRCNNX needs 1.300x
 and Anime4K 1.200x, so a 1.125x scale (720x960 → 810x1080) fires neither. Portrait sources often
 need a 1440 target rather than 1080.
 

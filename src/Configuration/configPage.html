@@ -82,14 +82,27 @@
                 <div class="selectContainer">
                     <select is="emby-select" id="DeblurLevel" label="Unblur level (default)">
                         <option value="off">Off</option>
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
+                        <option value="low">Gentle - RCAS 2.0</option>
+                        <option value="medium">Medium - RCAS 1.7</option>
+                        <option value="high">Strong - RCAS 1.4</option>
                     </select>
                     <div class="fieldDescription">
-                        Contrast adaptive sharpening for soft, low-bitrate or out-of-focus sources. Keep this
-                        conservative: the super-resolution pass already sharpens, and over-sharpened camera
-                        footage looks worse.
+                        AMD FidelityFX <strong>RCAS</strong> (FSR v1.0.2, MIT, mpv port by agyild), derived at
+                        install time by <code>shaders/install-shaders.sh</code>. It replaced this project's own
+                        CAS build after measurement: against a clean ground truth RCAS was better on PSNR and
+                        SSIM at both 1.5x and 2.0x, and its detail energy landed 5-10% above ground truth where
+                        CAS landed 19-63% above - that gap is over-sharpening. It is also nearly free, because
+                        RCAS hooks LUMA and so runs at the network's output size rather than at full output
+                        size.
+                        <br /><br />
+                        <strong>The RCAS sharpness scale is inverted and clamped.</strong> 0.0 is maximum
+                        sharpening, larger is gentler, and anything above 2.0 is silently identical to 2.0.
+                        Gentle/Medium/Strong here read in the normal direction; the inversion is handled in
+                        the level mapping, not by you.
+                        <br /><br />
+                        The old CAS shaders stay installed and are still reachable by the API under
+                        <code>cas-low</code>, <code>cas-medium</code> and <code>cas-high</code> as a rollback
+                        path. They are not offered here or in the player menu.
                     </div>
                 </div>
 
@@ -106,15 +119,23 @@
                 <div class="selectContainer">
                     <select is="emby-select" id="DenoiseLevel" label="Denoise (default)">
                         <option value="off">Off</option>
-                        <option value="light">Light - hqdn3d</option>
-                        <option value="strong">Strong - nlmeans_vulkan</option>
+                        <option value="light">Light - nlmeans</option>
+                        <option value="strong">Strong - nlmeans s=2.0</option>
                     </select>
                     <div class="fieldDescription">
                         Runs before the upscale, so the network is not asked to reconstruct noise into detail.
-                        Off by default and deliberately so: it costs real throughput and no measurement can
-                        settle whether it helps, because every sharpness metric penalises denoising by
-                        construction. Measured cost at 1080p output: Light 163 fps (5.5x realtime),
-                        Strong 86 fps (2.9x realtime).
+                        Both levels are <code>nlmeans_vulkan</code>; on a visibly noisy source they recovered
+                        46% (Light) and 53% (Strong) of the structural damage the noise had done.
+                        <br /><br />
+                        <strong>hqdn3d used to be "Light" and has been retired.</strong> It recovered 0.00 dB
+                        and 12% of the structural damage - it traded noise for blur one for one. Do not put it
+                        back for being cheap.
+                        <br /><br />
+                        Off by default: denoise costs roughly 60% of throughput (still about 2.5x realtime at
+                        4K), and on a clean source there is nothing to recover. Worth turning on for a noisy
+                        source you are also sharpening: RCAS on a visibly noisy source with no denoise measured
+                        a net loss (-0.14 dB, -0.0007 SSIM), because a sharpener amplifies noise as readily as
+                        detail.
                     </div>
                 </div>
 
@@ -141,6 +162,24 @@
                 <div class="inputContainer">
                     <input is="emby-input" type="number" id="MinScaleFactor" label="Minimum scale factor" step="0.01" min="1" max="8" required />
                     <div class="fieldDescription">Skip unless the target height is at least this multiple of the source height.</div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="SrMinScaleFactor" label="Super-resolution minimum ratio" step="0.01" min="0" max="8" required />
+                    <div class="fieldDescription">
+                        Run the super-resolution network only at or above this ratio. Below it the upscale
+                        still happens, with plain scaling plus whatever unblur is selected, and the network's
+                        GPU time is not spent. 0 disables the bypass.
+                        <br /><br />
+                        Both shipped networks are fixed 2x, so below 2x their output is shrunk back down.
+                        Measured against a clean ground truth, FSRCNNX's detail advantage over plain scaling
+                        is -2.2% at 1.41x, -0.3% at 1.50x, +3.6% at 1.70x, +7.2% at 1.90x and +19.3% at 2.00x:
+                        the crossover is about 1.52 and the network costs ~15% of throughput. The default of
+                        1.60 therefore keeps 720p to 1080p (exactly 1.5x, and a large share of real sessions)
+                        on plain scaling. Unblur is what fills the detail in at those ratios, at about 1% of
+                        the cost: at 1.5x, plain scaling plus RCAS 2.0 measured detail energy 3.5950 against a
+                        ground truth of 3.5179, where the network alone managed 3.2726.
+                    </div>
                 </div>
 
                 <div class="inputContainer">
@@ -276,6 +315,8 @@
                     page.querySelector('#Deband').checked = config.Deband !== false;
                     page.querySelector('#Upscaler').value = config.Upscaler;
                     page.querySelector('#MinScaleFactor').value = config.MinScaleFactor;
+                    page.querySelector('#SrMinScaleFactor').value =
+                        config.SrMinScaleFactor == null ? 1.6 : config.SrMinScaleFactor;
                     page.querySelector('#MaxSourceHeight').value = config.MaxSourceHeight;
                     page.querySelector('#MaxConcurrent').value = config.MaxConcurrent;
                     page.querySelector('#RequireClientOptIn').checked = config.RequireClientOptIn;
@@ -306,6 +347,7 @@
                     config.Deband = page.querySelector('#Deband').checked;
                     config.Upscaler = page.querySelector('#Upscaler').value;
                     config.MinScaleFactor = parseFloat(page.querySelector('#MinScaleFactor').value);
+                    config.SrMinScaleFactor = parseFloat(page.querySelector('#SrMinScaleFactor').value);
                     config.MaxSourceHeight = parseInt(page.querySelector('#MaxSourceHeight').value, 10);
                     config.MaxConcurrent = parseInt(page.querySelector('#MaxConcurrent').value, 10);
                     config.RequireClientOptIn = page.querySelector('#RequireClientOptIn').checked;

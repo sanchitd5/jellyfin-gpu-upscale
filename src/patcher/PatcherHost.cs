@@ -42,6 +42,28 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         public static bool IsActive() => UpscalePatches.Active;
 
+        /// <summary>
+        /// The levels this server can actually deliver right now, so the injected player menu can
+        /// be built from what exists instead of from a list baked into the script. A level whose
+        /// shader file is not installed is not listed, and therefore is not offered.
+        ///
+        /// SrMinScaleFactor rides along because the menu has to be able to say that a chosen SR
+        /// level is inactive for a low-ratio target rather than pretending it ran.
+        /// </summary>
+        private static Dictionary<string, object> Levels()
+        {
+            var cfg = UpscaleEngine.Settings;
+            return new Dictionary<string, object>
+            {
+                ["Sr"] = ShaderLibrary.AvailableSrLevels(cfg),
+                ["Deblur"] = ShaderLibrary.AvailableDeblurLevels(cfg),
+                ["Denoise"] = ShaderLibrary.AvailableDenoiseLevels(),
+                ["SrMinScaleFactor"] = cfg?.SrMinScaleFactor ?? 0d,
+                ["MinScaleFactor"] = cfg?.MinScaleFactor ?? 0d,
+                ["MaxSourceHeight"] = cfg?.MaxSourceHeight ?? 0,
+            };
+        }
+
         /// <summary>Status plus recent sessions, as JSON.</summary>
         public static string StatusJson()
         {
@@ -72,9 +94,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ["DenoiseLevel"] = "off",
                     ["DebandApplied"] = false,
                     ["SrLevel"] = "off",
+                    ["SrBypassed"] = false,
                     ["Encoder"] = null,
                     ["Status"] = UpscalePatches.Active ? "unknown" : "patches-inactive",
                     ["Summary"] = UpscalePatches.Active ? "No enhancement" : "Enhancement unavailable",
+                    ["Levels"] = Levels(),
                 });
             }
 
@@ -89,7 +113,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["DenoiseLevel"] = record.DenoiseLevel ?? "off",
                 ["DebandApplied"] = record.DebandApplied,
                 ["SrLevel"] = record.SrLevel ?? "off",
+                ["SrRequested"] = record.SrRequested ?? "off",
+                ["SrBypassed"] = record.SrBypassed,
                 ["DeblurLevel"] = record.DeblurLevel ?? "off",
+                ["Levels"] = Levels(),
                 ["Encoder"] = record.Encoder,
                 ["EncoderReason"] = record.EncoderReason,
                 ["Status"] = record.Status,

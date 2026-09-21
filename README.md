@@ -56,8 +56,11 @@ hwdownload,format=yuv420p  →  h264_nvenc / hevc_nvenc
 `deband_grain=0` is deliberate: libplacebo defaults it to 6, which adds synthetic grain that is
 wrong for already-noisy source material.
 
-Optional denoise runs **before** the upscale — `hqdn3d` in software before `hwupload`, or
-`nlmeans_vulkan` on the GPU after it.
+Optional denoise runs **before** the upscale, on the GPU via `nlmeans_vulkan` after `hwupload`.
+
+Sharpening is **RCAS**, derived from AMD FidelityFX FSR v1.0.2. It hooks `LUMA`, so it runs at the
+super-resolution shader's output size rather than at the final output size — at a 4K target that is
+a quarter of the pixels, which is why it costs roughly 1% where a `MAIN`-hooked sharpener costs 12%.
 
 ## Super-resolution levels
 
@@ -140,10 +143,11 @@ Dashboard → Plugins → GPU Upscale. Defaults suit a single busy GPU:
 | `TargetHeight` | 1080 | used when a session names no target |
 | `MaxTargetHeight` | 2160 | hard ceiling |
 | `SrLevel` | `fsrcnnx` | default super-resolution level |
-| `DeblurLevel` / `DeblurAllowed` | `off` / true | CAS sharpening; SR already sharpens, so default off |
-| `DenoiseLevel` / `DenoiseAllowed` | `off` / true | `light` = hqdn3d, `strong` = nlmeans_vulkan |
+| `DeblurLevel` / `DeblurAllowed` | `off` / true | RCAS sharpening; SR already sharpens, so default off |
+| `DenoiseLevel` / `DenoiseAllowed` | `off` / true | `light` = nlmeans_vulkan, `strong` = nlmeans_vulkan s=2.0 |
+| `SrMinScaleFactor` | 1.60 | below this ratio the SR network is skipped (see below); 0 disables |
 | `Deband` | true | with `grain=0` |
-| `MinScaleFactor` | 1.15 | skip near-identity upscales |
+| `MinScaleFactor` | 1.15 | skip near-identity upscales entirely |
 | `MaxSourceHeight` | 1440 | never upscale sources taller than this |
 | `MaxConcurrent` | 2 | beyond this, stock transcoding is used |
 | `Encoder` | `hevc_nvenc` | falls back to the client's codec when unsupported |
@@ -186,6 +190,73 @@ active (5 EncodingHelper methods patched); optional: direct-play override
 active (5 EncodingHelper methods patched); optional UNAVAILABLE: MediaInfoHelper.SetDeviceSpecificData
 ```
 
+## Sharpening: RCAS
+
+| Level | Shader | `SHARPNESS` |
+|---|---|---|
+| `low` | `RCAS-2.0` | 2.0 |
+| `medium` | `RCAS-1.7` | 1.7 |
+| `high` | `RCAS-1.4` | 1.4 |
+
+**RCAS's scale is inverted and clamped.** `0.0` is *maximum* sharpening, larger values are gentler,
+and AMD's shader hard-clamps it into `[0, 2]` — so anything above 2.0 is silently identical to 2.0.
+A gentler rung than `low` is not reachable without editing the clamp and going off-spec.
+
+RCAS replaced this project's own CAS shaders, which measured worse on every axis. Against a 720p
+ground truth with FSRCNNX upstream:
+
+| Chain | 1.5x PSNR / SSIM | 2.0x PSNR / SSIM |
+|---|---|---|
+| **FSRCNNX + RCAS-1.7** | **43.668 / 0.98579** | **41.257 / 0.98108** |
+| FSRCNNX + CAS-low | 43.394 / 0.98512 | 40.782 / 0.97924 |
+
+Detail energy at 2.0x (ground truth 3.5179): RCAS 2.0/1.7/1.4 measured 3.709 / 3.793 / 3.883,
+against CAS low/medium/high at 4.185 / 4.480 / 5.719. CAS was not finding detail, it was overshooting
+— visible as a bright halo on the light side of high-contrast edges, and as flat-area compression
+mottle lifted into speckle.
+
+The CAS shaders are still installed and remain reachable through the API as `cas-low` / `cas-medium`
+/ `cas-high` as a rollback path. They are not offered in the menu.
+
+## Denoise
+
+| Level | Filter | Recovered |
+|---|---|---|
+| `light` | `nlmeans_vulkan` | ~18% of the structural damage |
+| `strong` | `nlmeans_vulkan=s=2.0` | ~21% |
+
+Measured by degrading a clean source (noise plus a low bitrate), then scoring recovery against the
+undegraded original — so noise removal counts as gain rather than as lost "detail".
+
+**`hqdn3d` was retired.** It recovered 0.009 dB of the 3.411 dB the noise cost, and turning it up
+made things worse: it trades noise for blur one for one. In side-by-side stills it is hard to
+distinguish from no denoising at all.
+
+Denoise costs roughly 60% of throughput, so it is off by default and belongs as an opt-in tier.
+
+**Guardrail, documented rather than automated:** sharpening a visibly noisy source *without*
+denoising first measured worse than not sharpening at all. There is no noise estimate available where
+the chain is built, so no heuristic was invented — the config page states it beside the control.
+
+## The non-2x ratio problem
+
+FSRCNNX and Anime4K are fixed-2x networks. At other ratios libplacebo has to rescale their output,
+and the detail they add shrinks with it. Measured detail gain over plain scaling, by ratio:
+
+| Ratio | 1.41 | 1.50 | 1.70 | 1.90 | 2.00 |
+|---|---|---|---|---|---|
+| detail vs plain | **-2.2%** | **-0.3%** | +3.6% | +7.2% | +19.3% |
+
+Below roughly 1.5x the network is doing nothing useful while costing GPU time. `SrMinScaleFactor`
+(default **1.60**) skips it below that ratio; the upscale still happens with plain scaling, and the
+session's unblur and denoise still run. The session record reports the bypass rather than implying
+super-resolution ran.
+
+Snapping the target so the ratio lands nearer 2x was measured and **rejected** — worse on fidelity,
+worse on detail, and 78% more pixels shipped. What actually closes the gap at those ratios is the
+sharpener: plain scaling plus RCAS beat FSRCNNX alone, at about 1% of the throughput cost instead of
+15%.
+
 ## How a viewer's choice reaches the server
 
 Jellyfin's `ParseStreamOptions` copies **every lowercase-initial query parameter** into the request's
@@ -220,6 +291,30 @@ about ±25%, so treat the ratios as the reliable part.
 | + unblur medium | 176 fps | 147 fps | 93 fps |
 
 Denoise costs roughly: `hqdn3d` 5.5x realtime, `nlmeans_vulkan` 2.9x realtime.
+
+## What was tried and rejected
+
+**FSR's EASU upscaler.** Correctly isolated, EASU measured *worse than plain `ewa_lanczos`* on
+fidelity while adding only modest detail: its directional analysis was designed for clean rasterised
+input and locks onto compression-noise gradients in low-bitrate h264. Tuning the sharpening after it
+only trades ringing for softness around a worse operating point. Only FSR's **RCAS** pass survived
+evaluation, and it is what this project now uses.
+
+*Measurement trap worth knowing if you re-test this:* in the stock `FSR.glsl`, EASU writes to a
+scratch texture (`//!SAVE EASUTEX`) and only the RCAS pass writes back to `LUMA`. Strip RCAS to
+measure "EASU alone" and you measure a no-op — you get exactly the plain-scaling number. Remove the
+`//!SAVE` line so EASU writes back.
+
+**FSR2 / FSR3 / FSR4 and DLSS.** All are temporal upscalers that require renderer data recorded video
+does not contain: depth, screen-space motion vectors, and sub-pixel camera jitter. AMD's own API makes
+`jitterOffset` mandatory and warns that the jitter sequence must never be a null vector — which is
+exactly what a fixed sensor produces on every frame. Motion vectors could be approximated with optical
+flow and depth with a monocular estimator, but jitter cannot be synthesised after the fact: temporal
+upscalers reconstruct detail by accumulating sub-pixel samples that a renderer deliberately offset,
+and a camera sampled the same grid every frame. FSR4 additionally requires RDNA3/4 hardware, and the
+current SDK targets DX12 on Windows.
+
+**Frame generation** was considered and dropped: this project is about upscaling.
 
 ## Limitations and risks
 

@@ -4,11 +4,16 @@
  * Adds one "Enhance" entry to the player's settings menu holding four independent controls:
  *
  *     Upscale to   Off / 1080p / 1440p / 4K
- *     Unblur       Off / Low / Medium / High
- *     Denoise      Off / Light (hqdn3d) / Strong (nlmeans)
+ *     Unblur       Off / Gentle / Medium / Strong          (RCAS)
+ *     Denoise      Off / Light / Strong                    (nlmeans)
  *     Detail (SR)  Off / FSRCNNX / FSRCNNX heavy / Anime4K S / Anime4K M
  *
  * One home rather than four widgets, and the Quality menu goes back to meaning bitrate only.
+ *
+ * THE OPTION LISTS BELOW ARE A CEILING, NOT THE MENU. The server reports, in its probe response,
+ * which levels it can actually deliver on this machine - a super-resolution level whose shader file
+ * was never installed is not in that list - and the menu is the intersection. An option that
+ * silently does nothing is worse than an absent one.
  *
  * The SR entries name a shader FAMILY and a WEIGHT rather than a single opaque quality ladder,
  * because the two families are different networks and which one looks right on this content is a
@@ -44,20 +49,25 @@
             ]
         },
         {
+            // The levels are AMD RCAS. Its own SHARPNESS scale is INVERTED - 0.0 is maximum, 2.0
+            // is gentlest - so low/medium/high map to 2.0/1.7/1.4 on the server. These labels read
+            // in the ordinary direction on purpose: the viewer should never meet the inversion,
+            // and nothing here should tempt anyone to "turn it up" by raising a number.
             key: 'deblur', label: 'Unblur', fallback: 'off',
             options: [
                 { id: 'off', name: 'Off' },
-                { id: 'low', name: 'Low' },
+                { id: 'low', name: 'Gentle' },
                 { id: 'medium', name: 'Medium' },
-                { id: 'high', name: 'High' }
+                { id: 'high', name: 'Strong' }
             ]
         },
         {
+            // Both levels are nlmeans. hqdn3d was retired: it measured no recovery at all.
             key: 'denoise', label: 'Denoise', fallback: 'off',
             options: [
                 { id: 'off', name: 'Off' },
-                { id: 'light', name: 'Light (hqdn3d)' },
-                { id: 'strong', name: 'Strong (nlmeans)' }
+                { id: 'light', name: 'Light' },
+                { id: 'strong', name: 'Strong (slower)' }
             ]
         },
         {
@@ -80,7 +90,7 @@
     var SR_ALIASES = { light: 'fsrcnnx', standard: 'fsrcnnx', max: 'fsrcnnx-max' };
 
     var state = {
-        version: 8,
+        version: 9,
         installed: false,
         globals: [],
         chunks: 0,
@@ -223,9 +233,13 @@
                 type: 'GET',
                 url: client.getUrl('GpuUpscale/Session/probe'),
                 dataType: 'json'
-            }).then(function () {
-                state.serverCaps = { full: true };
-                log('server probe: full capabilities');
+            }).then(function (res) {
+                // The probe answer carries the levels this server can really deliver. Keep them:
+                // buildEnhanceMenu narrows the option lists to them. A server too old to send
+                // Levels leaves it null, and the menu falls back to the full lists, which is what
+                // that generation could do anyway.
+                state.serverCaps = { full: true, levels: (res && res.Levels) || null };
+                log('server probe: full capabilities', state.serverCaps.levels);
                 return state.serverCaps;
             }, function (err) {
                 log('server probe failed; will retry on next menu open', err);
@@ -239,18 +253,73 @@
     function openEnhanceMenu(show, positionTo) {
         state.menuShown++;
         // Re-probe here rather than trusting a cached answer, so a menu opened after a server
-        // restart recovers the full control set instead of being stuck on "Upscale to".
+        // restart recovers the full control set instead of being stuck on "Upscale to". The
+        // session state is fetched alongside it, because it is the only honest source for whether
+        // the chosen SR level actually ran - see the note in buildEnhanceMenu.
         return probeServer().then(function (caps) {
-            return buildEnhanceMenu(show, positionTo, caps || { full: false });
+            return fetchServerState().then(function () {
+                return buildEnhanceMenu(show, positionTo, caps || { full: false });
+            }, function () {
+                return buildEnhanceMenu(show, positionTo, caps || { full: false });
+            });
         });
     }
 
+    /*
+     * The levels the server said it can deliver, for one control, or null when it did not say.
+     * The key names are the server's: Sr, Deblur, Denoise.
+     */
+    function serverLevels(caps, key) {
+        var map = { sr: 'Sr', deblur: 'Deblur', denoise: 'Denoise' };
+        var list = caps && caps.levels && map[key] ? caps.levels[map[key]] : null;
+        return (list && list.length) ? list : null;
+    }
+
+    /*
+     * The server may decline to run the super-resolution network below a ratio threshold, because
+     * below it the fixed-2x networks measured no better than plain scaling while still costing
+     * GPU time. The client cannot work out that ratio for itself - it does not reliably know the
+     * source height - so it does not guess and it does not grey the control out: a wrong grey-out
+     * is worse than none. Instead the row is annotated from what the server REPORTED it did for
+     * the session actually playing, which is the same honest-reporting channel the playback-info
+     * row and "What the server did" already use.
+     */
+    function srNote() {
+        var s = state.lastServerState;
+        return (s && s.Known && s.SrBypassed) ? ' - not run at this ratio' : '';
+    }
+
     function buildEnhanceMenu(show, positionTo, caps) {
-        var controls = caps.full ? CONTROLS : CONTROLS.filter(function (c) { return c.key === 'upscale'; });
+        var controls = (caps.full ? CONTROLS : CONTROLS.filter(function (c) { return c.key === 'upscale'; }))
+            .map(function (c) {
+                var allowed = serverLevels(caps, c.key);
+                if (!allowed) {
+                    return c;
+                }
+
+                var options = c.options.filter(function (o) { return allowed.indexOf(o.id) >= 0; });
+                // Never end up with an empty control: if the server and this script agree on
+                // nothing, showing the built-in list is better than showing a dead row.
+                return options.length ? { key: c.key, label: c.label, fallback: c.fallback, options: options } : c;
+            });
+
+        // A level that has gone away (an uninstalled shader, or an old localStorage value) must not
+        // leave the control showing something the server would refuse.
+        controls.forEach(function (c) {
+            var current = state.prefs[c.key];
+            if (current && !c.options.some(function (o) { return o.id === current; })) {
+                log('dropping unavailable preference', c.key, current);
+                state.prefs[c.key] = c.fallback;
+                savePrefs();
+            }
+        });
+
         var items = controls.map(function (c) {
             var current = state.prefs[c.key] || c.fallback;
             var opt = c.options.filter(function (o) { return o.id === current; })[0];
-            return { name: c.label, id: c.key, asideText: opt ? opt.name : current };
+            var aside = opt ? opt.name : current;
+            if (c.key === 'sr' && current !== 'off') { aside += srNote(); }
+            return { name: c.label, id: c.key, asideText: aside };
         });
         if (caps.full) {
             items.push({ name: 'What the server did', id: 'gpuupscale-what' });

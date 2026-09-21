@@ -9,9 +9,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
     /// shader with a sharpening shader into the single file libplacebo's custom_shader_path takes.
     ///
     /// An mpv user-shader file may hold several //!HOOK blocks, so concatenating the two shaders
-    /// gives both passes inside one Vulkan pass. The two SR families hook at different points:
-    /// FSRCNNX hooks LUMA, Anime4K hooks MAIN, and CAS hooks MAIN. The SR shader is always written
-    /// first, so where both hook MAIN the picture is enlarged before it is sharpened.
+    /// gives both passes inside one Vulkan pass. HOOK POINT, NOT FILE ORDER, DECIDES WHAT RUNS
+    /// FIRST: libplacebo runs the LUMA hooks before it scales and the MAIN hooks after. FSRCNNX
+    /// hooks LUMA, Anime4K hooks MAIN, and RCAS (the sharpener, since it replaced CAS) hooks LUMA.
+    /// See Compose() for what each pairing therefore actually does.
     ///
     /// LEVEL NAMING. The ladder names the family and the weight rather than pretending to be a
     /// single ordered quality scale, because the two families are not rungs of one ladder - they
@@ -61,27 +62,86 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             ["max"] = "fsrcnnx-max",
         };
 
-        /// <summary>Sharpening levels. "off" means no sharpening pass.</summary>
+        /// <summary>
+        /// Sharpening levels. "off" means no sharpening pass.
+        ///
+        /// These are AMD FidelityFX RCAS (FSR v1.0.2), derived at install time from agyild's
+        /// MIT-licensed FSR.glsl by shaders/make-rcas.sh. RCAS replaced this project's own CAS
+        /// build after measurement against a clean ground truth (720p GT, LR made by lanczos
+        /// downscale, 100 frames, PSNR/SSIM plus mean |Laplacian| of luma "detail energy"):
+        ///
+        ///   FSRCNNX + sharpener, vs ground truth      PSNR      SSIM
+        ///     1.5x   RCAS-1.7                        43.668    0.98579
+        ///     1.5x   CAS-low                         43.394    0.98512
+        ///     2.0x   RCAS-1.7                        41.257    0.98108
+        ///     2.0x   CAS-low                         40.782    0.97924
+        ///
+        ///   detail energy at 2.0x, ground truth = 3.5179 (plain ewa_lanczos = 2.9466):
+        ///     FSRCNNX + RCAS 2.0 / 1.7 / 1.4  ->  3.7092 / 3.7934 / 3.8827   (+5% .. +10% of GT)
+        ///     FSRCNNX + CAS low / med / high  ->  4.1852 / 4.4800 / 5.7194   (+19% .. +63% of GT)
+        ///
+        /// RCAS is better on fidelity AND lands near the ground truth's own detail rather than
+        /// far above it, which is what over-sharpening looks like in this metric. It is also
+        /// close to free: RCAS hooks LUMA, so it runs at the SR shader's output size instead of
+        /// the full output size the way CAS (a MAIN hook) did - measured ~0% at 1080p/1440p
+        /// against CAS's 12.1% at 2160p.
+        ///
+        /// INVERTED SCALE - READ THIS BEFORE CHANGING THE NUMBERS.
+        /// RCAS's SHARPNESS is stops of REDUCTION: 0.0 is MAXIMUM sharpening and a LARGER number
+        /// is GENTLER. That is the opposite of CAS, where larger meant sharper. AMD's shader also
+        /// hard-clamps the value into [0, 2], so any value above 2.0 is silently identical to 2.0
+        /// - "turning it up" past RCAS-2.0 changes nothing whatsoever. Hence low -> 2.0 and
+        /// high -> 1.4, and hence the file names carry the raw sharpness, not the level name.
+        ///
+        /// The cas-* names are the CAS family, kept reachable by the API (and by the dashboard
+        /// field) as a rollback path that needs no rebuild. They are deliberately not offered in
+        /// either menu. The CAS files stay installed for them.
+        /// </summary>
         private static readonly Dictionary<string, string> _deblurFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["off"] = null,
-            ["low"] = "CAS-low.glsl",
-            ["medium"] = "CAS-medium.glsl",
-            ["high"] = "CAS-high.glsl",
+            ["low"] = "RCAS-2.0.glsl",
+            ["medium"] = "RCAS-1.7.glsl",
+            ["high"] = "RCAS-1.4.glsl",
+            ["cas-low"] = "CAS-low.glsl",
+            ["cas-medium"] = "CAS-medium.glsl",
+            ["cas-high"] = "CAS-high.glsl",
         };
+
+        /// <summary>
+        /// The sharpening levels worth offering a viewer, in gentle-to-strong order. The cas-*
+        /// rollback names are accepted but not listed: an option that measured worse than the one
+        /// beside it does not belong in a menu.
+        /// </summary>
+        private static readonly string[] _deblurMenu = { "off", "low", "medium", "high" };
 
         /// <summary>
         /// Denoise levels. These are ffmpeg filter nodes, not shaders, so they carry their filter
         /// string rather than a file name. "off" means no denoise node in the chain.
         ///
-        /// light   hqdn3d, measured 163 fps / 5.5x realtime at 1080p out.
-        /// strong  nlmeans_vulkan, measured 86 fps / 2.9x realtime at 1080p out.
+        /// light   nlmeans_vulkan at its default strength. Recovered 46% of the structural damage
+        ///         of a visibly noisy source.
+        /// strong  nlmeans_vulkan=s=2.0. Recovered 53%.
+        ///
+        /// hqdn3d=2:1:3:3 WAS "light" and HAS BEEN RETIRED. Do not put it back because it is
+        /// cheap: measured on a degraded source it recovered 0.00 dB and 12% of the structural
+        /// damage, i.e. it traded noise for blur one for one and returned nothing. A denoise level
+        /// that removes as much picture as it removes noise is worse than no denoise at all,
+        /// because the viewer pays for it in detail and believes they gained something.
+        ///
+        /// Both surviving levels carry "_vulkan" in the filter string, which is what
+        /// DenoiseFilter() keys on to route them after hwupload. That is not incidental: adding a
+        /// CPU denoise level here would need no code change but WOULD need the string to not
+        /// contain "_vulkan".
+        ///
+        /// Denoise stays OFF by default. It costs roughly 60% of throughput (still about 2.5x
+        /// realtime at 4K), and on a clean source there is nothing for it to recover.
         /// </summary>
         private static readonly Dictionary<string, string> _denoiseFilters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["off"] = null,
-            ["light"] = "hqdn3d=2:1:3:3",
-            ["strong"] = "nlmeans_vulkan",
+            ["light"] = "nlmeans_vulkan",
+            ["strong"] = "nlmeans_vulkan=s=2.0",
         };
 
         /// <summary>The names offered as real levels, in ladder order. Aliases are accepted but not listed.</summary>
@@ -105,6 +165,44 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         }
 
         public static bool IsSrLevel(string level) => CanonicalSr(level) != null;
+
+        /// <summary>
+        /// The super-resolution levels whose shader file is actually present on this server, in
+        /// ladder order. The player menu is built from this rather than from a hard-coded list, so
+        /// a level whose file was never installed is not offered - an option that silently does
+        /// nothing is worse than an absent one.
+        /// </summary>
+        public static List<string> AvailableSrLevels(UpscaleSettings cfg)
+        {
+            var found = new List<string>();
+            foreach (var pair in _srFiles)
+            {
+                if (pair.Value == null || Lookup(_srFiles, cfg?.ShaderDirectory, pair.Key) != null)
+                {
+                    found.Add(pair.Key);
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>The sharpening levels offered to a viewer whose shader file is present.</summary>
+        public static List<string> AvailableDeblurLevels(UpscaleSettings cfg)
+        {
+            var found = new List<string>();
+            foreach (string level in _deblurMenu)
+            {
+                if (_deblurFiles[level] == null || Lookup(_deblurFiles, cfg?.ShaderDirectory, level) != null)
+                {
+                    found.Add(level);
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>The denoise levels. These are ffmpeg filters, so there is no file to check.</summary>
+        public static List<string> AvailableDenoiseLevels() => new List<string>(_denoiseFilters.Keys);
 
         public static bool IsDeblurLevel(string level) => level != null && _deblurFiles.ContainsKey(level.Trim());
 
@@ -205,9 +303,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 return composed;
             }
 
-            // The SR shader goes first. FSRCNNX hooks LUMA and CAS hooks MAIN, so for that family
-            // the order is set by the hook points; Anime4K hooks MAIN like CAS does, and there the
-            // file order is what puts the enlargement before the sharpening.
+            // The SR shader is written first, but file order is NOT what decides the running
+            // order - the hook point is. libplacebo runs every LUMA hook before it scales and
+            // every MAIN hook after, in file order within each group.
+            //
+            //   FSRCNNX (LUMA) + RCAS (LUMA):  FSRCNNX enlarges the luma plane, then RCAS sharpens
+            //     that enlarged plane, both before the final scale. Sharpening therefore happens
+            //     at 2x the source size rather than at output size, which is why RCAS costs about
+            //     nothing at 1080p and 1440p.
+            //
+            //   Anime4K (MAIN) + RCAS (LUMA):  RCAS runs FIRST, on the source-sized luma plane,
+            //     and Anime4K enlarges afterwards. Sharpen-before-enlarge, whatever the file order
+            //     says. This was measured rather than assumed, because it is the arrangement the
+            //     old comment (written for CAS, a MAIN hook) said could not happen: against ground
+            //     truth, anime4k-m + RCAS-1.7 beat anime4k-m + CAS on both metrics at both ratios
+            //     (1.5x 43.31/0.98578 vs 43.21/0.98574; 2.0x 40.74/0.98074 vs 40.38/0.97937), and
+            //     its detail energy landed at 4.0065 against CAS-medium's 4.9302 for a ground
+            //     truth of 3.5179. So the pairing is allowed for every SR family.
             string tmp = composed + "." + Guid.NewGuid().ToString("N") + ".tmp";
             File.WriteAllText(tmp, File.ReadAllText(srFile) + "\n\n" + File.ReadAllText(deblurFile));
             File.Move(tmp, composed, true);

@@ -47,6 +47,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// <summary>Skip upscaling unless the target height is at least this multiple of the source.</summary>
         public double MinScaleFactor { get; set; } = 1.15;
 
+        /// <summary>
+        /// Run the super-resolution network only at or above this ratio. Below it the upscale
+        /// still happens with plain scaling plus sharpening. Measured crossover is about 1.52; see
+        /// UpscaleSettings.SrMinScaleFactor for the numbers. 0 disables the bypass.
+        /// </summary>
+        public double SrMinScaleFactor { get; set; } = 1.60;
+
         /// <summary>Never upscale sources taller than this.</summary>
         public int MaxSourceHeight { get; set; } = 1440;
 

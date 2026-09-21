@@ -18,7 +18,7 @@ src/patcher/            patcher assembly (loads into the DEFAULT ALC — this is
 src/Configuration/      settings class + the dashboard page
 web/gpu-upscale.js      injected browser script: Enhance menu + request marking
 shim/                   standalone ffmpeg wrapper, the no-Harmony fallback
-shaders/                CAS sharpening shaders (ours) + composer
+shaders/                CAS shaders (ours, superseded) + the RCAS derivation script
 scripts/                install, inject, activate/rollback
 ```
 
@@ -64,6 +64,17 @@ untouched copy is worse than being told nothing. If you add a feature, add its h
 decision path and the direct-play override. If they diverge, the override forces expensive transcodes
 for material the engine then declines to enhance.
 
+**9. Hook points decide filter order, not file order — know which is which.**
+FSRCNNX hooks `LUMA`; Anime4K hooks `MAIN`; RCAS hooks `LUMA`; the old CAS hooks `MAIN`. When two
+passes hook the *same* point, concatenation order decides. When they hook different points, the
+hook points decide and file order is irrelevant. This is why Anime4K + RCAS sharpens *before*
+enlarging regardless of how the file is composed — that pairing was measured and kept because it
+still beat CAS-after, but the reasoning must be checked, not assumed, whenever a shader is added.
+
+**10. RCAS sharpness is inverted and clamped.** `0.0` is maximum, larger is gentler, and the shader
+hard-clamps to `[0, 2]` — a value above 2.0 silently does nothing. Any viewer-facing "low/medium/
+high" must map through that inversion or the labels lie.
+
 ## Verification standards
 
 **Building is not evidence. Logs are weak evidence. Probe the bytes.**
@@ -84,6 +95,23 @@ harness that mocks the webpack chunk loader will happily validate your assumptio
 checking them — that is precisely how the `webpackChunk` vs `webpackChunkjellyfin_web` bug survived
 "verification".
 
+## Measuring image quality here
+
+Objective metrics disagree with each other on this content, and each can be gamed:
+
+- **Raw sharpness (Laplacian) rewards noise and ringing.** It ranked the worst-ringing shader top.
+- **Ground-truth-referenced sharpness** (compare against the reference's *own* Laplacian, so
+  overshoot counts as error) fixes that — but is still gameable on its own: a tuned sharpener can hit
+  the right *total* edge energy by putting it in the wrong places.
+- **Use both, plus PSNR/SSIM.** Reconstruction raises fidelity while adding detail; synthesis adds
+  detail while lowering it. That difference is the whole question, and only the pair reveals it.
+- **For denoising, every sharpness metric is backwards by construction.** Build a synthetically
+  degraded source and score recovery against the undegraded original, so removing noise counts as
+  gain.
+- Always test at **1.5x as well as 2.0x**. Fixed-2x networks look fine at their native ratio and can
+  measure *below plain scaling* off it. A benchmark at 2.0x only is how a shader that softens real
+  content got recommended once already.
+
 ## Things that have already gone wrong
 
 - **Wrong webpack global.** This build uses the bare `webpackChunk`, not `webpackChunkjellyfin_web`.
@@ -98,6 +126,12 @@ checking them — that is precisely how the `webpackChunk` vs `webpackChunkjelly
   shader and looks like a broken plugin. Portrait sources frequently land here.
 - **libplacebo treats `shader_cache` as a path prefix, not a directory**, and will litter hundreds of
   scratch files beside it.
+- **Measuring a no-op and believing it.** In stock `FSR.glsl`, EASU writes to a scratch texture and
+  only RCAS writes back to `LUMA`. Stripping RCAS to measure "EASU alone" returns exactly the
+  plain-scaling number, which looks like a real result. Remove the `//!SAVE` line so the pass writes
+  back.
+- **Trusting a level name over a measurement.** The shader shipped as `CAS-low` was, at its gentlest
+  setting, already a strong sharpener that overshot ground-truth detail by 15%.
 
 ## Operational care
 
@@ -116,7 +150,10 @@ FSRCNNX is igv's work under **LGPL-3.0-or-later**; Anime4K is bloc97's under **M
 vendored — `scripts/install-shaders.sh` fetches them so the licences stay with their authors. Do not
 commit them. The CAS shaders in `shaders/` are this project's own.
 
+RCAS is derived at install time from AMD FidelityFX FSR v1.0.2 (MIT, via agyild's mpv port) by
+`shaders/make-rcas.sh`. The transform is documented in that script; the upstream file is not vendored.
+
 On picking shaders: judge on measurement, not names. A heavier FSRCNN variant measured *no better*
-for twice the cost. Anime4K wins at its native 2.0x and falls below plain lanczos at 1.5x. Raw
-sharpness metrics are actively misleading — they rank the shader with the worst ringing highest;
-compare against ground truth so overshoot counts as error.
+for twice the cost. Anime4K wins at its native 2.0x and falls below plain scaling at 1.5x. FSR's EASU
+measured worse than plain scaling outright. Only RCAS survived, and it won on cost as well as quality
+because of where it hooks.
