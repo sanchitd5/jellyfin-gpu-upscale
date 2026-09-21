@@ -1160,6 +1160,10 @@
         { label: 'Refine', level: 'RefineLevel', applied: 'RefineApplied' },
         { label: 'Chroma', level: 'ChromaLevel', applied: 'ChromaApplied' },
         { label: 'Debanding', applied: 'DebandApplied' },
+        // Same field the 'Upscaled' row reads: the record names one libplacebo kernel, and this
+        // row is the only place a chosen 'default' is confirmed against what the server actually
+        // picked for it.
+        { label: 'Scaling kernel', level: 'Upscaler' },
         { label: 'Encoder', level: 'Encoder', note: 'EncoderReason' }
     ];
 
@@ -1819,10 +1823,9 @@
 
         body.appendChild(qualitySection(rerender));
 
-        var controls = axisControls(caps);
-
-        // Seed the controls from whatever is in force, so a panel opened on a stage shows that
-        // stage's values rather than a stale set.
+        // Seed the controls from whatever is in force, BEFORE axisControls reads state.prefs.game
+        // for showWhen - otherwise jitter/depth/reactive render against a stale game value on
+        // first paint and only catch up on the next 3s live poll.
         var live = effective();
         if (live) {
             Object.keys(state.prefs).forEach(function (k) {
@@ -1830,6 +1833,8 @@
                 if (k === 'upscale' && live.upscale == null) { state.prefs.upscale = 'off'; }
             });
         }
+
+        var controls = axisControls(caps);
 
         // A level that has gone away (an uninstalled shader, an old localStorage value, or a
         // target this source is too tall for) must not leave a control showing something the

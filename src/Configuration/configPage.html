@@ -149,6 +149,16 @@
                     </div>
                 </div>
 
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="RefineAllowed" />
+                        <span>Allow post-scale refinement</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn the refinement pass on.
+                    </div>
+                </div>
+
                 <div class="selectContainer">
                     <select is="emby-select" id="ChromaLevel" label="Chroma upscaling (default)">
                         <option value="off">Off</option>
@@ -162,6 +172,16 @@
                         it composes with any super-resolution level rather than replacing one.
                         <br /><br />
                         Off by default, and unmeasured here, for the same reason as the refinement pass above.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="ChromaAllowed" />
+                        <span>Allow chroma upscaling</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn the chroma pass on.
                     </div>
                 </div>
 
@@ -496,6 +516,17 @@
             // Same mapping the server applies in ShaderLibrary, so the page shows the level that
             // a legacy persisted name actually resolves to rather than an empty select.
             var SR_ALIASES = { light: 'fsrcnnx', standard: 'fsrcnnx', max: 'fsrcnnx-max' };
+            // Source is a media filename picked by whoever named the library file, so it must
+            // be escaped before it goes into innerHTML, same as any other field built from it.
+            function escapeHtml(value) {
+                if (value === null || value === undefined) return '';
+                return String(value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
             function loadStatus(page) {
                 ApiClient.ajax({
                     type: 'GET',
@@ -505,9 +536,9 @@
                     page.querySelector('#patchStatus').textContent =
                         'Filter injection: ' + s.PatchStatus + '. FFmpeg shim: ' + s.ShimSync + '.';
                     var rows = (s.Sessions || []).map(function (a) {
-                        return '<tr><td>' + a.Timestamp + '</td><td>' + (a.Source || '') + '</td><td>' +
-                            (a.Summary || '') + '</td><td title="' + (a.EncoderReason || '') + '">' +
-                            (a.Encoder || '') + '</td><td>' + (a.Status || '') + '</td></tr>';
+                        return '<tr><td>' + escapeHtml(a.Timestamp) + '</td><td>' + escapeHtml(a.Source) + '</td><td>' +
+                            escapeHtml(a.Summary) + '</td><td title="' + escapeHtml(a.EncoderReason) + '">' +
+                            escapeHtml(a.Encoder) + '</td><td>' + escapeHtml(a.Status) + '</td></tr>';
                     }).join('');
                     page.querySelector('#activityBody').innerHTML = rows ||
                         '<tr><td colspan="5">No sessions since the server started.</td></tr>';
@@ -531,7 +562,9 @@
                     page.querySelector('#DeblurLevel').value = config.DeblurLevel || 'off';
                     page.querySelector('#DeblurAllowed').checked = config.DeblurAllowed !== false;
                     page.querySelector('#RefineLevel').value = config.RefineLevel || 'off';
+                    page.querySelector('#RefineAllowed').checked = config.RefineAllowed !== false;
                     page.querySelector('#ChromaLevel').value = config.ChromaLevel || 'off';
+                    page.querySelector('#ChromaAllowed').checked = config.ChromaAllowed !== false;
                     page.querySelector('#NeuralLevel').value = config.NeuralLevel || 'off';
                     page.querySelector('#NeuralAllowed').checked = config.NeuralAllowed !== false;
                     page.querySelector('#GameLevel').value = config.GameLevel || 'off';
@@ -572,7 +605,9 @@
                     config.DeblurLevel = page.querySelector('#DeblurLevel').value;
                     config.DeblurAllowed = page.querySelector('#DeblurAllowed').checked;
                     config.RefineLevel = page.querySelector('#RefineLevel').value;
+                    config.RefineAllowed = page.querySelector('#RefineAllowed').checked;
                     config.ChromaLevel = page.querySelector('#ChromaLevel').value;
+                    config.ChromaAllowed = page.querySelector('#ChromaAllowed').checked;
                     config.NeuralLevel = page.querySelector('#NeuralLevel').value;
                     config.NeuralAllowed = page.querySelector('#NeuralAllowed').checked;
                     config.GameLevel = page.querySelector('#GameLevel').value;

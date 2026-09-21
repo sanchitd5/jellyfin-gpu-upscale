@@ -1,3 +1,5 @@
+using System;
+using System.Globalization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -25,17 +27,25 @@ namespace Jellyfin.Plugin.GpuUpscale
         }
 
         /// <summary>
-        /// Reports what the server actually did for one play session. Any signed-in viewer may call
-        /// this for the session they are watching, so it is not behind RequiresElevation.
+        /// Reports what the server actually did for one play session. Answers for the caller's own
+        /// session; for anyone else's it reports unknown rather than leaking that the session
+        /// exists, so it is not behind RequiresElevation.
         /// </summary>
         /// <param name="playSessionId">The PlaySessionId of the stream.</param>
         [HttpGet("Session/{playSessionId}")]
         [ProducesResponseType(StatusCodes.Status200OK)]
         public ContentResult GetSession([FromRoute] string playSessionId)
         {
+            string requestingUserId = null;
+            string claim = User.FindFirst("Jellyfin-UserId")?.Value;
+            if (!string.IsNullOrEmpty(claim) && Guid.TryParse(claim, out Guid userId))
+            {
+                requestingUserId = userId.ToString("N", CultureInfo.InvariantCulture);
+            }
+
             return new ContentResult
             {
-                Content = PatcherLoader.SessionJson(playSessionId),
+                Content = PatcherLoader.SessionJson(playSessionId, requestingUserId),
                 ContentType = "application/json",
                 StatusCode = StatusCodes.Status200OK,
             };

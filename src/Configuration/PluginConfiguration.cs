@@ -73,11 +73,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// </summary>
         public string RefineLevel { get; set; } = "off";
 
+        /// <summary>May a session ask for post-scale refinement at all?</summary>
+        public bool RefineAllowed { get; set; } = true;
+
         /// <summary>
         /// Chroma upscaling used when a session does not name one: off, krigbilateral.
         /// Composes with any super-resolution level instead of replacing one.
         /// </summary>
         public string ChromaLevel { get; set; } = "off";
+
+        /// <summary>May a session ask for chroma upscaling at all?</summary>
+        public bool ChromaAllowed { get; set; } = true;
 
         /// <summary>libplacebo debanding, with synthetic grain forced off.</summary>
         public bool Deband { get; set; } = true;

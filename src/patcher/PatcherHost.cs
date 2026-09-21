@@ -114,8 +114,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // hooks POSTKERNEL and the chroma pass hooks CHROMA, so each composes with
                 // whatever SR level is chosen. They are listed separately so the menu can
                 // render them as separate controls rather than folding them into one list.
-                ["Refine"] = ShaderLibrary.AvailableRefineLevels(cfg),
-                ["Chroma"] = ShaderLibrary.AvailableChromaLevels(cfg),
+                // With the master switch off the level is not offered at all, rather than offered
+                // and then quietly ignored by Decide: a control that does nothing is the failure
+                // this plugin keeps hitting.
+                ["Refine"] = cfg?.RefineAllowed == false
+                    ? new List<string> { "off" }
+                    : ShaderLibrary.AvailableRefineLevels(cfg),
+                ["Chroma"] = cfg?.ChromaAllowed == false
+                    ? new List<string> { "off" }
+                    : ShaderLibrary.AvailableChromaLevels(cfg),
                 ["SrMinScaleFactor"] = cfg?.SrMinScaleFactor ?? 0d,
                 ["MinScaleFactor"] = cfg?.MinScaleFactor ?? 0d,
                 ["MaxSourceHeight"] = cfg?.MaxSourceHeight ?? 0,
@@ -143,9 +150,28 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// What actually happened for one play session, as JSON, or a null-ish record when nothing
         /// is known. Never reports enhancement that was not applied.
         /// </summary>
-        public static string SessionJson(string playSessionId)
+        public static string SessionJson(string playSessionId) => SessionJson(playSessionId, null);
+
+        /// <summary>
+        /// As <see cref="SessionJson(string)"/>, but refuses to describe a session that belongs to
+        /// a different viewer. The record is reported as if it did not exist rather than as a
+        /// permission error, so the response never tells a caller that someone else's session
+        /// exists at all.
+        ///
+        /// An empty id on either side answers as before: a request or a record with nothing to
+        /// identify a viewer is no worse off than it was before this check existed.
+        /// </summary>
+        public static string SessionJson(string playSessionId, string requestingUserId)
         {
             var record = UpscaleEngine.ForSession(playSessionId);
+            if (record != null
+                && !string.IsNullOrEmpty(record.UserId)
+                && !string.IsNullOrEmpty(requestingUserId)
+                && !string.Equals(record.UserId, requestingUserId, StringComparison.OrdinalIgnoreCase))
+            {
+                record = null;
+            }
+
             if (record == null)
             {
                 return JsonSerializer.Serialize(new Dictionary<string, object>

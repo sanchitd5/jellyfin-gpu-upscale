@@ -149,12 +149,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public string RefineLevel { get; set; } = "off";
 
+        /// <summary>Master switch for post-scale refinement. When false no session can turn it on.</summary>
+        public bool RefineAllowed { get; set; } = true;
+
         /// <summary>
         /// Chroma upscaling applied by default: off, krigbilateral. Also a separate axis: it
         /// hooks CHROMA, so it touches planes no other level here touches and composes with all
         /// of them. Off by default, for the same reason.
         /// </summary>
         public string ChromaLevel { get; set; } = "off";
+
+        /// <summary>Master switch for chroma upscaling. When false no session can turn it on.</summary>
+        public bool ChromaAllowed { get; set; } = true;
 
         /// <summary>
         /// libplacebo debanding. Measured within run-to-run variance of free, and low-bitrate
