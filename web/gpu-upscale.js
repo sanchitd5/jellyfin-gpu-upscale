@@ -337,7 +337,7 @@
     var COSTS = { neural: NEURAL_COST, game: GAME_COST };
 
     var state = {
-        version: 16,
+        version: 17,
         installed: false,
         globals: [],
         chunks: 0,
@@ -358,6 +358,13 @@
         playbackHooked: false,
         applying: null,
         applyTimer: null,
+        // jellyfin-web does not put playbackManager on window, so it is recognised by shape
+        // in the webpack module exports this script already wraps. Null until a module
+        // carrying it has run.
+        playbackManagerRef: null,
+        // The query string this script last wrote onto a TranscodingUrl, so the live block can
+        // tell a record of the CURRENT selections from a record of an older negotiation.
+        sentSig: null,
         caps: null,
         // The height of the video stream the server reported for the item being played. Read out
         // of the PlaybackInfo response this script already intercepts, so the menu can drop targets
@@ -990,9 +997,60 @@
         } catch (err) { /* the panel is never worth breaking playback for */ }
     }
 
+    /*
+     * THE PLAYER, WHICH IS NOT ON WINDOW.
+     *
+     * jellyfin-web 12.1 exports playbackManager from a webpack module (n.d(t,{f:...})) and never
+     * assigns window.playbackManager - grep the bundle: the only file naming it is this script.
+     * Reading it off window therefore always gave undefined, playerPresent() was always false, and
+     * every live apply logged "nothing is playing" and did nothing. So it is recognised by SHAPE
+     * in the module exports this script already wraps for the action sheet, exactly as the action
+     * sheet is recognised by shape rather than by module id, and window is kept as a fallback for
+     * any build that does export it.
+     */
+    function isPlaybackManager(o) {
+        return !!o
+            && typeof o.setMaxStreamingBitrate === "function"
+            && typeof o.getMaxStreamingBitrate === "function"
+            && typeof o.currentItem === "function";
+    }
+
+    function notePlaybackManager(exports) {
+        if (state.playbackManagerRef || !exports) {
+            return;
+        }
+
+        try {
+            if (isPlaybackManager(exports)) {
+                state.playbackManagerRef = exports;
+                log("found playbackManager on a module export");
+                return;
+            }
+
+            Object.keys(exports).forEach(function (k) {
+                if (state.playbackManagerRef) {
+                    return;
+                }
+
+                try {
+                    if (isPlaybackManager(exports[k])) {
+                        state.playbackManagerRef = exports[k];
+                        log("found playbackManager on module export ." + k);
+                    }
+                } catch (err) { /* a getter that throws is not the player */ }
+            });
+        } catch (err) { /* never worth breaking a module for */ }
+    }
+
+    function player() {
+        return isPlaybackManager(window.playbackManager)
+            ? window.playbackManager
+            : state.playbackManagerRef;
+    }
+
     function playerPresent() {
         try {
-            var pm = window.playbackManager;
+            var pm = player();
             return !!(pm
                 && typeof pm.setMaxStreamingBitrate === 'function'
                 && typeof pm.getMaxStreamingBitrate === 'function'
@@ -1036,7 +1094,7 @@
 
         var previousId = state.playSessionId;
         try {
-            var pm = window.playbackManager;
+            var pm = player();
             var current = pm.getMaxStreamingBitrate();
             if (!(current > 0)) {
                 // Handing back a value that is not a bitrate would overwrite the viewer's own
@@ -1115,6 +1173,36 @@
      * session the server knows nothing about says exactly that rather than showing the viewer's
      * own request back to them.
      */
+    /*
+     * A PANEL THAT LIES ABOUT WHAT RAN IS THE THING THIS PROJECT REFUSES TO DO.
+     *
+     * The record the server hands back describes ONE negotiation: the one that produced the stream
+     * now playing. Change a control and, until the re-negotiation lands, the controls above show
+     * one thing and the record below shows another - which reads as "I asked for RAVU-Zoom and the
+     * server ran FSRCNNX" when what actually happened is "the server has not been asked yet".
+     *
+     * So the selections in force are compared against the ones the stream was negotiated with -
+     * both built by wireParams(), so the comparison is of what is literally sent - and a
+     * difference is stated, in the record's own block, before any line of the record.
+     */
+    function staleNote() {
+        try {
+            var now = paramSig(wireParams());
+            if (!state.sentSig || !now || now === state.sentSig) {
+                return null;
+            }
+
+            return ['Not this selection',
+                'The record below is of the stream that is playing, which was negotiated with '
+                + state.sentSig + '. The selections above have changed since and '
+                + (state.applying
+                    ? 'are being sent now.'
+                    : 'have not been sent: they apply when playback next negotiates.')];
+        } catch (err) {
+            return null;
+        }
+    }
+
     function liveLines() {
         var s = state.lastServerState;
         if (!s) {
@@ -1130,15 +1218,20 @@
         if (!s.Known) {
             // The server writes a record only when it builds a filter chain. No record means no
             // chain: direct play, a stream copy, or a session it never saw.
-            return [
-                ['Status', s.Status || 'unknown'],
+            return [staleNote(), ['Status', s.Status || 'unknown'],
                 ['What ran', (s.Summary || 'No enhancement')
                     + ' - no filter chain was built for this session, so this is a direct play, a'
                     + ' stream copy, or a stream the server has not started yet.']
-            ];
+            ].filter(Boolean);
         }
 
-        var lines = [['What ran', s.Summary || 'No enhancement']];
+        var lines = [];
+        var stale = staleNote();
+        if (stale) {
+            lines.push(stale);
+        }
+
+        lines.push(['What ran', s.Summary || 'No enhancement']);
         if (s.Status) {
             lines.push(['Status', s.Status]);
         }
@@ -1847,7 +1940,7 @@
      */
     function hookPlaybackEvents() {
         try {
-            var pm = window.playbackManager;
+            var pm = player();
             if (!pm || state.playbackHooked) {
                 return;
             }
@@ -2055,6 +2148,7 @@
                             wrapActionSheet(exports.Ay);
                             wrapActionSheet(exports.default);
                             wrapActionSheet(exports);
+                            notePlaybackManager(exports);
                         }
                     } catch (err) {
                         log('module wrap failed', err);
@@ -2127,13 +2221,18 @@
 
     /* ------------------------------------------------------- PlaybackInfo response rewriting */
 
-    function addParams(url) {
+    /*
+     * WHAT THIS SESSION WOULD SEND, as a plain object and with no URL involved. Split out of
+     * addParams so that the live block can compare what is on the wire NOW against what was on the
+     * wire when the stream that is playing was negotiated. The same code builds both, so the
+     * comparison cannot drift from what is actually sent.
+     */
+    function wireParams() {
         var e = effective();
-        if (!url || !e) {
-            return url;
+        if (!e) {
+            return null;
         }
 
-        var out = url;
         var params = {};
         // A null target means "no opinion on the size": the marker is left off entirely so the
         // server's own TargetHeight applies, exactly as it does for a client without this script.
@@ -2191,6 +2290,28 @@
         if (params.upscale && params.upscale !== 'off' && /^\d+$/.test(params.upscale)) {
             params.maxHeight = params.upscale;
         }
+
+        return params;
+    }
+
+    /*
+     * The same object as one comparable string. Order-independent, so it can never report a
+     * difference that is only key order.
+     */
+    function paramSig(params) {
+        return params === null ? null : Object.keys(params).sort().map(function (k) {
+            return k + '=' + params[k];
+        }).join('&');
+    }
+
+    function addParams(url) {
+        var params = wireParams();
+        if (!url || !params) {
+            return url;
+        }
+
+        var out = url;
+        state.sentSig = paramSig(params);
 
         Object.keys(params).forEach(function (k) {
             var re = new RegExp('([?&])' + k + '=[^&]*');
