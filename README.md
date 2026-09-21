@@ -238,10 +238,33 @@ sharpening pass rather than stacking two sharpeners into ringing, and reports th
 
 ## Denoise
 
-| Level | Filter | Recovered |
+| Level | Filter | Kind |
 |---|---|---|
-| `light` | `nlmeans_vulkan` | ~18% of the structural damage |
-| `strong` | `nlmeans_vulkan=s=2.0` | ~21% |
+| `light` | `atadenoise` | adaptive **temporal**, CPU — runs before `hwupload` |
+| `strong` | `nlmeans_vulkan` | **spatial**, Vulkan — runs after `hwupload` |
+| `max` | `nlmeans_vulkan=s=2.0` | spatial, strongest |
+
+The ladder climbs in cost **and changes family**, which is deliberate: a temporal filter attacks
+flicker between frames, a spatial one attacks per-frame grain, and only the spatial one removed heavy
+synthetic grain in testing. The old names remain reachable through the API as `atadenoise`,
+`nlmeans` and `nlmeans-strong`.
+
+Measured on stable content at 720p→1440p: `atadenoise` costs 0.20 dB for a 30% flicker reduction at
+124 fps, where `nlmeans_vulkan` costs 0.35 dB for 2% at 60 fps — better and roughly twice as fast, so
+it takes the cheap rung.
+
+**What this is honestly worth on compressed sources.** On real low-bitrate material (1–2.2 Mbps
+sub-1080p, ~0.085 bits/pixel/frame) `atadenoise` still wins — 11–14% flicker removed for essentially
+no detail cost, at 10–13% of throughput against nlmeans' 52–54% — but that is about half the gain
+measured on cleaner clips, because the encoder has already removed much of the temporal noise. On a
+CRF 28 re-encode there is nothing left to denoise at all, and every filter lands within ±0.05 dB.
+Against the undenoised chain these outputs differ by around 50 dB, roughly one level in 255: **this
+is a cost reduction, not a visible picture improvement.**
+
+**It can also hurt.** On two high-bitrate 1080p sources that were only ~55% still, `atadenoise`
+*increased* flicker by 17% and 33% — an adaptive temporal filter appears to add temporal error on
+moving content. That is a reason denoise stays off by default and does not sit in a low rung of the
+quality ladder.
 
 Measured by degrading a clean source (noise plus a low bitrate), then scoring recovery against the
 undegraded original — so noise removal counts as gain rather than as lost "detail".
@@ -249,6 +272,10 @@ undegraded original — so noise removal counts as gain rather than as lost "det
 **`hqdn3d` was retired.** It recovered 0.009 dB of the 3.411 dB the noise cost, and turning it up
 made things worse: it trades noise for blur one for one. In side-by-side stills it is hard to
 distinguish from no denoising at all.
+
+**`tmix` was rejected too, and deliberately not added despite being cheap.** On a clip that was 96.2%
+still, `tmix3` drove temporal error from 0.038 to 0.216 and SSIM from 0.985 to 0.964. A 1.4% moving
+region is enough for an unaligned temporal average to ghost. The adaptive filter is the safe one.
 
 Denoise costs roughly 60% of throughput, so it is off by default and belongs as an opt-in tier.
 
@@ -437,6 +464,29 @@ attention, so roughly 0.7-2.5 s per frame — 25-50x off realtime. Multi-step mo
 take 10-100 s per 512x512 image and carry non-commercial licences.
 
 **Frame generation** was considered and dropped: this project is about upscaling.
+
+**Multi-frame accumulation and FSR2/FSR3's jitter requirement**, closed by a library-scale survey:
+430 measurements across 242 recordings and 189 performers. FSR2's `jitterOffset` is a single global
+`float2` — there is no per-pixel jitter input anywhere in its API — and it addresses lock creation,
+not just the upsample kernel. Measured against that: only 39.8% of textured blocks move within
+0.25 px of the frame's global estimate, against a total jitter budget of ±0.5 px, and 57% of pixels
+move less than 0.05 px at all.
+
+The tempting counter-argument — that *some* content is handheld and would qualify — was tested and
+failed. Applied naively the criteria pass 17% of clips, but that is an artefact: phase correlation
+returns a confident peak and every block agrees with it precisely when the global motion is *zero*.
+Adding the requirement that the whole frame actually be displaced collapses it to **0.7%, then 0.2%,
+then 0.0%** under the full criterion. One measurement in 430 was genuinely handheld, and a classical
+multi-frame prototype lost **1.18 dB to plain Lanczos on that clip** while raising temporal error 36%.
+
+Stability is also not a property of a performer: ~2x enrichment between clips five minutes apart,
+collapsing to near base rate across dates. Of 183 performers measured more than once, only 10 were
+consistently stable. So it cannot be cached as a per-source preset, and detecting it per segment costs
+the optical-flow pass it was meant to save.
+
+The useful diagnostic from that work, worth reusing: **if accumulation were recovering real sub-pixel
+detail, fidelity would rise with detail energy.** Where detail is bought purely at fidelity's expense,
+what is being added is injected error from imperfect alignment, not recovered signal.
 
 ### If you want to re-open any of this
 

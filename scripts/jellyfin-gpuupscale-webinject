@@ -12,7 +12,7 @@ WEB=/usr/share/jellyfin/web
 SRC=/usr/lib/jellyfin-gpuupscale/gpu-upscale.js
 
 # Bumped whenever gpu-upscale.js changes, so a browser holding an older copy re-fetches it.
-VERSION=12
+VERSION=13
 TAG="<script defer=\"defer\" src=\"gpu-upscale.js?v=$VERSION\"></script>"
 
 [ -f "$SRC" ] || { echo "gpu-upscale: source $SRC missing, nothing to do"; exit 0; }

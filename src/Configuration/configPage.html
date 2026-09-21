@@ -122,8 +122,9 @@
                 <div class="selectContainer">
                     <select is="emby-select" id="DenoiseLevel" label="Denoise (default)">
                         <option value="off">Off</option>
-                        <option value="light">Light - nlmeans</option>
-                        <option value="strong">Strong - nlmeans s=2.0</option>
+                        <option value="light">Light - atadenoise (temporal, cheap)</option>
+                        <option value="strong">Strong - nlmeans (spatial, slower)</option>
+                        <option value="max">Max - nlmeans s=2.0 (slowest)</option>
                     </select>
                     <div class="fieldDescription">
                         Runs before the upscale, so the network is not asked to reconstruct noise into detail.

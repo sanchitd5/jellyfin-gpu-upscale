@@ -300,6 +300,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 : "RCAS";
         }
 
+        /// <summary>
+        /// Which ffmpeg filter a denoise level actually is, for the honest report. The level names
+        /// are a cost ladder that spans two filter families (atadenoise, then nlmeans), so naming
+        /// the level alone would not tell the viewer what ran.
+        /// </summary>
+        private static string DenoiserName(string level)
+        {
+            string filter = ShaderLibrary.DenoiseFilter(level, out _, out _);
+            return string.IsNullOrWhiteSpace(filter) ? "none" : filter;
+        }
+
         private static string Summarise(SessionRecord r)
         {
             if (r.Status != "applied")
@@ -324,7 +335,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             var parts = new List<string>();
             if (r.DenoiseApplied)
             {
-                parts.Add("Denoise " + r.DenoiseLevel);
+                parts.Add("Denoise " + r.DenoiseLevel + " (" + DenoiserName(r.DenoiseLevel) + ")");
             }
 
             if (r.UpscaleApplied)
@@ -1018,9 +1029,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             sb.Append("format=yuv420p");
 
             // Denoise runs BEFORE the upscale, always: denoising after enlargement would be asked
-            // to remove noise the network has already turned into structure. hqdn3d is a CPU
-            // filter and so goes before hwupload; nlmeans_vulkan takes Vulkan frames and goes
-            // after it, still ahead of libplacebo.
+            // to remove noise the network has already turned into structure. Which SIDE of
+            // hwupload it lands on is decided by the filter, not by the level name: atadenoise is
+            // a CPU filter and goes before hwupload, while the nlmeans_vulkan levels take Vulkan
+            // frames and go after it, still ahead of libplacebo. See the routing invariant at
+            // ShaderLibrary._denoiseFilters.
             if (plan.DenoiseApplied && !plan.DenoiseWantsHwFrames)
             {
                 sb.Append(',').Append(plan.DenoiseFilter);

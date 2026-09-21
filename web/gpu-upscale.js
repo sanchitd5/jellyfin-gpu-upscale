@@ -74,12 +74,18 @@
             ]
         },
         {
-            // Both levels are nlmeans. hqdn3d was retired: it measured no recovery at all.
+            // A cost ladder across two filter families, not one filter turned up. Light is
+            // atadenoise (adaptive temporal, CPU): measured -30% flicker for -0.20 dB at 124 fps
+            // where nlmeans gave -2% flicker for -0.35 dB at 60 fps. Strong and Max are nlmeans,
+            // a SPATIAL denoiser, kept because it attacks grain a temporal filter leaves alone.
+            // hqdn3d was retired (no recovery at all) and tmix is deliberately absent (it ghosts
+            // even on 96% still content) - both are recorded in ShaderLibrary.
             key: 'denoise', label: 'Denoise', fallback: 'off',
             options: [
                 { id: 'off', name: 'Off' },
-                { id: 'light', name: 'Light' },
-                { id: 'strong', name: 'Strong (slower)' }
+                { id: 'light', name: 'Light (temporal)' },
+                { id: 'strong', name: 'Strong (spatial, slower)' },
+                { id: 'max', name: 'Max (slowest)' }
             ]
         },
         {
@@ -132,7 +138,7 @@
      * THE QUALITY LADDER, AND WHY IT IS BUILT RATHER THAN LISTED.
      *
      * Every choice below comes from what was measured on this deployment (HANDOVER-gpuupscale.md
-     * sessions 4 and 5, and the session-6 run in /root/srresearch2/x6.out), not from taste. The
+     * sessions 4, 5 and 6), not from taste. The
      * ladder is GENERATED for the source now playing rather than being a fixed list of names,
      * because the honest set of stages is not the same for a 540p source and a 1080p one.
      *
@@ -146,9 +152,10 @@
      *    for roughly twice the GPU time, and Anime4K measured BELOW plain scaling at 1.5x and only
      *    competes at its native 2.0x on animation. Neither is an improvement in the general case,
      *    so neither is a rung; both stay in Advanced.
-     *  - Denoise (nlmeans) is the largest single gain on noisy material but costs roughly 60% of
-     *    throughput and returns nothing on clean sources, so it appears only in the upper rungs,
-     *    where the cost hint says plainly what it costs.
+     *  - Denoise helps only on GRAINY HIGH-BITRATE material and returns essentially nothing on a
+     *    normally compressed source, where the encoder has already removed the temporal noise, so
+     *    it appears only in the upper rungs. The cheap rung is atadenoise (-26% throughput), the
+     *    top rung nlmeans (-64%), and the cost hint says plainly what each costs.
      *  - Below the server's SrMinScaleFactor the network is bypassed, so a stage that switched it
      *    on there would be a rung that does nothing. srWouldRun() drops that stage instead of
      *    shipping a fake one, which is why a 720p source (1.5x to 1080p) has a shorter ladder than
@@ -171,10 +178,11 @@
         1440: { off: 242, sr: 187 },
         2160: { off: 152, sr: 138 }
     };
-    var DENOISE_COST = { off: 1, light: 2.5, strong: 3.1 };
+    // Measured 720p -> 1440p on this GPU: no denoise 167.5 fps, atadenoise 124.3, nlmeans 59.5.
+    var DENOISE_COST = { off: 1, light: 1.35, strong: 2.8, max: 3.1 };
 
     var state = {
-        version: 10,
+        version: 11,
         installed: false,
         globals: [],
         chunks: 0,

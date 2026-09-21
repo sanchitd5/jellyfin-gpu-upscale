@@ -140,11 +140,40 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         /// <summary>
         /// Denoise levels. These are ffmpeg filter nodes, not shaders, so they carry their filter
-        /// string rather than a file name. "off" means no denoise node in the chain.
+        /// string rather than a file name. "off" means no denoise node in the chain. The ladder is
+        /// ordered by MEASURED COST, cheapest first, and it changes filter FAMILY as it climbs -
+        /// it is not one filter turned up.
         ///
-        /// light   nlmeans_vulkan at its default strength. Recovered 46% of the structural damage
-        ///         of a visibly noisy source.
-        /// strong  nlmeans_vulkan=s=2.0. Recovered 53%.
+        /// light   atadenoise. Adaptive temporal denoise, a CPU filter, and the cheap default.
+        /// strong  nlmeans_vulkan at its default strength. A SPATIAL denoiser: a different kind of
+        ///         filter, not simply "more" of the one below it.
+        /// max     nlmeans_vulkan=s=2.0. This was "strong" before atadenoise was added; the alias
+        ///         "nlmeans-strong" also reaches it.
+        ///
+        /// Measured, library-scale survey, stable content 720p -> 1440p on an RTX 3090, against a
+        /// no-denoise bar of PSNR 41.36 / statTD flicker 0.231 / 167.5 fps:
+        ///
+        ///   atadenoise       41.16 (-0.20 dB)   flicker 0.161 (-30%)   124.3 fps (-26%)
+        ///   nlmeans_vulkan   41.01 (-0.35 dB)   flicker 0.226 ( -2%)    59.5 fps (-64%)
+        ///   hqdn3d           40.31 (-1.05 dB)   flicker 0.131 (-43%)   110.4 fps (-34%)
+        ///
+        /// atadenoise therefore removes far more temporal noise for less fidelity cost at 2.1x the
+        /// throughput of nlmeans, which is why it takes the cheap slot instead of being stacked
+        /// above it. nlmeans is NOT dropped: it is a spatial filter and attacks per-frame grain
+        /// that a temporal-adaptive filter leaves alone, so it can still win on some material.
+        ///
+        /// CAVEAT from the same survey, and it matters. On a realistically compressed source
+        /// (CRF 28 - what this plugin usually receives) flicker had already collapsed to
+        /// 0.002-0.05 BEFORE any filter, and every denoiser then landed within +/-0.05 dB of the
+        /// bar, because x264 has already removed the temporal noise on static content. This is a
+        /// CHEAPER REPLACEMENT for nlmeans on grainy high-bitrate sources, not a new capability.
+        ///
+        /// DO NOT ADD tmix. It is cheap (123.4 fps, flicker 0.177) and it will keep looking like a
+        /// free win, exactly as hqdn3d did. Measured on a clip with 96.2% of its pixels still,
+        /// tmix3 drove temporal error from 0.038 to 0.216 and SSIM from 0.985 to 0.964 - a 1.4%
+        /// moving region is enough to ghost. atadenoise on that same clip stayed at TCE 0.054 /
+        /// SSIM 0.982. The adaptive filter is the safe one; a plain frame average is not, at any
+        /// stability level that was measured.
         ///
         /// hqdn3d=2:1:3:3 WAS "light" and HAS BEEN RETIRED. Do not put it back because it is
         /// cheap: measured on a degraded source it recovered 0.00 dB and 12% of the structural
@@ -152,20 +181,34 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// that removes as much picture as it removes noise is worse than no denoise at all,
         /// because the viewer pays for it in detail and believes they gained something.
         ///
-        /// Both surviving levels carry "_vulkan" in the filter string, which is what
-        /// DenoiseFilter() keys on to route them after hwupload. That is not incidental: adding a
-        /// CPU denoise level here would need no code change but WOULD need the string to not
-        /// contain "_vulkan".
+        /// ROUTING INVARIANT - read this before adding a level. DenoiseFilter() decides where the
+        /// node goes by looking for "_vulkan" in the FILTER STRING, and BuildChain puts a hardware
+        /// node AFTER hwupload and a CPU node BEFORE it. atadenoise is a CPU filter and carries no
+        /// "_vulkan", so it lands before hwupload exactly where hqdn3d used to; both nlmeans
+        /// levels land after it. A new level must keep that correspondence, or ffmpeg will be
+        /// handed frames in the wrong domain and the whole job fails.
         ///
-        /// Denoise stays OFF by default. It costs roughly 60% of throughput (still about 2.5x
-        /// realtime at 4K), and on a clean source there is nothing for it to recover.
+        /// Denoise stays OFF by default, and on a clean source there is nothing for it to recover.
         /// </summary>
         private static readonly Dictionary<string, string> _denoiseFilters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["off"] = null,
-            ["light"] = "nlmeans_vulkan",
-            ["strong"] = "nlmeans_vulkan=s=2.0",
+            ["light"] = "atadenoise",
+            ["strong"] = "nlmeans_vulkan",
+            ["max"] = "nlmeans_vulkan=s=2.0",
+
+            // Accepted but not listed: names that pin a filter explicitly, so a caller can ask for
+            // one by family, and so the pre-atadenoise meaning of "strong" stays reachable.
+            ["atadenoise"] = "atadenoise",
+            ["nlmeans"] = "nlmeans_vulkan",
+            ["nlmeans-strong"] = "nlmeans_vulkan=s=2.0",
         };
+
+        /// <summary>
+        /// The denoise levels worth offering a viewer, cheapest first. The alias names above are
+        /// accepted by the API but not listed, for the same reason the cas-* names are not.
+        /// </summary>
+        private static readonly string[] _denoiseMenu = { "off", "light", "strong", "max" };
 
         /// <summary>The names offered as real levels, in ladder order. Aliases are accepted but not listed.</summary>
         public static IEnumerable<string> SrLevels => _srFiles.Keys;
@@ -258,8 +301,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return found;
         }
 
-        /// <summary>The denoise levels. These are ffmpeg filters, so there is no file to check.</summary>
-        public static List<string> AvailableDenoiseLevels() => new List<string>(_denoiseFilters.Keys);
+        /// <summary>The denoise levels offered to a viewer. These are ffmpeg filters, so there is no file to check.</summary>
+        public static List<string> AvailableDenoiseLevels() => new List<string>(_denoiseMenu);
 
         public static bool IsDeblurLevel(string level) => level != null && _deblurFiles.ContainsKey(level.Trim());
 
