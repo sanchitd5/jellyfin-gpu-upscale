@@ -64,9 +64,16 @@ WITH_DLSS="${WITH_DLSS:-0}"
 # Defaults are where these SDKs were unpacked on the build box. Nothing fetches them; a wrong path
 # fails in preflight naming the variable rather than 20 minutes into a compile.
 ORT_SDK="${ORT_SDK:-/root/gameupscale}"
-# The ONNX Runtime headers and its shared libraries are unpacked to different places: the headers
-# sit with the other SDKs, the runtime is staged where the built binary rpaths to it. Defaulting
-# this to $ORT_SDK/lib is what made configure report "libonnxruntime not found".
+# The ONNX Runtime headers and its shared libraries need not sit together, and on the build box
+# they do not: only the headers were kept beside the other SDKs, while the runtime was unpacked
+# into the prefix the finished binary rpaths to. Pointing -L at $ORT_SDK/lib is what made configure
+# report "libonnxruntime not found" after installing every build dependency.
+#
+# The default therefore links against the prefix, which means linking against this script's own
+# install destination. That is not ideal and it is deliberate: the release tarball is no longer on
+# that box, so the staged runtime is the only copy there is. Point ORT_LIB at an unpacked tarball's
+# lib/ instead wherever you have one, and the install step below will stage it into the prefix as
+# it was always meant to.
 ORT_LIB="${ORT_LIB:-${PREFIX}/ort/lib}"
 FSR2_SDK="${FSR2_SDK:-/root/gameupscale/fsr2/src/ffx-fsr2-api}"
 # The archive lands wherever FSR2.md's out-of-tree build put it, which is not beside the sources.
@@ -287,10 +294,15 @@ if [[ "$WITH_ORT" == "1" ]]; then
     # beside them come from NVIDIA's wheels by hand, and libonnxruntime_providers_cuda.so gets a
     # patchelf rpath fix there which overwriting would undo. NEURAL.md has both.
     mkdir -p "$PREFIX/ort/lib"
-    for lib in "$ORT_SDK"/lib/libonnxruntime*; do
-        [[ -e "$lib" ]] || continue
-        [[ -e "$PREFIX/ort/lib/$(basename "$lib")" ]] || cp -a "$lib" "$PREFIX/ort/lib/"
-    done
+    # Nothing to stage when the runtime is already the thing we linked against, which is the case
+    # on a box where the release tarball was unpacked straight into the prefix and only its headers
+    # were kept beside the other SDKs.
+    if [[ "$(cd "$ORT_LIB" && pwd -P)" != "$(cd "$PREFIX/ort/lib" && pwd -P)" ]]; then
+        for lib in "$ORT_LIB"/libonnxruntime*; do
+            [[ -e "$lib" ]] || continue
+            [[ -e "$PREFIX/ort/lib/$(basename "$lib")" ]] || cp -a "$lib" "$PREFIX/ort/lib/"
+        done
+    fi
 fi
 
 if [[ "$WITH_DLSS" == "1" && ! -d "$PREFIX/dlss" ]]; then
