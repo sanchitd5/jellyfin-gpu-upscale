@@ -215,7 +215,7 @@ if [[ "$WITH_OPTIX" == "1" ]]; then
     # OptiX and NVOFA are dlopen()ed from the display driver at runtime; only headers are needed to
     # build, and no CUDA toolkit is required because the filter writes no kernels.
     export CFLAGS="-I${OPTIX_SDK}/include -I${NVOF_INC} -Ilibavfilter/optix-compat ${CFLAGS:-}"
-    OPTIX_FLAGS=(--enable-liboptix)
+    OPTIX_FLAGS=(--enable-libnvoptix)
 fi
 
 ORT_FLAGS=()
