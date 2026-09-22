@@ -83,6 +83,9 @@ NGX_LIB="${NGX_LIB:-${NGX_SDK}/lib/Linux_x86_64}"
 NVOF_SDK="${NVOF_SDK:-/root/gameupscale/NVIDIAOpticalFlowSDK-nvof_2_0_bsd}"
 OIDN_VER="${OIDN_VER:-2.5.1}"
 LIBPLACEBO_TAG="${LIBPLACEBO_TAG:-v7.351.0}"
+# Pinned, like every other source build here. 2024.4 knows GL_EXT_expect_assume; the distro 2023.8
+# does not, which is the whole reason this is built rather than installed.
+SHADERC_TAG="${SHADERC_TAG:-v2024.4}"
 KEEP_BUILD="${KEEP_BUILD:-0}"
 
 # nv-codec-headers must match the INSTALLED DRIVER, not the newest tag. A newer tag compiles and then
@@ -161,9 +164,15 @@ fi
 say "installing build dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# NOT libshaderc-dev. The distro package is what broke nlmeans_vulkan: see the shaderc build
+# below. cmake is here because that build needs it.
 apt-get install -y -qq --no-install-recommends \
-    build-essential git curl ca-certificates pkg-config nasm yasm meson ninja-build \
-    python3 libx264-dev libxcb1-dev libvulkan-dev libshaderc-dev glslang-tools >/dev/null
+    build-essential git curl ca-certificates pkg-config nasm yasm meson ninja-build cmake \
+    python3 libx264-dev libxcb1-dev libvulkan-dev glslang-tools >/dev/null
+
+# The distro shaderc, if some earlier run installed it, would still be found by pkg-config and
+# would win on include order. Remove it rather than hope /usr/local sorts first.
+apt-get remove -y -qq libshaderc-dev libshaderc1 >/dev/null 2>&1 || true
 
 cleanup () { [[ "$KEEP_BUILD" == "1" ]] || rm -rf "$BUILD"; }
 trap cleanup EXIT
@@ -178,6 +187,34 @@ say "vulkan headers"
 git clone --depth 1 -b v1.3.280 https://github.com/KhronosGroup/Vulkan-Headers.git >/dev/null 2>&1
 cp -r Vulkan-Headers/include/vulkan /usr/local/include/
 cp -r Vulkan-Headers/include/vk_video /usr/local/include/ 2>/dev/null || true
+
+# --- shaderc --------------------------------------------------------------------------------------
+# BUILT FROM SOURCE, AND THIS IS NOT OPTIONAL POLISH.
+#
+# Vulkan filters compile their shaders at run time through shaderc. Ubuntu noble ships 2023.8, which
+# does not know GL_EXT_expect_assume, and FFmpeg 8.x's nlmeans_vulkan shader uses it. Against the
+# distro build that filter fails with "extension not supported" and takes the whole transcode with
+# it, while the same filter works in the stock jellyfin-ffmpeg, which builds its own shaderc. That
+# left the two binaries with different capabilities in opposite directions and killed any session
+# combining a Vulkan denoise with a filter only this build carries.
+#
+# It comes BEFORE libplacebo on purpose: libplacebo is configured with -Dshaderc=enabled and links
+# whichever it finds, so building it first would leave libplacebo on the old one.
+say "shaderc ${SHADERC_TAG} (from source: the distro build cannot compile FFmpeg 8's Vulkan shaders)"
+git clone -q --depth 1 -b "$SHADERC_TAG" https://github.com/google/shaderc.git
+# Fetches the glslang and SPIRV-Tools revisions this tag was tested against, which is the whole
+# reason to use upstream's own script rather than distro packages of each.
+( cd shaderc && ./utils/git-sync-deps >/dev/null )
+cmake -S shaderc -B shaderc/build -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr/local \
+    -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON -DSHADERC_SKIP_COPYRIGHT_CHECK=ON >/dev/null
+cmake --build shaderc/build --target install -j"$(nproc)" >/dev/null
+ldconfig
+
+# Prove it before anything links against it: a version that still predates the extension would
+# otherwise surface twenty minutes later as the same runtime failure this build exists to remove.
+shaderc_ver="$(pkg-config --modversion shaderc 2>/dev/null || echo unknown)"
+say "shaderc in use: ${shaderc_ver}"
 
 # --- libplacebo -----------------------------------------------------------------------------------
 # FFmpeg 8.x needs PL_ALPHA_NONE, absent from libplacebo 6.x (which is what distros ship).
