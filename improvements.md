@@ -358,7 +358,12 @@ Ordered by what is at stake.
    already in the repo, read as something else: Anime4K below plain lanczos at 1.5x, EASU losing
    outright because it locks onto compression-noise gradients. Measure one source at two CRFs.
 3. **GPU-resident NVENC handoff.** `hwdownload,format=yuv420p` sends every output frame through
-   system memory, about 12 MB per frame at 2160p, paid at output size.
+   system memory, about 12 MB per frame at 2160p, paid at output size. `[~]` wired as an opt-in
+   setting, `GpuResidentEncode` (off by default): `BuildChain` emits `hwmap=derive_device=cuda`
+   in its place when enabled. Not the default because Vulkan-to-CUDA interop in the patched build
+   is unconfirmed on the server; this is the mechanical half, the measurement is still open. Flip
+   it on for one session, confirm the served segment against ground truth same as item 1, watch
+   for a failed session start before ever making it the default.
 4. **10-bit output.** Deband is requantised to 8 bit on exit, throwing away most of what it did.
 5. **Cost-budget admission.** `HasCapacity()` counts processes, so a dlss session and a sharpen-only
    session each consume one of two, and foreign libplacebo transcodes count too. The `/proc` walk is

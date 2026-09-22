@@ -2132,7 +2132,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 }
             }
 
-            sb.Append(",hwdownload,format=yuv420p");
+            // Default: bring the frame back to system memory so NVENC re-uploads it itself.
+            // GpuResidentEncode instead derives a CUDA device from the existing Vulkan one and
+            // hands NVENC the frame without leaving the GPU - see the config page for why this
+            // is opt-in rather than the default.
+            sb.Append(cfg?.GpuResidentEncode == true
+                ? ",hwmap=derive_device=cuda"
+                : ",hwdownload,format=yuv420p");
             return sb.ToString();
         }
 

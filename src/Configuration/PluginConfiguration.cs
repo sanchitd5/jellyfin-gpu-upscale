@@ -131,6 +131,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         public int MaxConcurrent { get; set; } = 4;
 
         /// <summary>
+        /// Hand the libplacebo output to NVENC as a CUDA frame (hwmap=derive_device=cuda) instead
+        /// of hwdownload,format=yuv420p, skipping the Vulkan-to-system-memory-to-CUDA round trip
+        /// at output size. Off by default: it needs the patched binary's Vulkan-CUDA interop
+        /// confirmed on the server before it can be trusted on a live session - see improvements.md.
+        /// </summary>
+        public bool GpuResidentEncode { get; set; }
+
+        /// <summary>
         /// Encoder used when this plugin forces a transcode. Blank or "auto" follows the codec the
         /// client negotiated. A named encoder applies only when ffmpeg has it and the session
         /// declared that codec playable; otherwise the client-negotiated codec is used.

@@ -498,6 +498,26 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="GpuResidentEncode" />
+                        <span>Hand frames to NVENC without leaving the GPU (experimental)</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        <b>Off by default, and read this before turning it on.</b>
+                        <br /><br />
+                        Normally the enhanced chain ends with <code>hwdownload,format=yuv420p</code>, moving
+                        every output frame from GPU to system memory before NVENC uploads it again for
+                        encoding - a full frame's worth of PCIe traffic each way, paid at output size. This
+                        setting instead hands NVENC the frame while it is still on the GPU
+                        (<code>hwmap=derive_device=cuda</code>), skipping that round trip.
+                        <br /><br />
+                        It depends on Vulkan-CUDA interop in the patched ffmpeg build, which has not been
+                        confirmed on every server. If sessions fail to start after enabling this, turn it back
+                        off; nothing else about the enhancement chain changes.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
                         <input is="emby-checkbox" type="checkbox" id="RequireClientOptIn" />
                         <span>Only upscale when the viewer asks for it</span>
                     </label>
@@ -812,6 +832,7 @@
                         config.SrMinScaleFactor == null ? 1.6 : config.SrMinScaleFactor;
                     page.querySelector('#MaxSourceHeight').value = config.MaxSourceHeight;
                     page.querySelector('#MaxConcurrent').value = config.MaxConcurrent;
+                    page.querySelector('#GpuResidentEncode').checked = config.GpuResidentEncode === true;
                     page.querySelector('#RequireClientOptIn').checked = config.RequireClientOptIn;
                     page.querySelector('#ForceTranscode').checked = config.ForceTranscode;
                     page.querySelector('#ForceTranscodeForDirectPlay').checked = config.ForceTranscodeForDirectPlay === true;
@@ -883,6 +904,7 @@
                     config.SrMinScaleFactor = parseFloat(page.querySelector('#SrMinScaleFactor').value);
                     config.MaxSourceHeight = parseInt(page.querySelector('#MaxSourceHeight').value, 10);
                     config.MaxConcurrent = parseInt(page.querySelector('#MaxConcurrent').value, 10);
+                    config.GpuResidentEncode = page.querySelector('#GpuResidentEncode').checked;
                     config.RequireClientOptIn = page.querySelector('#RequireClientOptIn').checked;
                     config.ForceTranscode = page.querySelector('#ForceTranscode').checked;
                     config.ForceTranscodeForDirectPlay = page.querySelector('#ForceTranscodeForDirectPlay').checked;
