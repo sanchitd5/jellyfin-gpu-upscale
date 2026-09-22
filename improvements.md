@@ -77,3 +77,71 @@ The local `dotnet build` fails with 25 x CS0246 on `EncodingJobInfo` / `Encoding
 The ffmpeg filters have not been compiled at all. Build them on the host and confirm `-filters` still lists all five (`vf_oidn`, `vf_optix`, `vf_ort`, `vf_fsr2`, `vf_dlss`).
 
 Session ownership is fail-open: an empty id on either side answers as before. Both ids come from unverified sources (reflection for the record's user, the `Jellyfin-UserId` claim for the caller). Check it by playing as one viewer, then requesting `/GpuUpscale/Session/<id>` with a second viewer's token: expected `Known: false`, and the real record with the first viewer's own token.
+
+---
+
+# Round two: whole-codebase review (Opus)
+
+Eight agents, whole files rather than diffs. 21 red, 79 amber. Nothing below is applied unless
+marked, and nothing below has been run against a server.
+
+Fixed immediately, because it was a regression introduced by round one:
+
+- [x] `src/patcher/UpscalePatches.cs` 🔴 `explicitlyAsked` read `plan.*Applied`, which are true for a
+  dashboard default as well as a session request. A default of `chroma=krigbilateral` would have
+  turned every stream-copy-eligible playback into a full GPU transcode. Now gated on
+  `UpscaleEngine.SessionNamedEnhancement(state)`, which asks whether the session named an axis.
+- [x] `ffmpeg/vf_optix.c` 🟡 `uninit()` pushed the CUDA context unchecked and popped unconditionally,
+  the same defect round one fixed one function up. Pop is now gated on the push having succeeded.
+
+## Red, unfixed
+
+### Client sends nothing (`web/gpu-upscale.js`)
+- [ ] L650 `anyEnhancement()` tests only upscale/deblur/denoise, so a Custom pick of sr, neural, game,
+  refine, chroma, kernel or deband never forces a transcode: direct play, nothing applied.
+- [ ] L1829 the seeding loop writes `effective()` over `state.prefs` and the next save persists it, so
+  `stage: off` permanently wipes the viewer's stored sr/neural/game choices.
+- [ ] L2248 every axis but upscale is gated on `serverCaps.full`; a failed boot probe is never cached,
+  so all axes are silently dropped for the life of the page.
+- [ ] L1842 a partial probe answer rewrites stored preferences to `off` on disk.
+
+### Shim (`shim/jellyfin-ffmpeg-upscale`)
+- [ ] L435 the upscale path runs ffmpeg via `Popen` with no signal handling. Jellyfin killing the shim
+  orphans the child, still writing segments and holding the GPU.
+- [ ] L445 the per-pid error file is opened after `Popen`, and a failure there falls through to
+  `passthrough()` → `execv`, leaving two ffmpegs writing the same output.
+- [ ] L461 `rc != 0` retries the whole transcode even when the child was killed on purpose.
+- [ ] L464 `sys.exit(rc)` turns a signal death into exit status 241.
+- [ ] L77 a malformed config falls back to defaults that lack `plugin_patch_active`, so the shim
+  rewrites a command the plugin is also rewriting. Should fail closed.
+- [ ] L101 `wants_patched` rejects `]` as a leading boundary, so a labelled filter_complex node routes
+  to the stock binary and fails outright instead of degrading.
+
+### Patcher (`src/patcher/`)
+- [ ] `UpscalePatches.cs:83` `_harmony` is assigned after the core patch loop, so a throw mid-loop
+  leaves earlier patches installed and unpatchable: the partial core install the file forbids.
+- [ ] `UpscalePatches.cs:287` the four postfixes disagree on one session; a burn-in session gets Vulkan
+  device args with the stock filter graph.
+- [ ] `UpscaleEngine.cs:291` history eviction deletes the live `_bySession` entry for a session that
+  was recorded more than once, so the endpoint answers null for a playing session.
+- [ ] `UpscaleEngine.cs:750` an unrecognised session value falls back to the dashboard default rather
+  than to off, so a typo defeats an explicit Off and forces a transcode. Same at 775, 782, 827, 844, 858.
+
+### ffmpeg filters
+- [ ] `gu_inputs.h:548` `dlclose` on ONNX Runtime crashes the process at teardown.
+- [ ] `gu_inputs.h:684` the depth output is read as 518x518 with no shape check; `dmodel=` is user-set,
+  so a different model is an out-of-bounds read.
+- [ ] `vf_dlss.c:361` and `vf_fsr2.c:376` `config_output` is not idempotent: a reconfigure leaks the
+  instance, device, pool, fence, every image and the FSR2/NGX context.
+- [ ] `vf_dlss.c:672` NGX shutdown is process-wide but called per instance, so two dlss filters in one
+  process kill each other.
+- [ ] `vf_ort.c:348` a non-float32 model output is read as float32: an out-of-bounds read of megabytes.
+
+## Amber
+Seventy-nine, recorded in the agent reports. The themes worth naming: no axis reserves its
+concurrency slot at decision time, so the cap is advisory under parallel starts; the shader cache is
+keyed on level names and compares mtime ordering, so a rollback that preserves timestamps serves a
+stale composition forever; shader downloads are unpinned and verified only by a header grep, so a
+truncated or substituted shader installs; several `config_input` paths are not re-entrant; and the
+session ownership check added in round one is unverified against a live Jellyfin and fails open on
+both sides at once.

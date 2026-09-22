@@ -629,6 +629,29 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         }
 
         /// <summary>
+        /// True when this session named an enhancement axis itself, as opposed to inheriting a
+        /// dashboard default.
+        ///
+        /// The difference decides whether a stream copy is worth replacing with a full transcode.
+        /// A plan's *Applied flags cannot answer it: they are equally true for a dashboard default,
+        /// so reading them there would turn every direct-play-eligible session on the server into a
+        /// GPU transcode the moment an admin set one of those defaults.
+        /// </summary>
+        public static bool SessionNamedEnhancement(EncodingJobInfo state)
+        {
+            string[] axes = { "sr", "deblur", "denoise", "neural", "game", "refine", "chroma", "deband", "kernel", "jitter", "depth", "reactive" };
+            foreach (string axis in axes)
+            {
+                if (Option(state, axis) != null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// Works out what this job should get. Session options win; the dashboard settings are the
         /// fallback, which is what keeps the features working when the player UI is not there.
         /// </summary>

@@ -693,9 +693,13 @@ fail:
 static av_cold void uninit(AVFilterContext *ctx)
 {
     OptixContext *s = ctx->priv;
+    int pushed = 0;
 
+    // Only pop what was actually pushed. cu_ctx is non-NULL as soon as the primary context is
+    // retained, which happens before the push, so an unchecked push here would let a failed
+    // config_input reach the pop below and take the calling thread's own context off the stack.
     if (s->cu && s->cu_ctx)
-        s->cu->cuCtxPushCurrent(s->cu_ctx);
+        pushed = s->cu->cuCtxPushCurrent(s->cu_ctx) == CUDA_SUCCESS;
 
     if (s->nvof_session) {
         for (int i = 0; i < 2; i++)
@@ -722,7 +726,8 @@ static av_cold void uninit(AVFilterContext *ctx)
         if (s->d_flow)    s->cu->cuMemFree(s->d_flow);
         if (s->stream)    s->cu->cuStreamDestroy(s->stream);
         if (s->cu_ctx) {
-            s->cu->cuCtxPopCurrent(&s->cu_ctx);
+            if (pushed)
+                s->cu->cuCtxPopCurrent(&s->cu_ctx);
             s->cu->cuDevicePrimaryCtxRelease(s->cu_device);
         }
         cuda_free_functions(&s->cu);
