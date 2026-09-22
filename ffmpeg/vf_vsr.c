@@ -234,7 +234,10 @@ static av_cold int config_output(AVFilterLink *outlink)
     if (s->models_dir && *s->models_dir)
         CHECK_NVCV(ctx, NvVFX_SetString(s->effect, NVVFX_MODEL_DIRECTORY, s->models_dir));
     CHECK_NVCV(ctx, NvVFX_SetU32(s->effect, NVVFX_QUALITY_LEVEL, (unsigned)s->quality));
-    CHECK_NVCV(ctx, NvVFX_SetU32(s->effect, NVVFX_IMAGE_ENCODING_MODE, NVVFX_IMAGE_ENCODING_RGB8));
+    /* NVVFX_IMAGE_ENCODING_MODE is likewise not a valid parameter for this effect
+     * (same NVCV_ERR_PARAMETER, -5, confirmed directly) - encoding is presumably
+     * fixed or inferred from the bound NvCVImage's own format instead. NVIDIA's
+     * own nvidia-vfx Python package never sets it either. */
 
     CHECK_NVCV(ctx, NvCVImage_Alloc(&s->dev_in,  s->in_w,  s->in_h,  NVCV_RGBA, NVCV_U8,
                                      NVCV_CHUNKY, NVCV_CUDA, 0));
