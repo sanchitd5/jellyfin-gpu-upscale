@@ -46,6 +46,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// <summary>True only when a denoise filter node really went into the command.</summary>
         public bool DenoiseApplied { get; set; }
 
+        /// <summary>True only when a deblocking / deringing node really went into the command.</summary>
+        public bool DeblockApplied { get; set; }
+
         /// <summary>True only when a neural super-resolution network really went into the command.</summary>
         public bool NeuralApplied { get; set; }
 
@@ -97,6 +100,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public string NeuralRequested { get; set; }
 
         public string DenoiseLevel { get; set; }
+
+        /// <summary>The deblocking / deringing level that ran, or "off".</summary>
+        public string DeblockLevel { get; set; }
+
+        /// <summary>
+        /// The deblock level that was asked for, even when it did not run. DeblockLevel carries
+        /// only what was applied, and a level can be asked for and dropped here for a reason no
+        /// other axis has: this build may simply not carry the filter. Without this, "requested
+        /// and not available" would be indistinguishable from "nobody asked", which is exactly how
+        /// the neural axis shipped dead once already.
+        /// </summary>
+        public string DeblockRequested { get; set; }
 
         /// <summary>The neural super-resolution level that ran, or "off".</summary>
         public string NeuralLevel { get; set; }
@@ -222,6 +237,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             /// <summary>True when the denoise node needs Vulkan frames, i.e. goes after hwupload.</summary>
             public bool DenoiseWantsHwFrames { get; set; }
+
+            public string DeblockLevel { get; set; } = "off";
+
+            /// <summary>The deblock level asked for, whether or not this build could run it.</summary>
+            public string DeblockRequested { get; set; } = "off";
+
+            /// <summary>The ffmpeg filter node for the deblock level, or null.</summary>
+            public string DeblockFilter { get; set; }
+
+            /// <summary>True when the deblock node needs Vulkan frames. No level here does today.</summary>
+            public bool DeblockWantsHwFrames { get; set; }
+
+            public bool DeblockApplied { get; set; }
 
             public string NeuralLevel { get; set; } = "off";
 
@@ -418,6 +446,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 UpscaleApplied = plan.Act && plan.UpscaleApplied,
                 DeblurApplied = plan.Act && plan.DeblurApplied,
                 DenoiseApplied = plan.Act && plan.DenoiseApplied,
+                DeblockApplied = plan.Act && plan.DeblockApplied,
                 NeuralApplied = plan.Act && plan.NeuralApplied,
                 GameApplied = plan.Act && plan.GameApplied,
                 DebandApplied = plan.Act && plan.DebandApplied,
@@ -434,6 +463,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 SrOwnsSharpening = plan.Act && plan.SrOwnsSharpening,
                 Upscaler = plan.Act ? plan.Upscaler : null,
                 DenoiseLevel = plan.Act && plan.DenoiseApplied ? plan.DenoiseLevel : "off",
+                DeblockLevel = plan.Act && plan.DeblockApplied ? plan.DeblockLevel : "off",
+                // Unconditional, like NeuralRequested: what was asked for, run or not.
+                DeblockRequested = plan.DeblockRequested ?? "off",
                 NeuralLevel = plan.Act && plan.NeuralApplied ? plan.NeuralLevel : "off",
                 GameLevel = plan.Act && plan.GameApplied ? plan.GameLevel : "off",
                 GameJitter = plan.Act && plan.GameApplied ? plan.GameJitter : null,
@@ -543,6 +575,32 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return filter;
         }
 
+        /// <summary>
+        /// Which ffmpeg filter a deblock level actually is, for the honest report. Same reason as
+        /// DenoiserName: the level names span three filter families (deblock, fspp, pp7), so the
+        /// level alone does not say what ran, and only two of the three attack ringing.
+        /// </summary>
+        private static string DeblockerName(string level)
+        {
+            string filter = ShaderLibrary.DeblockFilter(level, out _, out _);
+            if (string.IsNullOrWhiteSpace(filter))
+            {
+                return "none";
+            }
+
+            if (filter.StartsWith("deblock", StringComparison.OrdinalIgnoreCase))
+            {
+                return filter + ", libavfilter deblocking on the coding grid, no deringing";
+            }
+
+            if (filter.StartsWith("fspp", StringComparison.OrdinalIgnoreCase))
+            {
+                return filter + ", libpostproc fast simple post-processing, deblock and dering";
+            }
+
+            return filter + ", libpostproc";
+        }
+
         private static string Summarise(SessionRecord r)
         {
             if (r.Status != "applied")
@@ -565,6 +623,22 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
 
             var parts = new List<string>();
+
+            // First in the summary because it is first in the chain: it runs at source resolution,
+            // ahead of everything below, on the damage the source codec did rather than on grain.
+            if (r.DeblockApplied)
+            {
+                parts.Add("Deblock " + r.DeblockLevel + " (" + DeblockerName(r.DeblockLevel) + ", source resolution, before the scale)");
+            }
+            else if (!string.IsNullOrEmpty(r.DeblockRequested)
+                && !string.Equals(r.DeblockRequested, "off", StringComparison.OrdinalIgnoreCase))
+            {
+                // Said out loud, like SrBypassed: this axis can be asked for and dropped because
+                // this ffmpeg build has no such filter, and a viewer who picked a level is entitled
+                // to know it did not run rather than reading a summary that simply omits it.
+                parts.Add("deblock " + r.DeblockRequested + " not run (this ffmpeg build does not carry the filter)");
+            }
+
             if (r.DenoiseApplied)
             {
                 parts.Add("Denoise " + r.DenoiseLevel + " (" + DenoiserName(r.DenoiseLevel) + ")");
@@ -683,7 +757,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public static bool SessionNamedEnhancement(EncodingJobInfo state)
         {
-            string[] axes = { "sr", "deblur", "denoise", "neural", "game", "refine", "chroma", "deband", "kernel", "jitter", "depth", "reactive" };
+            string[] axes = { "sr", "deblur", "deblock", "denoise", "neural", "game", "refine", "chroma", "deband", "kernel", "jitter", "depth", "reactive" };
             foreach (string axis in axes)
             {
                 if (Option(state, axis) != null)
@@ -917,6 +991,33 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     denoiseLevel = ShaderLibrary.IsDenoiseLevel(denoiseDefault) ? denoiseDefault : "off";
                 }
 
+                // ---- deblocking and deringing ---------------------------------------------
+                // Same carrier and the same fallback rule as denoise, because it is the closest
+                // existing shape: a pre-SR restoration pass that could in principle land either
+                // side of hwupload. BuildChain puts this node AHEAD of the denoise one: this pass
+                // attacks what the source encoder did, and handing a temporal denoiser a frame
+                // whose block edges have already gone is the way round that gives the denoiser
+                // fewer false edges to chase. Assumed, not measured, and the reverse order would be
+                // defensible too; what is NOT in question is that both run at source resolution and
+                // ahead of the super-resolution pass.
+                string deblockDefault = clientSaidOff ? "off" : cfg.DeblockLevel;
+                string deblockLevel = cfg.DeblockAllowed ? (Option(state, "deblock") ?? deblockDefault) : "off";
+                if (!ShaderLibrary.IsDeblockLevel(deblockLevel))
+                {
+                    deblockLevel = ShaderLibrary.IsDeblockLevel(deblockDefault) ? deblockDefault : "off";
+                }
+
+                // Recorded before DeblockFilter can drop it: this axis is the one that can be a
+                // real level and still not run, because the filter may be absent from this build.
+                plan.DeblockRequested = ShaderLibrary.IsDeblockLevel(deblockLevel)
+                    ? deblockLevel.Trim().ToLowerInvariant()
+                    : "off";
+
+                plan.DeblockFilter = ShaderLibrary.DeblockFilter(deblockLevel, out string deblockUsed, out bool deblockHw);
+                plan.DeblockLevel = deblockUsed;
+                plan.DeblockWantsHwFrames = deblockHw;
+                plan.DeblockApplied = plan.DeblockFilter != null;
+
                 plan.DenoiseFilter = ShaderLibrary.DenoiseFilter(denoiseLevel, out string denoiseUsed, out bool denoiseHw);
                 plan.DenoiseLevel = denoiseUsed;
                 plan.DenoiseWantsHwFrames = denoiseHw;
@@ -995,7 +1096,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 bool wantRefine = !string.Equals(refineLevel, "off", StringComparison.OrdinalIgnoreCase);
                 bool wantChroma = !string.Equals(chromaLevel, "off", StringComparison.OrdinalIgnoreCase);
                 if (!plan.UpscaleApplied && !wantDeblur && !wantRefine && !wantChroma
-                    && !plan.DenoiseApplied && !plan.NeuralApplied && !plan.GameApplied)
+                    && !plan.DenoiseApplied && !plan.DeblockApplied && !plan.NeuralApplied && !plan.GameApplied)
                 {
                     return clientSaidOff
                         ? Plan.No("off-by-client", "the viewer selected Off")
@@ -1057,7 +1158,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.DebandApplied = wantDeband;
 
                 if (!plan.UpscaleApplied && !plan.DeblurApplied && !plan.RefineApplied
-                    && !plan.ChromaApplied && !plan.DenoiseApplied && !plan.NeuralApplied && !plan.GameApplied)
+                    && !plan.ChromaApplied && !plan.DenoiseApplied && !plan.DeblockApplied
+                    && !plan.NeuralApplied && !plan.GameApplied)
                 {
                     // Sharpening was asked for but its shader is missing: nothing left to do.
                     return Plan.No("not-requested", "requested shaders unavailable");
@@ -1323,6 +1425,139 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
         }
 
+        private static HashSet<string> _filters;
+        private static bool _filtersProbed;
+        private static readonly object _filtersLock = new object();
+
+        /// <summary>
+        /// Does this ffmpeg build carry a filter of this name?
+        ///
+        /// Asked once and remembered, the way the encoder probe is, and for the same reason: this
+        /// runs on the transcode path and must never spawn a process per session. The probe failing
+        /// is remembered separately from its result, so a server where it cannot work does not
+        /// re-spawn three processes for every playback.
+        ///
+        /// UNKNOWN COUNTS AS MISSING HERE, which is the opposite of AvailableEncoders' rule and is
+        /// deliberate. A refused encoder still plays the video; a filter name ffmpeg does not know
+        /// fails the whole job. So when the binary cannot be asked, the caller is told the filter is
+        /// not there and the level is not offered.
+        /// </summary>
+        public static bool HasFilter(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return false;
+            }
+
+            var filters = AvailableFilters();
+            return filters != null && filters.Contains(name.Trim());
+        }
+
+        /// <summary>The filter names this ffmpeg build has, or null when it could not be asked.</summary>
+        private static HashSet<string> AvailableFilters()
+        {
+            if (_filtersProbed)
+            {
+                return _filters;
+            }
+
+            lock (_filtersLock)
+            {
+                if (_filtersProbed)
+                {
+                    return _filters;
+                }
+
+                var candidates = new List<string>();
+                if (!string.IsNullOrWhiteSpace(_ffmpegPath))
+                {
+                    candidates.Add(_ffmpegPath);
+                }
+
+                candidates.Add("/usr/lib/jellyfin-ffmpeg/ffmpeg");
+                candidates.Add("/usr/bin/ffmpeg");
+
+                foreach (string exe in candidates)
+                {
+                    try
+                    {
+                        if (!File.Exists(exe))
+                        {
+                            continue;
+                        }
+
+                        var psi = new System.Diagnostics.ProcessStartInfo(exe, "-hide_banner -loglevel quiet -filters")
+                        {
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false,
+                        };
+
+                        using (var proc = System.Diagnostics.Process.Start(psi))
+                        {
+                            // Both pipes drained before the wait, for the deadlock the encoder
+                            // probe documents: stderr left unread fills and stops the child while
+                            // this thread waits forever on a transcode path holding the lock.
+                            var stdoutRead = proc.StandardOutput.ReadToEndAsync();
+                            var stderrRead = proc.StandardError.ReadToEndAsync();
+                            if (!proc.WaitForExit(15000))
+                            {
+                                try
+                                {
+                                    proc.Kill();
+                                    proc.WaitForExit(2000);
+                                }
+                                catch (Exception)
+                                {
+                                    // already gone
+                                }
+
+                                continue;
+                            }
+
+                            if (!System.Threading.Tasks.Task.WaitAll(new[] { stdoutRead, stderrRead }, 5000))
+                            {
+                                continue;
+                            }
+
+                            var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (string line in stdoutRead.Result.Split('\n'))
+                            {
+                                // " T. fspp              V->V       Apply Fast Simple Post-processing filter."
+                                // Flags first, then the name. The header lines carry no flags token
+                                // followed by a name, so they fall out of the arrow check below.
+                                string[] parts = line.Trim().Split(
+                                    new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                                if (parts.Length < 3 || parts[2].IndexOf("->", StringComparison.Ordinal) < 0)
+                                {
+                                    continue;
+                                }
+
+                                if (parts[1].Length > 0)
+                                {
+                                    found.Add(parts[1]);
+                                }
+                            }
+
+                            if (found.Count > 0)
+                            {
+                                _filters = found;
+                                _filtersProbed = true;
+                                return _filters;
+                            }
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // try the next candidate
+                    }
+                }
+
+                _filtersProbed = true;
+                return null;
+            }
+        }
+
         /// <summary>The codec family an encoder name produces, or null if it is not one we know.</summary>
         private static string CodecOf(string encoder)
         {
@@ -1551,6 +1786,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             var cpuNodes = new List<string>();
 
+            // Deblocking runs FIRST of everything, at source resolution, before denoise and long
+            // before the scale. The SR networks were trained on clean downsampled images, so a DCT
+            // block edge or mosquito ringing reaching one is reconstructed as detail - the pass
+            // amplifies the artefact. There is no later point that undoes that, which is why this
+            // node is the head of the chain rather than an option somewhere in the middle. Every
+            // level is a CPU filter today (this build has no deblock_vulkan), so it lands before
+            // hwupload; the hardware branch below exists so the invariant holds if one ever does.
+            if (plan.DeblockApplied && !plan.DeblockWantsHwFrames)
+            {
+                cpuNodes.Add(plan.DeblockFilter);
+            }
+
             // Denoise runs BEFORE the upscale, always: denoising after enlargement would be asked
             // to remove noise the network has already turned into structure. Which SIDE of
             // hwupload it lands on is decided by the filter, not by the level name: atadenoise is
@@ -1585,6 +1832,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             AppendCpuNodes(sb, cpuNodes);
 
             sb.Append(",hwupload");
+
+            if (plan.DeblockApplied && plan.DeblockWantsHwFrames)
+            {
+                sb.Append(',').Append(plan.DeblockFilter);
+            }
 
             if (plan.DenoiseApplied && plan.DenoiseWantsHwFrames)
             {

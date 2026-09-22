@@ -98,7 +98,18 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         echo "    previous binary saved as $PATCHED_FFMPEG.prev"
     fi
 
-    PREFIX="$FFMPEG_PREFIX" ./scripts/build-ffmpeg.sh
+    # Every filter switched on, because the check below refuses to deploy a binary missing any of
+    # them. Asking for one and then demanding five is how this script spent a build producing a
+    # binary it then rejected. build-ffmpeg.sh fails in preflight, in seconds, when an SDK is not
+    # where it expects, and each WITH_* and SDK path here can be overridden from the environment.
+    PREFIX="$FFMPEG_PREFIX" \
+        WITH_OIDN="${WITH_OIDN:-1}" \
+        WITH_OPTIX="${WITH_OPTIX:-1}" \
+        WITH_ORT="${WITH_ORT:-1}" \
+        WITH_FSR2="${WITH_FSR2:-1}" \
+        WITH_DLSS="${WITH_DLSS:-1}" \
+        OPTIX_SDK="${OPTIX_SDK:-/root/gameupscale/optix-dev-8.1.0}" \
+        ./scripts/build-ffmpeg.sh
 
     "$PATCHED_FFMPEG" -hide_banner -version >/dev/null 2>&1 || {
         echo "==> FAILED: $PATCHED_FFMPEG will not run at all (check its library paths)" >&2

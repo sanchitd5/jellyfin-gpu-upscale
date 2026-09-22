@@ -355,6 +355,170 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private static readonly string[] _denoiseMenu = { "off", "light", "strong", "max", "oidn", "optix", "optix-temporal" };
 
         /// <summary>
+        /// DEBLOCKING AND DERINGING. ffmpeg filter nodes, like the denoise levels, so they carry
+        /// their filter string rather than a file name. This axis runs at SOURCE resolution and
+        /// BEFORE any super-resolution pass, and it is the only thing in this plugin aimed at what
+        /// the SOURCE CODEC did rather than at what the camera recorded.
+        ///
+        /// WHY IT EXISTS. Every network here - FSRCNNX, Anime4K, CuNNy, RAVU, Real-ESRGAN - was
+        /// trained on bicubic downsampling of CLEAN images. What this server feeds them is h264 and
+        /// hevc carrying DCT block edges, mosquito ringing around hard edges and banding. A network
+        /// cannot tell a block edge from a real edge, so it reconstructs the artefact as detail:
+        /// the SR pass amplifies exactly what nothing else in this chain removes. Denoise does not
+        /// cover it - atadenoise is temporal, nlmeans and the AI denoisers are trained on grain,
+        /// and none of them targets an 8x8 grid.
+        ///
+        /// The evidence is already in this repository, read as something else at the time: the
+        /// README records Anime4K measuring BELOW plain lanczos at 1.5x, and EASU losing outright
+        /// with the note that it locks onto compression-noise gradients.
+        ///
+        /// BEFORE THE SCALE, AT 1x, is not an implementation detail. An artefact that has been
+        /// enlarged is an artefact the SR pass has already treated as signal, so there is no later
+        /// point in the chain at which removing it undoes that.
+        ///
+        /// NOTHING HERE HAS BEEN MEASURED. The strengths below were chosen to be conservative, not
+        /// because a benchmark chose them, and the dashboard default is "off" for that reason. On a
+        /// clean high-bitrate source there is nothing to remove and every level here costs picture.
+        /// Do not promote one until it has been measured the way the denoise ladder was.
+        ///
+        /// light   deblock=filter=weak:block=8 - libavfilter's own deblocker on the h264/hevc 8x8
+        ///         grid at weak thresholds. The broadcast-material default: it should help a
+        ///         low-bitrate source without smearing texture on one that did not need it.
+        /// strong  deblock=filter=strong:block=8 - the same filter, strong thresholds. Blocking
+        ///         ONLY; this filter does not touch ringing, which is why the two levels below are
+        ///         offered rather than a third strength of it.
+        /// fspp    fspp=quality=4 - fast simple post-processing, a DCT-domain deblock AND dering.
+        ///         A different filter FAMILY rather than more of the one above it, exactly as the
+        ///         denoise ladder changes family as it climbs, and the cheapest level here that
+        ///         touches ringing at all. quality=4 is the cheapest setting the filter accepts
+        ///         (its range is 4 to 5, and 4 is its own default), written out rather than left
+        ///         implicit so the built command says which one ran. Not measured.
+        /// pp7     pp7 - the postprocessing-7 deblocker, a third family again. Offered because it
+        ///         is present, not because it beat fspp on anything here.
+        ///
+        /// WHAT THESE COST, and it is not measured either: `ffmpeg -filters` on this server reports
+        /// deblock, fspp, spp, pp7 and uspp all as "T." - timeline support, NO SLICE THREADING. So
+        /// every level here is a SINGLE-THREADED CPU pass over the whole source-resolution frame,
+        /// which on a shared card is the one part of this chain that cannot be handed to the GPU.
+        /// deblock is the cheapest of them by a wide margin and is the only level a default should
+        /// ever name; fspp and pp7 are opt-in, and nothing selects either automatically.
+        ///
+        /// Two present filters are deliberately NOT offered. uspp re-encodes the frame with an
+        /// internal snow encoder once per shift - documented as very slow, single-threaded here,
+        /// and a stills tool rather than a transcode filter. spp is the same family as fspp and
+        /// slower at the same job, so listing it would be listing a worse rung beside its own
+        /// replacement. libpostproc's combined "pp" filter is absent from this build entirely,
+        /// which is precisely why the availability check below exists rather than a hard-coded list.
+        ///
+        /// ROUTING INVARIANT, the same one _denoiseFilters obeys and for the same reason:
+        /// DeblockFilter() reports whether the node wants Vulkan frames by looking for "_vulkan" in
+        /// the FILTER STRING, and BuildChain puts a hardware node after hwupload and a CPU node
+        /// before it. Every level here is a CPU filter and carries no "_vulkan", so all of them
+        /// land before hwupload - which is also where "at source resolution, ahead of the scale"
+        /// is. A level added here that does want Vulkan frames must say so in its string or ffmpeg
+        /// is handed frames in the wrong domain and the whole job fails.
+        /// </summary>
+        private static readonly Dictionary<string, string> _deblockFilters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["off"] = null,
+            ["light"] = "deblock=filter=weak:block=8",
+            ["strong"] = "deblock=filter=strong:block=8",
+            ["fspp"] = "fspp=quality=4",
+            ["pp7"] = "pp7",
+        };
+
+        /// <summary>
+        /// The deblock levels worth offering a viewer, gentlest first. Unlike the denoise menu this
+        /// one is filtered against the binary before it is served: see AvailableDeblockLevels.
+        /// </summary>
+        private static readonly string[] _deblockMenu = { "off", "light", "strong", "fspp", "pp7" };
+
+        /// <summary>
+        /// The deblock levels THIS ffmpeg build can actually run, gentlest first.
+        ///
+        /// Checked rather than assumed, because two of these are not guaranteed: fspp and pp7 come
+        /// from libpostproc, which is a build option, and this plugin runs beside an ffmpeg it did
+        /// not build and cannot rebuild. The deployed jellyfin-ffmpeg was read with `-filters` and
+        /// carries deblock, fspp, spp, pp7 and uspp today, and it carries no "pp" - a hard-coded
+        /// list would therefore already have been wrong once. An unknown filter name does not
+        /// degrade the picture - it fails the whole transcode - so this follows the same rule as
+        /// the shader files and the neural weights: a level this build does not carry is not
+        /// offered at all.
+        ///
+        /// When the binary cannot be asked, nothing but "off" is offered. "Unknown" is treated as
+        /// "missing" here, which is the opposite of the encoder probe's rule, and deliberately: a
+        /// refused encoder still plays the video, a filter name ffmpeg does not know does not.
+        /// </summary>
+        public static List<string> AvailableDeblockLevels()
+        {
+            var found = new List<string>();
+            foreach (string level in _deblockMenu)
+            {
+                if (_deblockFilters[level] == null || FilterNodesPresent(_deblockFilters[level]))
+                {
+                    found.Add(level);
+                }
+            }
+
+            return found;
+        }
+
+        public static bool IsDeblockLevel(string level) => level != null && _deblockFilters.ContainsKey(level.Trim());
+
+        /// <summary>
+        /// The ffmpeg filter node for a deblock level, or null for none - including when the level
+        /// is real but this build has no such filter, so a level that cannot run reports as not
+        /// applied instead of being put into a command that would then fail.
+        /// </summary>
+        public static string DeblockFilter(string level, out string levelUsed, out bool wantsHwFrames)
+        {
+            levelUsed = "off";
+            wantsHwFrames = false;
+
+            if (string.IsNullOrWhiteSpace(level)
+                || !_deblockFilters.TryGetValue(level.Trim(), out string filter)
+                || filter == null
+                || !FilterNodesPresent(filter))
+            {
+                return null;
+            }
+
+            levelUsed = level.Trim().ToLowerInvariant();
+            wantsHwFrames = filter.IndexOf("_vulkan", StringComparison.OrdinalIgnoreCase) >= 0;
+            return filter;
+        }
+
+        /// <summary>
+        /// Does this build carry every filter in a level's chain? A level may be more than one node
+        /// (the OIDN levels are the precedent), so each node is checked; format= is plumbing that
+        /// exists in every build and is skipped rather than probed.
+        /// </summary>
+        private static bool FilterNodesPresent(string filter)
+        {
+            foreach (string node in UpscaleEngine.SplitFilters(filter))
+            {
+                string name = node.Trim();
+                int eq = name.IndexOf('=');
+                if (eq >= 0)
+                {
+                    name = name.Substring(0, eq);
+                }
+
+                if (name.Length == 0 || string.Equals(name, "format", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!UpscaleEngine.HasFilter(name))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Where the ONNX super-resolution weights live when the dashboard says nothing. Beside the
         /// patched binary rather than in the shader directory, because they are not shaders and they
         /// belong to that build: a server without the patched ffmpeg has no use for them.
