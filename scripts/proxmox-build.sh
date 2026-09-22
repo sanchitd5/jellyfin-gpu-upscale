@@ -132,7 +132,14 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         exit 1
     fi
     echo "    all five custom filters present"
-    rm -f "$PATCHED_FFMPEG.prev"
+    # The snapshot STAYS. Deleting it on success left no way back from the case this check cannot
+    # see: a binary that builds, installs and lists all five filters, and then fails against the
+    # driver on the first frame. OptiX, NGX and NVOFA all negotiate at runtime, so linking proves
+    # only that the symbols resolved. AGENTS.md promises rollback copies exist beside the binary;
+    # they have to actually exist for that to be true.
+    if [ -f "$PATCHED_FFMPEG.prev" ]; then
+        echo "    rollback kept at $PATCHED_FFMPEG.prev (mv it back over $PATCHED_FFMPEG to undo)"
+    fi
 fi
 
 # ---- 4. assemblies ---------------------------------------------------------------------------
