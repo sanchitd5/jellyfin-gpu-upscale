@@ -475,3 +475,62 @@ describe a state that no longer exists.
 No C and no C# in this repository has ever been compiled: the Jellyfin reference assemblies and the
 ffmpeg tree both live on the server. The next deployment is the first compile of everything written
 today, and a first-attempt build failure is the expected outcome rather than a surprise.
+
+---
+
+# What another project does: Kuschel-code/JellyfinUpscalerPlugin
+
+Read read-only from source, not from its README. MIT, actively maintained, ~30 releases in 2026,
+built for Jellyfin 10.11.8. Its own docs say 12.0 was checked by static analysis only, so against
+12.1 it is unverified by its author.
+
+Architecturally the opposite of this project. No Harmony, no `EncodingHelper` patch, nothing in the
+live transcode. A thin plugin DLL talks to a FastAPI Docker service; the realtime path is browser
+scripts, or JPEG frames posted over HTTP and painted over the video element.
+
+What that costs it: the browser paths reach web clients only, and the server path captures at
+`RealtimeCaptureWidth`, default 480 px, JPEG q85 in and out, then draws the result over a native
+1920 frame. Above roughly 480 times the scale factor that is a downgrade. Its README calls that path
+"highest live quality" and never states the capture width. Worth knowing as a warning, not as a
+criticism to repeat: much of that README is unusually honest, including calling its WebGL tier "not
+AI" and its Anime4K tier a shader.
+
+## Worth taking, ranked for this server
+
+1. **Client-side tiers.** WebGL Lanczos2 plus CAS, and Anime4K in the browser. Every time this
+   plugin honestly says no - the concurrency cap, a direct-play session, a ratio below the threshold
+   - the viewer gets nothing. A browser-GPU tier costs the 3090 zero and turns each honest negative
+   into a fallback. Highest payoff per watt here.
+2. **Batch pre-upscale as a scheduled task.** Recorded video is static: upscale once overnight with
+   models far too slow for realtime, then direct-play forever. It is also what would make `vf_ort`
+   and `vf_optix` affordable, because the frame budget stops mattering. Their frame coordinator's
+   COMPLETE-versus-FAILED asymmetry, so a half-written last frame is never consumed, is correct and
+   worth copying exactly.
+3. **Serve the client script as a plugin page rather than copying it into the web root.** An
+   embedded resource served at a versioned URL deletes this project's whole cache-buster failure
+   class, the one CLAUDE.md warns about twice and AGENTS.md carries an invariant for.
+4. **A deblock or dejpg pass at 1x before super-resolution.** The same gap the theory review ranked
+   second: nothing here models the source's own compression, and the networks amplify exactly what
+   nothing removes.
+5. **Model catalogue discipline for the neural axis**: sha256 pins, licence and attribution per
+   entry, hash verified before a model is activated, and rejected candidates recorded so nobody
+   re-evaluates them. Today `neural=` effectively means "export the weights yourself", which nobody
+   will.
+6. **Hardware budget bands with substitution-and-reason**, which fits the honest-reporting contract
+   already in place.
+7. **Drift-lock tests** asserting that the server-side registry equals the page's own option list
+   and that the client payload shape matches. That is a static test for this project's recurring
+   failure: something rendered, stored, and never sent.
+8. **Plugin repository manifest install** for the plugin half, leaving the patched ffmpeg build
+   optional as it is today.
+
+Deliberately not taking: face restoration, object masking, frame interpolation, poster upscaling and
+camera-style colour presets. Fun, and irrelevant to reconstruction quality on recorded video.
+
+## What this project has that it does not
+
+Being inside the transcode, so every client benefits rather than only browsers. libplacebo user
+shaders on Vulkan. Five custom ffmpeg filters. Thirteen composable per-session axes, live
+switchable. A capability probe that strips what the binary lacks. Honest negative reporting per
+session. Ground-truth-referenced measurement rather than model reputation: their own model
+evaluation doc says VMAF scoring on real clips is still pending.
