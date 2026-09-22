@@ -221,3 +221,28 @@ On picking shaders: judge on measurement, not names. A heavier FSRCNN variant me
 for twice the cost. Anime4K wins at its native 2.0x and falls below plain scaling at 1.5x. FSR's EASU
 measured worse than plain scaling outright. Only RCAS survived, and it won on cost as well as quality
 because of where it hooks.
+
+## Reuse before reinvention, and what the licence allows
+
+Prefer copying a working implementation over writing one. Where an upstream project already solves a
+problem this one is about to solve, take its code, keep its licence header, record where it came from
+and at which revision, and say in the commit what was changed. A vendored file that names its origin
+is maintainable; a reimplementation of the same idea from memory is not, and it carries the bugs the
+original already fixed.
+
+This project is **GPLv2 or later**, which decides what can be taken:
+
+- **MIT and BSD-3** code can be copied directly. Keep the original copyright and licence text in the
+  file, and attribute it in the docs beside the feature.
+- **Apache-2.0** code is usable only because this is GPLv2-OR-LATER: the combined work ships as
+  GPLv3. Note that in the file, because it changes the licence of what is distributed.
+- **AGPL-3.0** code is not taken. It would place its obligations on the whole server. Ultralytics
+  YOLO is the live example: use a differently licensed detector rather than pulling that in.
+- **Non-commercial or research-only licences** are not taken at any quality. CodeFormer's S-Lab
+  licence is the live example. GFPGAN, being Apache-2.0, is the route that works.
+- **Proprietary SDKs** stay unvendored, fetched by the operator at build time, exactly as OptiX, DLSS
+  and the FSR2 shader compiler already are.
+
+Model weights carry their own licences, separate from the code that runs them. Record the licence and
+the origin beside each model the way the model catalogue does, and verify a hash before a downloaded
+model is used, so what ran can be identified later.
