@@ -64,7 +64,16 @@ namespace Jellyfin.Plugin.GpuUpscale
                 // The name is unique per call because a fixed one is shared state: a config save
                 // and a startup sync running together would write the same temp file and could
                 // rename a half-written interleave, which is the very thing the rename removes.
+                // Writing beside the file and renaming is atomic, so the shim can never read a
+                // half-written config. But it needs permission to CREATE a file in that directory,
+                // which is a different thing from permission to write the config itself: the config
+                // is owned by the service user while /etc is owned by root, so the rename path fails
+                // on the standard install and a plain overwrite succeeds. Preferring the rename and
+                // falling back keeps the atomicity wherever the directory allows it, and keeps the
+                // setting reaching the shim where it does not. The alternative, reporting success
+                // while every dashboard change was silently dropped, is what this cost before.
                 string temp = ConfigPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                bool renamed = false;
                 try
                 {
                     File.WriteAllText(temp, json);
@@ -79,8 +88,9 @@ namespace Jellyfin.Plugin.GpuUpscale
                     }
 
                     File.Move(temp, ConfigPath, true);
+                    renamed = true;
                 }
-                catch (Exception)
+                catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException)
                 {
                     try
                     {
@@ -91,10 +101,15 @@ namespace Jellyfin.Plugin.GpuUpscale
                         // A failed sync must not also leave litter, but it is not worth a second failure.
                     }
 
-                    throw;
+                    // Not atomic, and the shim's own loader has to tolerate a torn read, which it
+                    // does: a config that does not parse makes it stand down rather than guess.
+                    File.WriteAllText(ConfigPath, json);
                 }
 
-                LastResult = "synced (shim standing down: " + patchActive + ")";
+                LastResult = renamed
+                    ? "synced (shim standing down: " + patchActive + ")"
+                    : "synced in place, no permission to write a temp file beside " + ConfigPath
+                        + " (shim standing down: " + patchActive + ")";
             }
             catch (Exception ex)
             {
