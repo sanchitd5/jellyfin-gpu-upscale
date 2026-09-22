@@ -146,14 +146,26 @@ was observed.** Evidence against "legitimately slow":
 the live plugin config - both were standalone `ffmpeg` invocations per this project's standing
 guardrail. The five pre-existing filters were re-verified working immediately after the kill.
 
-**Not yet tried:** whether this is specific to the `NvCVImage`-pointer-based `SetImage` approach
-`vf_vsr.c` uses (the lower-level API path documented in the SDK's own architecture guide) versus the
-width/height-setter approach NVIDIA's Python wrapper uses internally (`set_input_image(w, h)`/
-`set_output_image(w, h)`, which may allocate and bind images differently under the hood). Also not
-tried: running the equivalent Python reproduction through to a real `.run()` call (only `.load()`
-was exercised, and that hung too when dimensions were set the same way this filter sets them) to
-determine whether the hang is `vf_vsr.c`-specific or present in NVIDIA's own reference package too -
-which would mean it's an SDK/driver-level issue, not a bug in this project's code.
+**Ruled out: missing `libnvrtc.so`.** TensorRT's builder commonly needs NVRTC (NVIDIA's runtime PTX
+compiler) to JIT-compile kernels when building an engine from scratch, and it was completely absent
+from `VFXLIBS_DIR` - a real gap, and a plausible cause of a silent internal wait rather than a clean
+error. Fetched `libnvrtc.so.12`/`libnvrtc-builtins.so.12.9` from NVIDIA's public
+`nvidia-cuda-nvrtc-cu12` PyPI wheel (no login) and staged them alongside everything else. Rebuilt,
+retested with a hard 180-second `timeout` this time instead of an open-ended wait: **identical
+hang** - `ps -o time,pcpu` showed `00:00:00`/`0.0%` throughout, confirming this was not the fix.
+
+**Still unexplained, and not chased further this session:** whether this is specific to the
+`NvCVImage`-pointer-based `SetImage` approach `vf_vsr.c` uses (the lower-level API path documented
+in the SDK's own architecture guide) versus the width/height-setter approach NVIDIA's Python
+wrapper uses internally (`set_input_image(w, h)`/`set_output_image(w, h)`, which may allocate and
+bind images differently under the hood). Also not tried: running the equivalent Python reproduction
+through to a real `.run()` call (only `.load()` was exercised, and that hung too when dimensions
+were set the same way this filter sets them) to determine whether the hang is `vf_vsr.c`-specific or
+present in NVIDIA's own reference package too - which would mean it's an SDK/driver-level issue, not
+a bug in this project's code. Diagnosing further needs `gdb`/`strace` attached to the hung process
+to see which internal call it's actually blocked in, which this session did not do (surface-level
+process/thread inspection only - `/proc/<pid>/task/*/wchan`, CPU-time deltas - not an attached
+debugger).
 
 If this turns out to be a genuine (if unreasonably long) one-time compile with no caching available
 in this configuration, **that alone would make `vsr` unusable for real-time Jellyfin transcoding
@@ -191,12 +203,14 @@ installed tag and skips the rebuild when it already matches.
 
 ## Path forward
 
-- **Diagnose the `NvVFX_Load` hang.** This is the actual next step, not NGC/models/GPU-gating (all
-  resolved or ruled out above). Candidates: try the width/height-setter image-binding API instead of
-  raw `NvCVImage` pointers; reproduce (or rule out) the hang in NVIDIA's own `nvidia-vfx` Python
-  package by actually calling `.run()`, not just `.load()`; check for a deadlock between `Load`'s
-  internal thread pool and something in this specific FFmpeg build (Vulkan/shaderc initialization
-  happening on the same process, for instance).
+- **Diagnose the `NvVFX_Load` hang with an attached debugger.** This is the actual next step, not
+  NGC/models/GPU-gating/missing-libraries (all resolved or ruled out above, including `libnvrtc`).
+  Surface-level process inspection (`/proc/<pid>/task/*/wchan`, CPU-time deltas) identified *that*
+  it hangs but not *where*; `gdb -p <pid>` with `thread apply all bt` (or `py-spy`/`strace -p` if gdb
+  symbols are too stripped) on a hung process would show the actual call stack, which nothing in this
+  session's toolkit did. Also worth trying: the width/height-setter image-binding API instead of raw
+  `NvCVImage` pointers; reproducing (or ruling out) the hang in NVIDIA's own `nvidia-vfx` Python
+  package by actually calling `.run()`, not just `.load()`.
 - **Even once `Load` returns, measure whether it caches.** A second invocation running fast (per the
   `.trtcache` pattern NVIDIA's own `GMAT` TensorRT filter uses) is a hard requirement for real-time
   viability, not a nice-to-have - untested and unresolved.
