@@ -170,15 +170,18 @@ Two agents arrived independently at the same first item, from opposite ends of t
 - [ ] `src/patcher/UpscaleEngine.cs:1468` `hwdownload,format=yuv420p` sends every output frame
   Vulkan to system memory and back into NVENC: about 12 MB per frame at 2160p, paid at output size.
   `hwmap=derive_device=cuda` hands NVENC device frames. Touches the encoder args too. `[M]`
-- [ ] `src/patcher/UpscaleEngine.cs:1408-1441` each CPU-side filter carries its own
+- [x] `src/patcher/UpscaleEngine.cs:1408-1441` each CPU-side filter carries its own
   `format=gbrpf32le,X,format=yuv420p`, so denoise plus neural round-trips through 4:2:0 8-bit
   BETWEEN two neural passes. One convert before the group, one after. No measurement needed.
-- [ ] `ffmpeg/gu_inputs.h:874` `gu_inputs_frame` is entirely single-threaded, and neither
+- [x] `ffmpeg/gu_inputs.h:874` `gu_inputs_frame` is entirely single-threaded, and neither
   `vf_fsr2` nor `vf_dlss` sets `AVFILTER_FLAG_SLICE_THREADS`, while `vf_optix.c` already
   slice-threads the identical passes. Biggest item on the game path.
-- [ ] `ffmpeg/gu_inputs.h:243` phase correlation re-FFTs the previous frame every frame, though
-  that spectrum was computed last frame. Keep it and swap pointers: three 2D FFTs per frame become
-  two, bit-exact.
+- [~] `ffmpeg/gu_inputs.h:243` phase correlation re-FFTs the previous frame every frame. REFUSED as
+  specified: the cached spectrum and the recomputed one are not bit-identical, because the
+  windowing multiplies in a different order (`cur*wgt` against `(cur*win_y)*win_x`), and `A` is
+  overwritten in place by the cross-power spectrum before the inverse transform. Still worth doing,
+  but it changes output, so it needs the cross spectrum written elsewhere plus an A/B swap and a
+  measurement.
 - [ ] `src/patcher/UpscalePatches.cs:344,360` hwaccel and the hw decoder are suppressed for every
   acted-on session, but system-memory frames are only needed when a CPU-side node exists. The
   common case (sr plus deblur) could keep NVDEC. `[M]`
@@ -193,7 +196,7 @@ Two agents arrived independently at the same first item, from opposite ends of t
 - [ ] 10-bit output (`p010le` plus `hevc_nvenc main10`). The pipeline is 8-bit in and out, so the
   deband pass is requantised to 8 bit on exit and most of its gain is thrown away. Effectively free
   on Ampere. Gate on what `SupportedCodecs` already knows. `[M]`
-- [ ] `ffmpeg/vf_fsr2.c:624` `frameTimeDelta` is hard-coded to 1000/24, so 60 fps material is told
+- [x] `ffmpeg/vf_fsr2.c:624` `frameTimeDelta` is hard-coded to 1000/24, so 60 fps material is told
   it is 24 fps and FSR2 scales lock lifetime and accumulation from that. Three lines.
 - [ ] `ffmpeg/vf_oidn.c:280` default quality is BALANCED though OIDN.md measured balanced as
   indistinguishable from high; high is the only cost ever measured. `[M]` balanced fps was never
@@ -201,7 +204,7 @@ Two agents arrived independently at the same first item, from opposite ends of t
 - [ ] `ffmpeg/gu_inputs.h:458` `gu_grid_sample` is nearest, so one 4x4 NVOFA cell is replicated to
   16 pixels and the motion field is blocky at every motion edge. Bilinear is a few lines, no new
   data. `[M]`
-- [ ] `ffmpeg/vf_optix.c:410` `mode=hdr` never sets `params.hdrIntensity`, which the OptiX HDR
+- [x] `ffmpeg/vf_optix.c:410` `mode=hdr` never sets `params.hdrIntensity`, which the OptiX HDR
   model expects from `optixDenoiserComputeIntensity`. HDR output is off-scale without it.
 - [ ] `src/patcher/ShaderLibrary.cs:967` the `ort` level is not matched to the session ratio:
   `realesr-anime-x4` at a 2x target makes 4x pixels that libplacebo then halves. These levels are
@@ -279,3 +282,44 @@ Already tested and deliberately not re-proposed: OIDN on the GPU side of hwuploa
 `PERF_LEVEL_SLOW`, dropping the NVOFA luma prefilter, fp32 ORT models, the TensorRT EP, EASU,
 NVScaler as default, Anime4K below 2.0x, tmix, hqdn3d, FSR3/FSR4, and the Anime4K, FSRCNNX weight
 and CAS/RCAS questions.
+
+---
+
+# Applied so far, and what is still open
+
+## Applied (commit df8b745), none of it compiled
+
+Filter chain: one float conversion around the whole CPU-side group instead of one per node (the
+single-node string is byte-identical); libplacebo `shader_cache` wired to a per-combination prefix,
+after confirming the option exists on the server's own binary; output width aligned to 8.
+
+Filters: `AVFILTER_FLAG_SLICE_THREADS` plus threaded pack and unpack passes in `vf_fsr2` and
+`vf_dlss`; FSR2's frame time from the link rate or the PTS delta rather than a hard-coded 24 fps;
+ONNX input and output names hoisted out of the per-frame path; a dead per-frame memcpy and an
+unused buffer removed; OptiX HDR intensity computed and passed, matching the SDK header read on the
+build server; OIDN's CPU fallback no longer pins a thread per core.
+
+Reporting: `NeuralApplied` and a new `NeuralRequested` serialised, so a network that was asked for
+and did not run no longer reads like one nobody chose; source and output sizes sent flat, with the
+Upscaled row printing them instead of a kernel name that read as a size claim.
+
+## Refused rather than guessed
+
+- the phase-correlation FFT cache, for the reason recorded above
+- `libavutil/float2half.h`: no ffmpeg tree here to confirm the API, and the names have moved between
+  versions, so a guess costs a build round trip on the server
+- the OptiX work was refused once for the same reason and only landed after the header was read on
+  the container
+
+## Still open, needing a measurement or a decision
+
+The encoder rate control (the item two reviewers independently ranked first), the GPU-resident
+NVENC handoff, 10-bit output, the cost-budget admission, depth every Nth frame, bilinear flow
+sampling, the panel restructure, the ladder rework, and the apt hook.
+
+## Verification state
+
+`bash -n` on the shell scripts and `py_compile` on the shim are the only checks that have run. No
+C# and no C in this repository has been compiled: the Jellyfin reference assemblies and the ffmpeg
+tree both live on the server. The next ffmpeg build is the first compile of every C change here,
+and a build failure on the first attempt is the expected outcome rather than a surprise.
