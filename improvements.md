@@ -206,10 +206,10 @@ Two agents arrived independently at the same first item, from opposite ends of t
   data. `[M]`
 - [x] `ffmpeg/vf_optix.c:410` `mode=hdr` never sets `params.hdrIntensity`, which the OptiX HDR
   model expects from `optixDenoiserComputeIntensity`. HDR output is off-scale without it.
-- [ ] `src/patcher/ShaderLibrary.cs:967` the `ort` level is not matched to the session ratio:
+- [x] `src/patcher/ShaderLibrary.cs:967` the `ort` level is not matched to the session ratio:
   `realesr-anime-x4` at a 2x target makes 4x pixels that libplacebo then halves. These levels are
   sub-realtime, so the wasted work is the entire cost.
-- [ ] `shim/jellyfin-ffmpeg-upscale:59,323,441` the fallback path contradicts the measurements:
+- [x] `shim/jellyfin-ffmpeg-upscale:59,323,441` the fallback path contradicts the measurements:
   the 16-weight FSRCNNX (measured no better at double cost), no RCAS, no deband, and it runs the
   fixed-2x network down to 1.15x, the band the plugin bypasses as worthless.
 
@@ -419,3 +419,77 @@ Ordered by what is at stake. Nothing below is applied.
 `py_compile` on the shim and `bash -n` on the shell scripts are the only checks that have run. No C
 and no C# in this repository has been compiled. The next ffmpeg build is the first compile of every
 C change, and the plugin build is the first compile of every C# change since this work began.
+
+---
+
+# Shipped since the pending list was written
+
+Commits a185003 (defects), 11378c4 (settings, panel, playback info).
+
+## Defects, all applied
+
+Client, four of one family: `anyEnhancement` tested three axes of thirteen so most Custom picks
+never forced a transcode; the render loop persisted `effective()` over stored prefs; a failed probe
+dropped every axis for the page's life; a partial probe rewrote prefs to off on disk. `state.prefs`
+is viewer overrides only now, `state.shown` is render-only.
+
+Patch layer: `_harmony` published before the loop so a mid-loop throw can roll back; one memoised
+verdict per session, so a burn-in session no longer gets Vulkan device args with Jellyfin's own
+filter graph; `"copy"` compared exactly rather than by substring.
+
+Engine: eviction no longer deletes the live record for a session recorded twice; an unrecognised
+value falls back to the computed default, so a typo cannot defeat an explicit Off; the encoder probe
+drains both pipes, kills on timeout and caches failure.
+
+Shim: `flock` slot liveness replacing the /proc-plus-24h guess; no more slot or `.err` leaks; target
+scan reads every scale node; the fallback chain now matches the measurements (8-weight FSRCNNX, RCAS
+composed in, and it stops firing the fixed-2x network across the 1.15 to 1.60 band).
+
+Neural: a level is matched to the ratio, so `realesr-anime-x4` at a 2x target no longer makes four
+times the pixels for libplacebo to halve. The substitution is reported, not silent.
+
+## Everything is controllable
+
+All 36 configuration properties have a control, a load line and a save line, verified id by id.
+Five values that lived only in code became settings: the deband threshold and grain, and the three
+directories for the neural weights, the DLSS runtime and the depth model. `ShaderDirectory` and
+`ShaderCacheDirectory` had existed on both mirrors with no control at all. The probe reads the
+configured paths too, so the panel cannot offer levels whose weights are not where the filter looks.
+
+## The panel, and saying what ran
+
+Slider plus three rows, everything else behind one disclosure that counts what is changed inside it,
+the game cluster collapsed to one row that opens its own three inputs. Driven by a tier on each
+CONTROLS entry, so a new axis is still one entry plus one line.
+
+Jellyfin's own Playback Info dialog now reports the enhancement: source and output size, each axis as
+requested against ran, the SR bypass reason, the kernel, the encoder and why. It reads the same
+`liveLines()` the panel does, so the two cannot drift, and it finds the dialog structurally, so it
+annotates nothing rather than the wrong dialog.
+
+Accessibility: chips are a radiogroup with `aria-checked`, the live block is `aria-live="polite"`,
+the panel traps Tab and restores focus on close.
+
+Honesty: an apply that does not land says so instead of looking like one that did, and a failed probe
+is worded as a failed probe rather than as "this server only understands the target axis".
+
+`ShimSync` reaches the dashboard, which had been printing `undefined` since it was written.
+
+## What is still pending
+
+Unchanged from the list above, minus what this section records. The measurement-gated items are all
+still open, led by encoder rate control. The decisions still open are the content axis, the server
+half of the ladder, the plan-preview endpoint, the cost tables moving server-side, and the apt hook.
+
+Two items were reclassified out of "cheap" after looking harder: recording throughput in the session
+record, and having the shim report what it actually stripped. Both need the same plumbing from the
+shim back into the plugin, and that plumbing is what would make the measurement items settleable by
+looking rather than by hand-running a bench. Worth doing as one piece of work rather than bundled
+into a cleanup.
+
+## Verification state
+
+`node --check` on the client, `py_compile` on the shim, `bash -n` on the shell scripts. That is all.
+No C and no C# in this repository has ever been compiled: the Jellyfin reference assemblies and the
+ffmpeg tree both live on the server. The next deployment is the first compile of everything written
+today, and a first-attempt build failure is the expected outcome rather than a surprise.
