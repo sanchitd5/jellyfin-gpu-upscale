@@ -416,6 +416,12 @@ if [[ "$WITH_VSR" == "1" ]]; then
     # subdirectory is needed - confirmed directly: CreateEffect finds libnvVFXVideoSuperRes.so and
     # libnvidia-ngx-vsr.so.1.8.2 from plain LD_LIBRARY_PATH/rpath resolution alone, sitting flat
     # beside libVideoFX.so, same as every other shared library here (VSR.md).
+    # Wiped first, not merged into: a stale libVideoFX.so left over as a *.so.1.3.0 symlink from an
+    # older VFXSDK_DIR-based build makes `cp -a` write through the symlink into the old versioned
+    # file instead of replacing it, so the plain-named file stays a symlink and the patchelf loop
+    # below (which deliberately skips symlinks) silently patches the wrong file. Hit exactly this
+    # building this filter (VSR.md).
+    rm -rf "$PREFIX/vfx/lib"
     mkdir -p "$PREFIX/vfx/lib"
     cp -a "$VFXLIBS_DIR"/. "$PREFIX/vfx/lib/"
     # ffmpeg's own rpath (set above) is not transitive: it resolves ffmpeg's direct NEEDED entries
