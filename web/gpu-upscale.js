@@ -1628,6 +1628,10 @@
         '.gpuup-active.is-off{color:#e0a44a;}',
         '.gpuup-active.is-unavailable{color:#e46a6a;}',
         '.gpuup-active.is-waiting{color:#9aa0a6;}',
+        // An axis another pick has made inert. Dimmed, not hidden, and its reason is printed under
+        // it: greying alone leaves the viewer guessing which other control did this.
+        '.gpuup-inert .gpuup-label,.gpuup-inert .gpuup-chips{opacity:.45;}',
+        '.gpuup-inert .gpuup-chip,.gpuup-inert .gpuup-sel{cursor:not-allowed;}',
         '.gpuup-grip{flex:0 0 auto;background:none;border:0;color:inherit;font-size:1em;opacity:.55;',
         'cursor:move;padding:0 .15em;font-family:inherit;line-height:1;}',
         '.gpuup-grip:focus{outline:2px solid #00a4dc;opacity:1;}',
@@ -1665,6 +1669,83 @@
         if (cls) { n.className = cls; }
         if (text != null) { n.textContent = text; }
         return n;
+    }
+
+    /*
+     * AXES THAT CANNOT BOTH BE ON, AS DATA.
+     *
+     * The server already resolves every one of these: it forces the super-resolution level off when
+     * a game upscaler produced the output size, drops the separate unblur pass for a shader that
+     * sharpens inside its own, and has nothing for a refinement pass to correct when nothing was
+     * enlarged. It resolves them silently, though, so the panel went on offering a control whose
+     * value the server was about to discard. That is the dead-control failure wearing a different
+     * hat: the pick is real, it is sent, and it changes nothing.
+     *
+     * Each rule names the axis it disables, when, and why in the words a viewer needs. `when` reads
+     * only the current selection and the source, so nothing here needs the server to answer first.
+     * A new conflict is one entry.
+     */
+    function gameOwnsOutputSize(level) {
+        // dlaa is 1:1 by design, so it is the one game level that does NOT take over the scale.
+        return level === 'fsr2' || level === 'dlss';
+    }
+
+    function nothingIsEnlarged(p) {
+        var t = eligibleTargets();
+        return isOff(p.upscale) || !t || !t.length;
+    }
+
+    var CONFLICTS = [
+        {
+            key: 'sr', when: function (p) { return gameOwnsOutputSize(p.game); },
+            why: function (p) {
+                return 'The ' + p.game + ' upscaler produces the output size itself, so the server'
+                    + ' turns super-resolution off rather than enlarge twice.';
+            }
+        },
+        {
+            key: 'refine', when: function (p) { return gameOwnsOutputSize(p.game); },
+            why: function (p) {
+                return 'The ' + p.game + ' upscaler owns the scale here, so the post-scale'
+                    + ' refinement is not applied.';
+            }
+        },
+        {
+            key: 'deblur', when: function (p) { return p.sr === 'nvscaler'; },
+            why: function () {
+                return 'NVScaler sharpens inside its own pass, so the server drops the separate'
+                    + ' unblur rather than stack two sharpeners into ringing.';
+            }
+        },
+        {
+            key: 'sr', when: nothingIsEnlarged,
+            why: function () {
+                return 'Nothing is being enlarged, so a super-resolution network has nothing to'
+                    + ' reconstruct.';
+            }
+        },
+        {
+            key: 'refine', when: nothingIsEnlarged,
+            why: function () {
+                return 'Refine corrects an enlargement, and there is none here.';
+            }
+        }
+    ];
+
+    /* The reason this axis is inert right now, or null. First rule that fires wins. */
+    function axisConflict(key) {
+        try {
+            var p = shownPrefs();
+            for (var i = 0; i < CONFLICTS.length; i++) {
+                if (CONFLICTS[i].key === key && CONFLICTS[i].when(p)) {
+                    return CONFLICTS[i].why(p);
+                }
+            }
+        } catch (err) {
+            // A panel that cannot work out a conflict shows the control, which is the old behaviour.
+        }
+
+        return null;
     }
 
     /* An option's measured cost, when its axis carries one, as plainly as it can be put. */
@@ -1760,7 +1841,13 @@
         var chipIds = grade.length >= 2 ? grade : (c.chips && c.options.length <= 4 ? ids : []);
         var rest = c.options.filter(function (o) { return chipIds.indexOf(o.id) < 0; });
 
-        var row = el('div', 'gpuup-row');
+        // Inert because of another axis, not because of this one. Shown rather than hidden: a
+        // control that vanishes when an unrelated pick changes is harder to understand than one
+        // that stays put and says why it cannot act. The stored preference is untouched, so
+        // undoing the conflicting pick brings this axis straight back.
+        var conflict = axisConflict(c.key);
+
+        var row = el('div', 'gpuup-row' + (conflict ? ' gpuup-inert' : ''));
         row.appendChild(el('div', 'gpuup-label', c.label));
         var box = el('div', 'gpuup-chips');
         row.appendChild(box);
@@ -1780,7 +1867,13 @@
             b.type = 'button';
             b.setAttribute('role', 'radio');
             b.setAttribute('aria-checked', id === cur ? 'true' : 'false');
-            b.onclick = function () { onPick(id); };
+            if (conflict) {
+                b.disabled = true;
+                b.setAttribute('aria-disabled', 'true');
+                b.title = o.name + ' - ' + conflict;
+            } else {
+                b.onclick = function () { onPick(id); };
+            }
             box.appendChild(b);
         });
 
@@ -1800,10 +1893,22 @@
                 if (o.id === cur) { opt.selected = true; }
                 sel.appendChild(opt);
             });
-            sel.onchange = function () {
-                if (sel.value) { onPick(sel.value); }
-            };
+            if (conflict) {
+                sel.disabled = true;
+                sel.setAttribute('aria-disabled', 'true');
+                sel.title = conflict;
+            } else {
+                sel.onchange = function () {
+                    if (sel.value) { onPick(sel.value); }
+                };
+            }
             box.appendChild(sel);
+        }
+
+        // The reason comes first: a greyed row with no explanation is worse than no greying, since
+        // the viewer is left to guess which other pick did it.
+        if (conflict) {
+            row.appendChild(el('div', 'gpuup-note', conflict));
         }
 
         var note = controlNote(c.key);
