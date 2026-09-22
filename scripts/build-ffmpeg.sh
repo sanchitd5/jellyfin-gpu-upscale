@@ -83,9 +83,9 @@ NGX_LIB="${NGX_LIB:-${NGX_SDK}/lib/Linux_x86_64}"
 NVOF_SDK="${NVOF_SDK:-/root/gameupscale/NVIDIAOpticalFlowSDK-nvof_2_0_bsd}"
 OIDN_VER="${OIDN_VER:-2.5.1}"
 LIBPLACEBO_TAG="${LIBPLACEBO_TAG:-v7.351.0}"
-# Pinned, like every other source build here. 2024.4 knows GL_EXT_expect_assume; the distro 2023.8
+# Pinned, like every other source build here. 2026.4 knows GL_EXT_expect_assume; the distro 2023.8
 # does not, which is the whole reason this is built rather than installed.
-SHADERC_TAG="${SHADERC_TAG:-v2024.4}"
+SHADERC_TAG="${SHADERC_TAG:-v2026.4}"
 KEEP_BUILD="${KEEP_BUILD:-0}"
 
 # nv-codec-headers must match the INSTALLED DRIVER, not the newest tag. A newer tag compiles and then
