@@ -64,6 +64,10 @@ WITH_DLSS="${WITH_DLSS:-0}"
 # Defaults are where these SDKs were unpacked on the build box. Nothing fetches them; a wrong path
 # fails in preflight naming the variable rather than 20 minutes into a compile.
 ORT_SDK="${ORT_SDK:-/root/gameupscale}"
+# The ONNX Runtime headers and its shared libraries are unpacked to different places: the headers
+# sit with the other SDKs, the runtime is staged where the built binary rpaths to it. Defaulting
+# this to $ORT_SDK/lib is what made configure report "libonnxruntime not found".
+ORT_LIB="${ORT_LIB:-${PREFIX}/ort/lib}"
 FSR2_SDK="${FSR2_SDK:-/root/gameupscale/fsr2/src/ffx-fsr2-api}"
 # The archive lands wherever FSR2.md's out-of-tree build put it, which is not beside the sources.
 FSR2_LIB="${FSR2_LIB:-/root/gameupscale/lib}"
@@ -109,8 +113,11 @@ if [[ "$WITH_ORT" == "1" ]]; then
         || die "WITH_ORT=1 needs WITH_OPTIX=1: patch 0003 applies on top of 0002"
     [[ -f "$ORT_SDK/include/onnxruntime_c_api.h" ]] \
         || die "WITH_ORT=1: no onnxruntime_c_api.h under ORT_SDK=$ORT_SDK/include (see NEURAL.md)"
-    [[ -d "$ORT_SDK/lib" ]] \
-        || die "WITH_ORT=1: no ONNX Runtime libraries at ORT_SDK=$ORT_SDK/lib (see NEURAL.md)"
+    # The library, not merely a directory: the headers and the runtime are unpacked separately,
+    # and a lib/ holding something else entirely still passed this check while configure went on
+    # to fail with "libonnxruntime not found" twenty lines later.
+    [[ -f "$ORT_LIB/libonnxruntime.so" ]] \
+        || die "WITH_ORT=1: no libonnxruntime.so under ORT_LIB=$ORT_LIB (see NEURAL.md)"
 fi
 
 # vf_fsr2 and vf_dlss both pull in gu_inputs.h, which includes the Optical Flow headers.
@@ -225,7 +232,7 @@ if [[ "$WITH_ORT" == "1" ]]; then
     # rpath, not -L, decides what the installed binary loads: the runtime tree is staged under
     # PREFIX and the build copy of it may not survive this script.
     export CFLAGS="-I${ORT_SDK}/include ${CFLAGS:-}"
-    export LDFLAGS="-L${ORT_SDK}/lib -Wl,-rpath,${PREFIX}/ort/lib ${LDFLAGS:-}"
+    export LDFLAGS="-L${ORT_LIB} -Wl,-rpath,${PREFIX}/ort/lib ${LDFLAGS:-}"
     ORT_FLAGS=(--enable-libonnxruntime)
 fi
 
