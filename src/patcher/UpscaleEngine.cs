@@ -1123,12 +1123,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // and dies with "shaderc compile status 'error'", killing the whole transcode.
                 //
                 // Dropping the denoise and saying so is the honest outcome: the viewer loses one
-                // pass instead of the stream. The real fix is building the patched binary against
-                // a current shaderc, which is a build change and is recorded as one; until then
-                // this must never silently persist, so it is reported like any other refusal.
+                // pass instead of the stream.
+                //
+                // AND IT IS NOW CONDITIONAL ON THE BINARY, NOT ASSUMED. build-ffmpeg.sh builds
+                // shaderc from source, so a current binary runs the filter and this guard must not
+                // fire: a permanent block would keep punishing every session for a defect that was
+                // fixed. The probe RUNS one frame through nlmeans_vulkan on the patched binary
+                // rather than asking whether the filter is listed, because listing it is exactly
+                // what the broken build did. An older binary still degrades to one lost pass.
                 bool needsPatchedBinary = plan.NeuralApplied || plan.GameApplied
                     || (plan.DenoiseApplied && ShaderLibrary.IsPatchedOnlyFilter(plan.DenoiseFilter));
-                if (plan.DenoiseApplied && plan.DenoiseWantsHwFrames && needsPatchedBinary)
+                if (plan.DenoiseApplied && plan.DenoiseWantsHwFrames && needsPatchedBinary
+                    && !VulkanDenoiseRunsOnPatchedBinary())
                 {
                     plan.DenoiseDroppedForPatchedBinary = plan.DenoiseLevel;
                     plan.DenoiseFilter = null;
@@ -1506,6 +1512,92 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             var filters = AvailableFilters();
             return filters != null && filters.Contains(name.Trim());
+        }
+
+        private static readonly object _vulkanDenoiseLock = new object();
+        private static bool _vulkanDenoiseProbed;
+        private static bool _vulkanDenoiseWorks;
+
+        /// <summary>
+        /// Can the PATCHED binary actually run a Vulkan denoise, as opposed to merely listing it?
+        ///
+        /// Presence and capability are different questions here, and the difference cost a dead
+        /// stream: nlmeans_vulkan compiles its shader at run time, and a build whose shaderc
+        /// predates GL_EXT_expect_assume lists the filter, accepts the chain, and then fails the
+        /// whole transcode. So this RUNS one frame through it rather than asking whether it exists.
+        ///
+        /// Asked once per process and remembered, like the encoder and filter probes, because this
+        /// sits on the transcode path. Unknown counts as NOT WORKING, the same rule HasFilter uses
+        /// and for the same reason: the cost of being wrong in that direction is one dropped pass,
+        /// and the cost of being wrong in the other is the viewer's stream.
+        /// </summary>
+        public static bool VulkanDenoiseRunsOnPatchedBinary()
+        {
+            if (_vulkanDenoiseProbed)
+            {
+                return _vulkanDenoiseWorks;
+            }
+
+            lock (_vulkanDenoiseLock)
+            {
+                if (_vulkanDenoiseProbed)
+                {
+                    return _vulkanDenoiseWorks;
+                }
+
+                _vulkanDenoiseProbed = true;
+                _vulkanDenoiseWorks = false;
+
+                try
+                {
+                    string exe = ShaderLibrary.PatchedFfmpegPath();
+                    if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
+                    {
+                        return _vulkanDenoiseWorks;
+                    }
+
+                    // One 64x64 frame of synthetic input: enough to force the shader to compile,
+                    // small enough that a server under load does not notice it happening.
+                    const string args = "-hide_banner -loglevel error -init_hw_device vulkan=vk:0 "
+                        + "-filter_hw_device vk -f lavfi -i testsrc=size=64x64:rate=1 -frames:v 1 "
+                        + "-vf \"format=yuv420p,hwupload,nlmeans_vulkan,hwdownload,format=yuv420p\" -f null -";
+
+                    var psi = new System.Diagnostics.ProcessStartInfo(exe, args)
+                    {
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                    };
+
+                    using (var proc = System.Diagnostics.Process.Start(psi))
+                    {
+                        var outRead = proc.StandardOutput.ReadToEndAsync();
+                        var errRead = proc.StandardError.ReadToEndAsync();
+                        if (!proc.WaitForExit(20000))
+                        {
+                            try
+                            {
+                                proc.Kill();
+                            }
+                            catch (Exception)
+                            {
+                                // Already gone.
+                            }
+
+                            return _vulkanDenoiseWorks;
+                        }
+
+                        System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] { outRead, errRead }, 5000);
+                        _vulkanDenoiseWorks = proc.ExitCode == 0;
+                    }
+                }
+                catch (Exception)
+                {
+                    _vulkanDenoiseWorks = false;
+                }
+
+                return _vulkanDenoiseWorks;
+            }
         }
 
         /// <summary>The filter names this ffmpeg build has, or null when it could not be asked.</summary>

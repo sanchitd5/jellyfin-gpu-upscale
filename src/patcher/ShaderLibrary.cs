@@ -1271,6 +1271,30 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// Kept beside the filter tables rather than in the engine, so adding a custom filter means
         /// adding its name in the one place that already knows what this project built.
         /// </summary>
+        /// <summary>
+        /// The patched ffmpeg the shim routes to for the custom filters, or null when it is not
+        /// installed. Derived from the directory the runtime assets already live in, so the path
+        /// is stated once rather than spelled out at each use.
+        /// </summary>
+        public static string PatchedFfmpegPath()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(NeuralModelDirectory);
+                if (string.IsNullOrEmpty(dir))
+                {
+                    return null;
+                }
+
+                string exe = Path.Combine(dir, "ffmpeg");
+                return File.Exists(exe) ? exe : null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         public static bool IsPatchedOnlyFilter(string filter)
         {
             if (string.IsNullOrWhiteSpace(filter))
