@@ -145,3 +145,137 @@ stale composition forever; shader downloads are unpinned and verified only by a 
 truncated or substituted shader installs; several `config_input` paths are not re-entrant; and the
 session ownership check added in round one is unverified against a live Jellyfin and fails open on
 both sides at once.
+
+---
+
+# Round three: improvements (Opus, four agents)
+
+Not defects. What would make the pipeline better on one RTX 3090 shared with its encoder.
+`[M]` means settle it with a measurement, not an argument. Nothing here is applied.
+
+Two agents arrived independently at the same first item, from opposite ends of the chain.
+
+## The one to do first
+
+- [ ] `src/patcher/UpscalePatches.cs:387` **The encoder undoes the work.** The plugin sets the
+  encoder name and nothing else, so Jellyfin computes `-b:v`/`-maxrate` from the SOURCE resolution
+  and clamps to the source bitrate. The chain then ships four times the pixels at 540p bitrate and
+  the quantiser removes exactly the detail the shaders added. Nothing in the repo touches `cq`,
+  `preset` or `aq`. Every measured shader gain in README.md may be dying here, unmeasured. `[M]`
+  same clip 540p to 1080p, stock rate control against `-rc vbr -cq N` with a pixel-scaled floor,
+  served segment scored against ground truth.
+
+## Throughput
+
+- [ ] `src/patcher/UpscaleEngine.cs:1468` `hwdownload,format=yuv420p` sends every output frame
+  Vulkan to system memory and back into NVENC: about 12 MB per frame at 2160p, paid at output size.
+  `hwmap=derive_device=cuda` hands NVENC device frames. Touches the encoder args too. `[M]`
+- [ ] `src/patcher/UpscaleEngine.cs:1408-1441` each CPU-side filter carries its own
+  `format=gbrpf32le,X,format=yuv420p`, so denoise plus neural round-trips through 4:2:0 8-bit
+  BETWEEN two neural passes. One convert before the group, one after. No measurement needed.
+- [ ] `ffmpeg/gu_inputs.h:874` `gu_inputs_frame` is entirely single-threaded, and neither
+  `vf_fsr2` nor `vf_dlss` sets `AVFILTER_FLAG_SLICE_THREADS`, while `vf_optix.c` already
+  slice-threads the identical passes. Biggest item on the game path.
+- [ ] `ffmpeg/gu_inputs.h:243` phase correlation re-FFTs the previous frame every frame, though
+  that spectrum was computed last frame. Keep it and swap pointers: three 2D FFTs per frame become
+  two, bit-exact.
+- [ ] `src/patcher/UpscalePatches.cs:344,360` hwaccel and the hw decoder are suppressed for every
+  acted-on session, but system-memory frames are only needed when a CPU-side node exists. The
+  common case (sr plus deblur) could keep NVDEC. `[M]`
+- [ ] `ffmpeg/vf_optix.c:432` pageable host memory with blocking copies; `cuMemAllocHost` plus
+  async copies on the existing stream roughly doubles PCIe rate. `[M]`
+- [ ] `ffmpeg/gu_inputs.h:948` run the depth model every Nth frame and warp between, reusing the
+  flow-warp EMA that already exists. The ViT at 518x518 is probably the dominant cost of the whole
+  game path. `[M]` cost split first, then ghosting at N=2,3,4.
+
+## Quality
+
+- [ ] 10-bit output (`p010le` plus `hevc_nvenc main10`). The pipeline is 8-bit in and out, so the
+  deband pass is requantised to 8 bit on exit and most of its gain is thrown away. Effectively free
+  on Ampere. Gate on what `SupportedCodecs` already knows. `[M]`
+- [ ] `ffmpeg/vf_fsr2.c:624` `frameTimeDelta` is hard-coded to 1000/24, so 60 fps material is told
+  it is 24 fps and FSR2 scales lock lifetime and accumulation from that. Three lines.
+- [ ] `ffmpeg/vf_oidn.c:280` default quality is BALANCED though OIDN.md measured balanced as
+  indistinguishable from high; high is the only cost ever measured. `[M]` balanced fps was never
+  taken.
+- [ ] `ffmpeg/gu_inputs.h:458` `gu_grid_sample` is nearest, so one 4x4 NVOFA cell is replicated to
+  16 pixels and the motion field is blocky at every motion edge. Bilinear is a few lines, no new
+  data. `[M]`
+- [ ] `ffmpeg/vf_optix.c:410` `mode=hdr` never sets `params.hdrIntensity`, which the OptiX HDR
+  model expects from `optixDenoiserComputeIntensity`. HDR output is off-scale without it.
+- [ ] `src/patcher/ShaderLibrary.cs:967` the `ort` level is not matched to the session ratio:
+  `realesr-anime-x4` at a 2x target makes 4x pixels that libplacebo then halves. These levels are
+  sub-realtime, so the wasted work is the entire cost.
+- [ ] `shim/jellyfin-ffmpeg-upscale:59,323,441` the fallback path contradicts the measurements:
+  the 16-weight FSRCNNX (measured no better at double cost), no RCAS, no deband, and it runs the
+  fixed-2x network down to 1.15x, the band the plugin bypasses as worthless.
+
+## Honesty, and being able to judge a change later
+
+- [ ] **The record describes intent, and the shim then changes what ran.** `Describe` writes the
+  record at command-build time; the shim afterwards picks the binary and strips nodes the patched
+  build lacks. So `denoise=oidn` reports oidn when oidn never ran. Fix: shim writes a per-session
+  JSON (binary chosen, nodes stripped, exit status) that the plugin folds in before the panel reads
+  it. This also covers a session whose ffmpeg failed and was retried unenhanced but still reports
+  applied.
+- [ ] `NeuralApplied` exists on both `SessionRecord` and `Plan` and is never serialised, and the
+  neural row carries no `applied` key, so a neural level that did not run reads as on. One key.
+- [ ] `OutputWidth`/`OutputHeight` exist but only nested inside `Record`, and the "Upscaled" row
+  prints `Upscaler`, a kernel name that reads as a size claim. Emit them flat and print
+  "1920x1080 from 960x540": the only end-to-end proof of the size axis.
+- [ ] Nothing records throughput. Append one JSONL line per session at transcode end: source and
+  output size, the built chain verbatim, encoder and rate-control args, encode fps from ffmpeg
+  progress, exit status, live-slot count at admission. Today `_history` is 50 in-memory records of
+  intent, lost on restart, which is why every performance claim here gets re-argued instead of
+  looked up. This is what makes the items above settleable.
+
+## Shape of the thing
+
+- [ ] **The ladder wart, properly.** `effective()` returns a constant `sr: LADDER_SR` and the panel
+  writes it over `state.prefs`. Fix: the stage carries `sr: 'ladder'`, the server resolves the
+  family per ratio (ratio-agnostic below `SrMinScaleFactor`, fsrcnnx above), and `state.prefs`
+  holds viewer overrides only, never written from `effective()`. That also fills the 1.15 to 1.60
+  band the ladder has no rung for. `[M]` whether ravu-zoom beats plain plus RCAS at 1.5x.
+- [ ] **Threshold arithmetic lives in three places** (`Decide`, `WouldEnhanceSource`, and the
+  client's `eligibleTargets`/`srWouldRun`), so the probe ships raw numbers and the client re-derives
+  the rules. A `GET /GpuUpscale/Plan?w=&h=` answering from the same `Decide` code would leave the
+  client deciding nothing.
+- [ ] **13 axes is not quite the problem: 12 of them are cost knobs and none is a statement about
+  the content.** Add one viewer-facing axis (photographic / animation / grainy) that the server maps
+  to a recipe, seeded from the library or genre the server already knows. Everything existing stays
+  under Advanced. Panel then describes in one sentence: say how much GPU to spend and what the
+  source looks like, the server picks the filters. `[M]`
+- [ ] Collapse the panel to the Quality slider plus four rows, everything else behind one closed
+  disclosure; the game group's four rows become one that opens its three inputs.
+- [ ] Replace the `MaxConcurrent` headcount with a cost budget. `HasCapacity()` counts processes
+  carrying libplacebo, so a dlss session and a sharpen-only session each consume one of two, and
+  foreign libplacebo transcodes count too. The plan knows its own cost once the cost table moves
+  server-side; refuse or DOWNGRADE rather than dropping to a stock transcode. `[M]`
+- [ ] The client hard-codes `FPS`, `DENOISE_COST`, `NEURAL_COST`, `GAME_COST` and the ladder recipe:
+  measurements of the server living in the browser, stale on any GPU change and uncorrectable
+  without republishing the script. Serve them in the probe, as the display names already are.
+- [ ] `stageCost` costs filters only, though NVENC shares the same GPU, so the ladder under-costs
+  high targets exactly where the cap bites. `[M]`
+- [ ] Accessibility: chips are bare buttons with no `role="radiogroup"` and no `aria-checked`, the
+  live block has no `aria-live`, and the `role="dialog"` panel has no focus trap. A screen reader
+  hears eleven unlabelled buttons per row.
+- [ ] The admin page: the Upscaler kernel is free text and a typo fails the whole job while the
+  probe already serves the valid list; the five interacting thresholds need a worked line; the
+  activity table should show sizes, ratio, user and `SrBypassed`, and `EncoderReason` should be text
+  rather than a `title` attribute invisible to touch and keyboard.
+- [ ] `Levels()` is re-serialised into every 3s session poll. Split it into a capabilities endpoint.
+
+## Measure first
+
+1. Encoder rate control against ground truth. If the shader gain does not survive the encoder,
+   everything else is second order.
+2. Per-stage wall clock inside `gu_inputs_frame` at 720p: depth model against phase correlation
+   against the serial CPU loops. The ranking of the whole game path turns on that split and nobody
+   has taken it.
+3. Concurrency curve: fps per session at 1, 2, 3, 4 concurrent, sharpen-only against oidn. Turns
+   `MaxConcurrent` from a guess into a budget.
+
+Already tested and deliberately not re-proposed: OIDN on the GPU side of hwupload, NVOFA
+`PERF_LEVEL_SLOW`, dropping the NVOFA luma prefilter, fp32 ORT models, the TensorRT EP, EASU,
+NVScaler as default, Anime4K below 2.0x, tmix, hqdn3d, FSR3/FSR4, and the Anime4K, FSRCNNX weight
+and CAS/RCAS questions.
