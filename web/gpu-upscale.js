@@ -73,7 +73,7 @@
             // is gentlest - so low/medium/high map to 2.0/1.7/1.4 on the server. These labels read
             // in the ordinary direction on purpose: the viewer should never meet the inversion,
             // and nothing here should tempt anyone to "turn it up" by raising a number.
-            key: 'deblur', label: 'Unblur', fallback: 'off', group: 'Sharpness',
+            key: 'deblur', label: 'Unblur', atSource: 1, fallback: 'off', group: 'Sharpness',
             probeKey: 'Deblur', grade: ['off', 'low', 'medium', 'high'],
             options: [
                 { id: 'off', name: 'Off' },
@@ -95,7 +95,7 @@
             // a SPATIAL denoiser, kept because it attacks grain a temporal filter leaves alone.
             // hqdn3d was retired (no recovery at all) and tmix is deliberately absent (it ghosts
             // even on 96% still content) - both are recorded in ShaderLibrary.
-            key: 'denoise', label: 'Denoise', fallback: 'off', group: 'Noise', basic: 3,
+            key: 'denoise', label: 'Denoise', atSource: 2, fallback: 'off', group: 'Noise', basic: 3,
             probeKey: 'Denoise', grade: ['off', 'light', 'strong', 'max'],
             options: [
                 { id: 'off', name: 'Off' },
@@ -121,7 +121,7 @@
             // later pass from sharpening and enlarging the damage along with the picture. A
             // restoration pass rather than a picture control, which is why it lives in Advanced:
             // nobody reaches for it mid-film the way they reach for size or denoise.
-            key: 'deblock', label: 'Clean up compression', fallback: 'off', group: 'Noise',
+            key: 'deblock', label: 'Clean up compression', atSource: 3, fallback: 'off', group: 'Noise',
             probeKey: 'Deblock', grade: ['off', 'light', 'strong'],
             options: [
                 { id: 'off', name: 'Off' },
@@ -166,7 +166,7 @@
             // `expert` names a cluster that reads as ONE axis to a viewer: the upscaler and the
             // three inputs it is fed. The cluster's own disclosure is opened by the control whose
             // `expertHead` says it leads, so the three inputs are one row until someone wants them.
-            key: 'game', label: 'Game temporal upscaler', fallback: 'off', group: 'Detail',
+            key: 'game', label: 'Game temporal upscaler', atSource: 5, fallback: 'off', group: 'Detail',
             expert: 'game', expertHead: true,
             probeKey: 'Game', labelsKey: 'GameLabels', fromProbe: true, costKey: 'game',
             options: [{ id: 'off', name: 'Off' }]
@@ -250,7 +250,7 @@
             // CHROMA upscaling - the colour planes, which every other control here leaves to the
             // plain kernel. These sources are 4:2:0, so chroma is stored at quarter resolution.
             // Composes with any super-resolution level rather than replacing one.
-            key: 'chroma', label: 'Chroma upscaling', fallback: 'default', group: 'Detail', chips: true,
+            key: 'chroma', label: 'Chroma upscaling', atSource: 4, fallback: 'default', group: 'Detail', chips: true,
             probeKey: 'Chroma',
             options: [
                 { id: 'default', name: 'Server default' },
@@ -262,7 +262,7 @@
             // Debanding rides on the libplacebo instance the chain is building anyway. "Server
             // default" sends nothing and lets the dashboard decide, which is what every client
             // without this script gets.
-            key: 'deband', label: 'Debanding', fallback: 'default', group: 'Picture', chips: true,
+            key: 'deband', label: 'Debanding', atSource: 6, fallback: 'default', group: 'Picture', chips: true,
             options: [
                 { id: 'default', name: 'Server default' },
                 { id: 'on', name: 'On' },
@@ -1706,8 +1706,14 @@
         }
 
         if (!l.length) {
+            // Say what is NOT available and what still is. The old wording stopped at "nothing to
+            // offer", which reads as "this server can do nothing for a source this size" and is
+            // false: everything that works without an enlargement still does.
             wrap.appendChild(el('div', 'gpuup-note',
-                'This source is already above the server\'s upscale limit, so there is nothing to offer.'));
+                'This source is at or above the server\'s upscale limit, so there is no larger size'
+                + ' to scale to and the quality stages do not apply. The passes that work at the'
+                + ' source size are below: unblur, denoise, compression cleanup, chroma, debanding,'
+                + ' and DLAA, which runs at 1:1 by design.'));
             return wrap;
         }
 
@@ -2095,9 +2101,20 @@
         // is always visible, in that number's order; everything else is behind one disclosure,
         // and a cluster naming an `expert` group is one row inside it that opens its own inputs.
         // A new axis is still one entry in CONTROLS: with no tier field it lands in Advanced.
-        var basics = controls.filter(function (c) { return c.basic; })
-            .sort(function (a, b) { return a.basic - b.basic; });
-        var rest = controls.filter(function (c) { return !c.basic; });
+        //
+        // WHEN THERE IS NOTHING TO UPSCALE TO, THE TIERS ARE WRONG. A source at or above the
+        // server's limit gets no target, which makes the upscale row and everything that only
+        // corrects an enlargement useless, while the passes that work at 1:1 - sharpening,
+        // denoise, compression cleanup, chroma, debanding, and DLAA - are the only things left
+        // worth offering. Leaving those behind a closed disclosure reads as "this server can do
+        // nothing for 4K", which is false. So the visible set is chosen from `atSource` instead,
+        // still from the control's own data rather than from a list of axis names here.
+        var upscalable = eligibleTargets();
+        var atLimit = !upscalable || !upscalable.length;
+        var tier = function (c) { return atLimit ? (c.atSource || 0) : (c.basic || 0); };
+        var basics = controls.filter(function (c) { return tier(c); })
+            .sort(function (a, b) { return tier(a) - tier(b); });
+        var rest = controls.filter(function (c) { return !tier(c); });
 
         basics.forEach(function (c) { body.appendChild(pick(c)); });
 
