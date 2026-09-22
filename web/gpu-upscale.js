@@ -393,6 +393,9 @@
         // True once a re-negotiation was asked for and did not land. Kept because clearing
         // `applying` on its own made a change that never happened look exactly like one that did.
         applyFailed: false,
+        // One re-play attempt per selection, cleared on each fresh request, so a stream that
+        // refuses to change cannot restart the viewer's film on a loop.
+        replayTried: false,
         // jellyfin-web does not put playbackManager on window, so it is recognised by shape
         // in the webpack module exports this script already wraps. Null until a module
         // carrying it has run.
@@ -1195,6 +1198,19 @@
                     // A timeout is a FAILURE, not a finish. Clearing the label without recording
                     // it left a change that never reached the server looking like one that did.
                     state.applyFailed = !landed;
+                    // One retry, by the route that works when re-negotiation does not: the stream
+                    // that would not change is usually one the server is handing over untouched.
+                    // Only once, because a re-play that also fails to land must not become a loop
+                    // that restarts the viewer's film every twelve seconds.
+                    if (!landed && !state.replayTried) {
+                        state.replayTried = true;
+                        if (replayHere()) {
+                            state.applyFailed = false;
+                            state.applying = APPLY_LABEL;
+                            watchApplied(state.playSessionId);
+                        }
+                    }
+
                     repaintPanel();
                 }
             } catch (err) {
@@ -1205,12 +1221,75 @@
         }, 250);
     }
 
+    /*
+     * Re-play the current item at the position it is at.
+     *
+     * Needed because the ordinary apply re-negotiates the STREAM, and a session that is direct
+     * playing has no stream to re-negotiate: the server hands back the file, nothing asks for a
+     * filter chain, and the panel sat saying "applying" until it timed out. Re-playing makes the
+     * client ask PlaybackInfo again, which is where this script marks the request for a transcode.
+     *
+     * Every method is checked before it is called. CLAUDE.md is explicit that reaching for a global
+     * that "should" exist is how this project lost a whole session, so a player that does not carry
+     * these degrades to the honest message rather than throwing.
+     */
+    function replayHere() {
+        try {
+            var pm = player();
+            var item = pm && typeof pm.currentItem === 'function' ? pm.currentItem() : null;
+            var id = item && (item.Id || item.id);
+            if (!id || typeof pm.play !== 'function') {
+                return false;
+            }
+
+            var ticks = 0;
+            if (typeof pm.currentTime === 'function') {
+                var ms = pm.currentTime();
+                if (ms > 0) { ticks = Math.floor(ms) * 10000; }
+            }
+
+            pm.play({ ids: [id], startPositionTicks: ticks });
+            log('re-played the item at its current position to apply the change');
+            return true;
+        } catch (err) {
+            log('could not re-play to apply the change', err);
+            return false;
+        }
+    }
+
+    /*
+     * True when the server built no filter chain for this session, which is what direct play looks
+     * like from here: a record it does not know. Read from the record rather than guessed, so a
+     * session the server simply has not answered for yet is not mistaken for one it refused.
+     */
+    function directPlaying() {
+        var s = state.lastServerState;
+        return !!(s && s.PatchActive !== false && s.Known === false);
+    }
+
     function doApply() {
         state.applyTimer = null;
         if (!playerPresent()) {
             state.applying = null;
             state.applyFailed = true;
             repaintPanel();
+            return;
+        }
+
+        // Nothing to re-negotiate on a direct play, so go straight to the thing that does work.
+        // Doing this first rather than after a 12 second timeout is the difference between a
+        // change that lands and a viewer backing out of the video and opening it again.
+        if (directPlaying()) {
+            state.applying = APPLY_LABEL;
+            repaintPanel();
+            if (replayHere()) {
+                watchApplied(state.playSessionId);
+            } else {
+                state.applying = null;
+                state.applyFailed = true;
+                repaintPanel();
+            }
+
             return;
         }
 
@@ -1254,8 +1333,10 @@
                 return;
             }
 
-            // A fresh attempt, so the last failure is no longer what is being reported.
+            // A fresh attempt, so the last failure is no longer what is being reported, and the
+            // one re-play this selection is allowed is available again.
             state.applyFailed = false;
+            state.replayTried = false;
             state.applying = APPLY_LABEL;
             state.applyTimer = setTimeout(doApply, APPLY_DEBOUNCE);
         } catch (err) {
