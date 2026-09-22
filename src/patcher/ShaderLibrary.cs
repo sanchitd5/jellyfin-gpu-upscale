@@ -1255,6 +1255,33 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         }
 
         /// <summary>
+        /// True when this filter string names a node only the patched binary carries, which is what
+        /// makes the shim route a session away from the stock ffmpeg.
+        ///
+        /// Kept beside the filter tables rather than in the engine, so adding a custom filter means
+        /// adding its name in the one place that already knows what this project built.
+        /// </summary>
+        public static bool IsPatchedOnlyFilter(string filter)
+        {
+            if (string.IsNullOrWhiteSpace(filter))
+            {
+                return false;
+            }
+
+            string[] patched = { "oidn", "optix", "ort", "fsr2", "dlss" };
+            foreach (string name in patched)
+            {
+                if (filter.StartsWith(name, StringComparison.OrdinalIgnoreCase)
+                    && (filter.Length == name.Length || filter[name.Length] == '='))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
         /// The shader file to hand libplacebo for this combination, or null for none.
         /// Returns null rather than throwing if anything is missing, so an unknown or unreadable
         /// level degrades to plain scaling instead of breaking the transcode.

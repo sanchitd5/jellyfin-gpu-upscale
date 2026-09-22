@@ -135,6 +135,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public bool GameDepthDowngraded { get; set; }
 
+        /// <summary>
+        /// The Vulkan denoise level dropped because this session also needed the patched binary,
+        /// whose shaderc cannot compile that filter. Empty when nothing was dropped. Carried so the
+        /// panel and the dashboard can say it happened rather than showing a level that did not run.
+        /// </summary>
+        public string DenoiseDroppedForPatchedBinary { get; set; }
+
         /// <summary>The video encoder that went into the command, when this plugin chose it.</summary>
         public string Encoder { get; set; }
 
@@ -237,6 +244,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             /// <summary>True when the denoise node needs Vulkan frames, i.e. goes after hwupload.</summary>
             public bool DenoiseWantsHwFrames { get; set; }
+
+            /// <summary>
+            /// The Vulkan denoise level that was dropped because this session also needs the
+            /// patched binary, whose shaderc cannot compile that filter's shader. Null when
+            /// nothing was dropped. Reported rather than silently applied.
+            /// </summary>
+            public string DenoiseDroppedForPatchedBinary { get; set; }
 
             public string DeblockLevel { get; set; } = "off";
 
@@ -472,6 +486,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 GameDepth = plan.Act && plan.GameApplied ? plan.GameDepth : null,
                 GameReactive = plan.Act && plan.GameApplied ? plan.GameReactive : null,
                 GameDepthDowngraded = plan.Act && plan.GameApplied && plan.GameDepthDowngraded,
+                DenoiseDroppedForPatchedBinary = plan.Act ? plan.DenoiseDroppedForPatchedBinary : null,
                 Status = status,
                 Reason = reason,
             };
@@ -672,6 +687,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     + ", depth " + (r.GameDepth ?? "?")
                     + (r.GameDepthDowngraded ? " - the depth weights are not installed, so flat is what ran" : string.Empty)
                     + ", reactive " + (r.GameReactive ?? "?") + ")");
+            }
+
+            // Never silent. The viewer asked for a denoise and did not get it, and the reason is
+            // a property of this build rather than of their choice, so it says which and why.
+            if (!string.IsNullOrEmpty(r.DenoiseDroppedForPatchedBinary))
+            {
+                parts.Add("denoise " + r.DenoiseDroppedForPatchedBinary
+                    + " NOT run: it needs the stock ffmpeg's shader compiler, and this session also"
+                    + " uses a filter only the patched binary carries");
             }
 
             if (r.UpscaleApplied)
@@ -1089,6 +1113,29 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.GameDepth = gameDepth;
                 plan.GameReactive = gameReactive;
                 plan.GameDepthDowngraded = gameDepthDowngraded;
+
+                // ---- two binaries, and not every filter runs on both -----------------------
+                // The Vulkan denoise levels compile their shader at run time, and the patched
+                // binary's shaderc is older than the stock one's: nlmeans_vulkan needs
+                // GL_EXT_expect_assume, which it rejects. So the level runs on the stock binary
+                // and fails on the patched one. A session asking for BOTH a Vulkan denoise and a
+                // filter only the patched binary carries therefore routes to the patched binary
+                // and dies with "shaderc compile status 'error'", killing the whole transcode.
+                //
+                // Dropping the denoise and saying so is the honest outcome: the viewer loses one
+                // pass instead of the stream. The real fix is building the patched binary against
+                // a current shaderc, which is a build change and is recorded as one; until then
+                // this must never silently persist, so it is reported like any other refusal.
+                bool needsPatchedBinary = plan.NeuralApplied || plan.GameApplied
+                    || (plan.DenoiseApplied && ShaderLibrary.IsPatchedOnlyFilter(plan.DenoiseFilter));
+                if (plan.DenoiseApplied && plan.DenoiseWantsHwFrames && needsPatchedBinary)
+                {
+                    plan.DenoiseDroppedForPatchedBinary = plan.DenoiseLevel;
+                    plan.DenoiseFilter = null;
+                    plan.DenoiseApplied = false;
+                    plan.DenoiseLevel = "off";
+                    plan.DenoiseWantsHwFrames = false;
+                }
 
                 // fsr2 and dlss produce the OUTPUT size themselves. Running an SR network as
                 // well would enlarge the already-enlarged picture and let libplacebo shrink it
