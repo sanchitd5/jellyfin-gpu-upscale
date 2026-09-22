@@ -1347,6 +1347,59 @@
     /* ------------------------------------------------------------------ what the server DID */
 
     /*
+     * IS IT ON, RIGHT NOW, ACCORDING TO THE SERVER.
+     *
+     * Answered from the session record alone, never from what the panel selected. The panel already
+     * says what was picked and what the record holds; what it could not say is the one thing a
+     * viewer actually wants: is any of this running on the stream playing at this moment. A badge
+     * built from the selection would say "on" for a chain the server refused, which is the whole
+     * failure class this project keeps hitting.
+     *
+     * Four states, each from a field the server sends:
+     *   unavailable  the patches are not installed, so nothing can run whatever is chosen
+     *   waiting      nothing has been negotiated yet, or the server has not answered for it
+     *   off          the server answered and built no chain: direct play, a stream copy, or a
+     *                session it refused, with its own reason
+     *   active       a chain was built and the record names at least one pass that ran
+     */
+    function activeState() {
+        var s = state.lastServerState;
+        if (!s) {
+            return { key: 'waiting', label: 'Waiting for the server',
+                why: state.playSessionId
+                    ? 'The server has not answered for this session yet.'
+                    : 'Nothing is playing yet.' };
+        }
+
+        if (s.PatchActive === false) {
+            return { key: 'unavailable', label: 'Enhancement unavailable',
+                why: 'The server-side patches are not active, so nothing can run whatever is chosen here.' };
+        }
+
+        if (!s.Known) {
+            return { key: 'off', label: 'Not enhancing',
+                why: 'The server built no filter chain for this session, so this is a direct play, a'
+                    + ' stream copy, or a stream it has not started yet.' };
+        }
+
+        // "Applied" is not taken on trust either: a record can carry the status while every axis
+        // sits at off, which is a transcode this plugin touched and changed nothing in.
+        var ran = LIVE_ROWS.some(function (r) {
+            if (r.applied) { return !!s[r.applied]; }
+            return r.level ? !isOff(s[r.level]) : false;
+        });
+
+        if (!ran) {
+            return { key: 'off', label: 'Not enhancing',
+                why: 'A chain was built for this session but no enhancement pass ran in it.'
+                    + (s.Status ? ' The server says: ' + s.Status + '.' : '') };
+        }
+
+        return { key: 'active', label: 'Enhancing now',
+            why: s.Summary || 'The server reports at least one pass running on this stream.' };
+    }
+
+    /*
      * The live rows. One entry per axis, naming the fields of the session record it reads, so an
      * axis added to CONTROLS is reported here by adding one line of DATA, not by writing rendering
      * code. `applied` false against a level that is not "off" is the "requested but not applied"
@@ -1431,8 +1484,11 @@
 
     function liveLines() {
         var s = state.lastServerState;
+        // First line, in every state, including the ones that return early below: whether anything
+        // is running. Playback Info renders these same lines, so the dialog answers it too.
+        var act = activeState();
         if (!s) {
-            return [['Status', state.playSessionId
+            return [['Enhancement', act.label], ['Status', state.playSessionId
                 ? 'Waiting for the server to answer for this session.'
                 : 'No stream yet. Start playback to see what the server does.']];
         }
@@ -1564,6 +1620,14 @@
         'text-transform:uppercase;color:#9ad;opacity:.85;}',
         '.gpuup-head{display:flex;align-items:baseline;gap:.5em;cursor:move;touch-action:none;',
         '-webkit-user-select:none;user-select:none;}',
+        // The active badge. Colour is never the only carrier: the label says it in words, because a
+        // coloured dot alone means nothing to a screen reader or to a colour-blind viewer.
+        '.gpuup-active{display:flex;align-items:center;gap:.5em;margin:.35em 0 .1em;font-weight:600;}',
+        '.gpuup-dot{width:.65em;height:.65em;border-radius:50%;background:currentColor;flex:0 0 auto;}',
+        '.gpuup-active.is-active{color:#5ddc7a;}',
+        '.gpuup-active.is-off{color:#e0a44a;}',
+        '.gpuup-active.is-unavailable{color:#e46a6a;}',
+        '.gpuup-active.is-waiting{color:#9aa0a6;}',
         '.gpuup-grip{flex:0 0 auto;background:none;border:0;color:inherit;font-size:1em;opacity:.55;',
         'cursor:move;padding:0 .15em;font-family:inherit;line-height:1;}',
         '.gpuup-grip:focus{outline:2px solid #00a4dc;opacity:1;}',
@@ -2154,6 +2218,18 @@
         head.appendChild(x);
         body.appendChild(head);
 
+        // THE ONE LINE A VIEWER WANTS, AND IT COMES FROM THE SERVER. Everything else in this panel
+        // is either a selection or a detail; this says whether any of it is running right now, and
+        // it is built from the session record rather than from what was picked, so it cannot claim
+        // a chain the server refused. aria-live, because it changes without the viewer acting.
+        var act = activeState();
+        var badge = el('div', 'gpuup-active is-' + act.key);
+        badge.setAttribute('aria-live', 'polite');
+        badge.appendChild(el('span', 'gpuup-dot'));
+        badge.appendChild(el('span', 'gpuup-active-label', act.label));
+        body.appendChild(badge);
+        body.appendChild(el('div', 'gpuup-note', act.why));
+
         if (state.applyFailed) {
             body.appendChild(el('div', 'gpuup-note', APPLY_FAILED_TEXT));
         }
@@ -2545,9 +2621,12 @@
                             return;
                         }
 
-                        var dialogs = node.matches && node.matches('.dialog, [is="emby-dialog"], .actionSheet')
-                            ? [node] : Array.prototype.slice.call(node.querySelectorAll('.dialog, .actionSheet'));
-                        dialogs.forEach(maybeAnnotate);
+                        // The stats overlay is named, and it is not a dialog: watching only
+                        // dialogs meant the container we were told to write into never arrived.
+                        var SEL = '.dialog, [is="emby-dialog"], .actionSheet, .playerStats, .playerStats-stats';
+                        var hosts = node.matches && node.matches(SEL)
+                            ? [node] : Array.prototype.slice.call(node.querySelectorAll(SEL));
+                        hosts.forEach(maybeAnnotate);
                     });
                 });
             });
@@ -2587,14 +2666,30 @@
     }
 
     function playbackInfoHost(dialog) {
+        // Jellyfin's own stats overlay names its container, so use the name it gives rather than
+        // inferring one: everything belongs inside playerStats-stats, beside the rest of the
+        // numbers a viewer opened that overlay to read. The shape search below stays as the
+        // fallback for anything that does not carry the class, since a renamed class is exactly
+        // the kind of thing a web update changes and a shape survives.
+        var named = dialog.querySelector
+            ? (dialog.querySelector('.playerStats-stats') || dialog.querySelector('.playerStats'))
+            : null;
+        var scope = named || dialog;
+
         var rows = Array.prototype.filter.call(
-            dialog.querySelectorAll('div,li,tr,p'),
+            scope.querySelectorAll('div,li,tr,p'),
             function (r) {
                 return r.children.length === 2 && STATS_FIELDS.indexOf(statsFieldName(r)) >= 0;
             });
 
+        // A named container with no recognisable rows yet is still the right host: the overlay
+        // builds itself as playback starts, and refusing it would mean never annotating the very
+        // container we were told to use.
         if (rows.length < 2) {
-            return null;
+            return named
+                ? { host: named, rowClass: '', labelClass: '', valueClass: '',
+                    labelTag: 'div', valueTag: 'div', rowTag: 'div' }
+                : null;
         }
 
         // The container the rows themselves live in, not the dialog shell: appending beside them
