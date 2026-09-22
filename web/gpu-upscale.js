@@ -2316,6 +2316,16 @@
                 panel.id = PANEL_ID;
                 panel.setAttribute('role', 'dialog');
                 panel.setAttribute('aria-label', 'Enhance');
+                // The player binds the wheel to volume, and this panel sits over the player, so
+                // scrolling its own list was turning the sound up and down. The panel scrolls
+                // itself (max-height plus overflow-y), so a wheel inside it is never the player's
+                // business. Same for touch, where the gesture would otherwise reach the player's
+                // own handlers. Not passive: stopping propagation is the entire point, and a
+                // passive listener cannot preventDefault at the edges either.
+                var eatScroll = function (ev) { ev.stopPropagation(); };
+                panel.addEventListener('wheel', eatScroll, { passive: false });
+                panel.addEventListener('touchmove', eatScroll, { passive: false });
+
                 (document.body || document.documentElement).appendChild(panel);
                 renderPanel(panel, caps);
 
