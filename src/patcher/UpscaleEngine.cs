@@ -1089,7 +1089,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 }
 
                 // jitter / depth / reactive are per-session on exactly the same carrier as the
-                // ten axes above: lowercase query options off the streaming request. Each falls
+                // eleven axes above: lowercase query options off the streaming request. Each falls
                 // back to the dashboard setting and then to the built-in default inside
                 // GameFilter, which is also where an unrecognised value is rejected. They are read
                 // unconditionally and are inert by construction: with game=off no filter node is

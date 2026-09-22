@@ -282,6 +282,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// gbrpf32le directly, so that variant needs its own format=yuv420p after the download.
         ///
         /// Denoise stays OFF by default, and on a clean source there is nothing for it to recover.
+        ///
+        /// SECOND INVARIANT, learned the expensive way: the Vulkan levels compile their shader at
+        /// RUN TIME, so whether they work is a property of the binary, not of this table. The
+        /// patched ffmpeg was built against Ubuntu's shaderc 2023.8, which does not know
+        /// GL_EXT_expect_assume, and nlmeans_vulkan's shader uses it: the level ran on the stock
+        /// binary and died on the patched one, taking the whole transcode with it rather than
+        /// degrading. scripts/build-ffmpeg.sh now builds shaderc from source, and Decide still
+        /// drops a Vulkan denoise when the same session needs a patched-only filter, so a stale
+        /// binary costs one pass instead of the stream. Any future level that compiles a shader
+        /// carries the same risk and needs testing against BOTH binaries.
         /// </summary>
         private static readonly Dictionary<string, string> _denoiseFilters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {

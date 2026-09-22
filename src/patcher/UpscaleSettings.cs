@@ -100,8 +100,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public bool DeblurAllowed { get; set; } = true;
 
         /// <summary>
-        /// Denoise applied by default: off, light (hqdn3d), strong (nlmeans_vulkan).
+        /// Denoise applied by default: off, light (atadenoise), strong and max (nlmeans_vulkan).
         /// Off by default - it costs real throughput and whether it helps is a matter for the eye.
+        ///
+        /// The Vulkan levels compile their shader at run time, so whether they work depends on the
+        /// binary a session routes to rather than on this setting. A session needing both a Vulkan
+        /// denoise and a filter only the patched ffmpeg carries has the denoise dropped and
+        /// reported, because on a build with an older shaderc it would otherwise fail the whole
+        /// transcode. See the denoise table in ShaderLibrary for what that cost.
         /// </summary>
         public string DenoiseLevel { get; set; } = "off";
 
