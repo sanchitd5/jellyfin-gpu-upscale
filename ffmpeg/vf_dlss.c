@@ -53,6 +53,7 @@
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/thread.h"
 #include "avfilter.h"
 #include "filters.h"
 #include "video.h"
@@ -112,6 +113,13 @@ typedef struct DLSSContext {
      * partial init. */
     int                  ngx_inited;
     int                  ngx_ready;
+    /* cfg_w/cfg_h: the input size the live state was built for, so a second
+     * config_props knows whether it has anything to rebuild.  req_w/req_h: the
+     * w=/h= request as the user gave it, because out_w/out_h are the option
+     * storage and the defaulting in config_output overwrites them with its own
+     * answer, which a rebuild would then default off. */
+    int                  cfg_w, cfg_h;
+    int                  req_w, req_h;
 } DLSSContext;
 
 #define OFFSET(x) offsetof(DLSSContext, x)
@@ -358,6 +366,74 @@ static int submit_wait(AVFilterContext *ctx, DLSSContext *s)
     return 0;
 }
 
+/* NGX's Vulkan state is per PROCESS, but Init binds it to one VkDevice and
+ * every instance of this filter creates its own.  A second live instance would
+ * re-Init NGX onto a different device, and whichever finished first would call
+ * Shutdown1 underneath the other while it is still evaluating its feature.  A
+ * refcount cannot fix that, because the surviving instance would be left with
+ * NGX bound to a device that no longer exists, so a second CONCURRENT instance
+ * is refused instead.  Sequential ones are fine: the claim is released in
+ * teardown, after Shutdown1. */
+static AVMutex ngx_claim_lock = AV_MUTEX_INITIALIZER;
+static int     ngx_claimed;
+
+static int ngx_claim(AVFilterContext *ctx)
+{
+    int taken;
+
+    ff_mutex_lock(&ngx_claim_lock);
+    taken = ngx_claimed;
+    if (!taken)
+        ngx_claimed = 1;
+    ff_mutex_unlock(&ngx_claim_lock);
+
+    if (taken) {
+        av_log(ctx, AV_LOG_ERROR,
+               "another dlss filter instance already owns NGX in this process; NGX "
+               "binds to a single Vulkan device, so only one dlss instance can run "
+               "at a time. Split the work into separate ffmpeg processes.\n");
+        return AVERROR(EBUSY);
+    }
+    return 0;
+}
+
+static void ngx_unclaim(void)
+{
+    ff_mutex_lock(&ngx_claim_lock);
+    ngx_claimed = 0;
+    ff_mutex_unlock(&ngx_claim_lock);
+}
+
+static av_cold void dlss_teardown(DLSSContext *s)
+{
+    if (s->dev) vkDeviceWaitIdle(s->dev);
+    if (s->dlss)   { NVSDK_NGX_VULKAN_ReleaseFeature(s->dlss);      s->dlss = NULL; }
+    if (s->params) { NVSDK_NGX_VULKAN_DestroyParameters(s->params); s->params = NULL; }
+    if (s->ngx_inited) {
+        NVSDK_NGX_VULKAN_Shutdown1(s->dev);
+        s->ngx_inited = 0;
+        ngx_unclaim();
+    }
+    s->ngx_ready = 0;
+
+    image_destroy(s, &s->color);
+    image_destroy(s, &s->depth);
+    image_destroy(s, &s->mv);
+    image_destroy(s, &s->bias);
+    image_destroy(s, &s->out);
+
+    if (s->fence) { vkDestroyFence(s->dev, s->fence, NULL);      s->fence = VK_NULL_HANDLE; }
+    if (s->pool)  { vkDestroyCommandPool(s->dev, s->pool, NULL); s->pool  = VK_NULL_HANDLE; }
+    if (s->dev)   { vkDestroyDevice(s->dev, NULL);               s->dev   = VK_NULL_HANDLE; }
+    if (s->inst)  { vkDestroyInstance(s->inst, NULL);            s->inst  = VK_NULL_HANDLE; }
+    s->cmd   = VK_NULL_HANDLE;
+    s->queue = VK_NULL_HANDLE;
+    s->phys  = VK_NULL_HANDLE;
+
+    gu_inputs_uninit(&s->g);
+    s->cfg_w = s->cfg_h = 0;
+}
+
 static int config_output(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
@@ -371,6 +447,27 @@ static int config_output(AVFilterLink *outlink)
     wchar_t wpath[512];
     size_t i;
     int ret, dlss_avail = 0;
+
+    /* config_props runs again whenever the link is reconfigured.  Everything
+     * below creates device- and process-level state, so running it a second
+     * time over the live handles leaks the instance, the device, every image
+     * and NGX itself.  Unchanged geometry means there is nothing to do; changed
+     * geometry means the old state goes first. */
+    if (s->cfg_w) {
+        if (s->ngx_ready && s->cfg_w == inlink->w && s->cfg_h == inlink->h) {
+            outlink->w = s->out_w;
+            outlink->h = s->out_h;
+            return 0;
+        }
+        s->out_w = s->req_w;
+        s->out_h = s->req_h;
+        dlss_teardown(s);
+    } else {
+        s->req_w = s->out_w;
+        s->req_h = s->out_h;
+    }
+    s->cfg_w = inlink->w;
+    s->cfg_h = inlink->h;
 
     if (s->mode == DLSS_MODE_DLAA) {
         s->out_w = inlink->w;
@@ -431,6 +528,8 @@ static int config_output(AVFilterLink *outlink)
     /* The application-ID form of Init is for titles NVIDIA has registered.  This is
      * not one, so the documented path is Init_with_ProjectID with EngineType CUSTOM:
      * the app-ID form was measured to hang here rather than return an error. */
+    if ((ret = ngx_claim(ctx)) < 0)
+        return ret;
     r = NVSDK_NGX_VULKAN_Init_with_ProjectID(
             /* NGX validates the project id as a GUID string, not a free-form name. */
             "a0f57b54-1daf-4934-90ae-c4035c19df04",
@@ -442,6 +541,7 @@ static int config_output(AVFilterLink *outlink)
                "NVSDK_NGX_VULKAN_Init_with_ProjectID failed (0x%08x). The DLSS runtime is not "
                "shipped with this plugin; put libnvidia-ngx-dlss.so.* in %s "
                "(see DLSS.md)\n", (unsigned)r, s->sdk_path);
+        ngx_unclaim();
         return AVERROR_EXTERNAL;
     }
     s->ngx_inited = 1;
@@ -664,25 +764,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
-    DLSSContext *s = ctx->priv;
-
-    if (s->dev) vkDeviceWaitIdle(s->dev);
-    if (s->dlss)   NVSDK_NGX_VULKAN_ReleaseFeature(s->dlss);
-    if (s->params) NVSDK_NGX_VULKAN_DestroyParameters(s->params);
-    if (s->ngx_inited) NVSDK_NGX_VULKAN_Shutdown1(s->dev);
-
-    image_destroy(s, &s->color);
-    image_destroy(s, &s->depth);
-    image_destroy(s, &s->mv);
-    image_destroy(s, &s->bias);
-    image_destroy(s, &s->out);
-
-    if (s->fence) vkDestroyFence(s->dev, s->fence, NULL);
-    if (s->pool)  vkDestroyCommandPool(s->dev, s->pool, NULL);
-    if (s->dev)   vkDestroyDevice(s->dev, NULL);
-    if (s->inst)  vkDestroyInstance(s->inst, NULL);
-
-    gu_inputs_uninit(&s->g);
+    dlss_teardown(ctx->priv);
 }
 
 static const AVFilterPad dlss_inputs[] = {

@@ -169,13 +169,25 @@ static int run_session(AVFilterContext *ctx, int w, int h,
 
     ORT_CHECK(ctx, ort->GetTensorTypeAndShape(*out_value, &info));
     {
+        ONNXTensorElementDataType etype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
         OrtStatus *st = ort->GetDimensionsCount(info, &ndim);
         if (!st && ndim == 4)
             st = ort->GetDimensions(info, out_shape, 4);
+        if (!st)
+            st = ort->GetTensorElementType(info, &etype);
         ort->ReleaseTensorTypeAndShapeInfo(info);
         if (st || ndim != 4) {
             if (st) ort->ReleaseStatus(st);
             av_log(ctx, AV_LOG_ERROR, "model output is not a 4-D NCHW tensor\n");
+            return AVERROR(EINVAL);
+        }
+        /* Both callers read the tensor as float32 and size the read from the shape
+         * alone, so a float16 export would be read to twice its length.  Checked
+         * here rather than at each caller because that read is what crashes. */
+        if (etype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            av_log(ctx, AV_LOG_ERROR, "model output element type %d is not float32 "
+                   "(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT); re-export the model in "
+                   "float32\n", (int)etype);
             return AVERROR(EINVAL);
         }
     }
@@ -288,6 +300,16 @@ static int config_input(AVFilterLink *inlink)
         }
         s->scale = (int)(oshape[2] / ph);
         s->ort->ReleaseValue(ov);
+        /* A fixed-output-size model answers the probe with its own size, not a ratio,
+         * and the frame allocations below would follow it to gigabytes.  Cap where the
+         * scale= option caps. */
+        if (s->scale > 8) {
+            av_log(ctx, AV_LOG_ERROR, "probe gave scale x%d, above the maximum of 8; "
+                   "a fixed-output-size model cannot be probed, set scale= explicitly\n",
+                   s->scale);
+            s->scale = 0;
+            return AVERROR(EINVAL);
+        }
     }
 
     s->out_w = s->in_w * s->scale;

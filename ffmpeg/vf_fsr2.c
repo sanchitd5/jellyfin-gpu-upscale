@@ -121,6 +121,14 @@ typedef struct FSR2Context {
     FfxFsr2ContextDescription desc;
     void              *scratch;
     int                fsr2_ready;
+
+    /* cfg_w/cfg_h: the input size the live state was built for, so a second
+     * config_props knows whether it has anything to rebuild.  req_w/req_h: the
+     * w=/h= request as the user gave it, because out_w/out_h are the option
+     * storage and the defaulting in config_output overwrites them with its own
+     * answer, which a rebuild would then default off. */
+    int                cfg_w, cfg_h;
+    int                req_w, req_h;
 } FSR2Context;
 
 #define OFFSET(x) offsetof(FSR2Context, x)
@@ -373,6 +381,31 @@ static void fsr2_msg(FfxFsr2MsgType type, const wchar_t *message)
            "fsr2: %s\n", buf);
 }
 
+static av_cold void fsr2_teardown(FSR2Context *s)
+{
+    if (s->dev) vkDeviceWaitIdle(s->dev);
+    if (s->fsr2_ready) ffxFsr2ContextDestroy(&s->fsr2);
+    s->fsr2_ready = 0;
+    av_freep(&s->scratch);
+
+    image_destroy(s, &s->color);
+    image_destroy(s, &s->depth);
+    image_destroy(s, &s->mv);
+    image_destroy(s, &s->reactive);
+    image_destroy(s, &s->out);
+
+    if (s->fence) { vkDestroyFence(s->dev, s->fence, NULL);      s->fence = VK_NULL_HANDLE; }
+    if (s->pool)  { vkDestroyCommandPool(s->dev, s->pool, NULL); s->pool  = VK_NULL_HANDLE; }
+    if (s->dev)   { vkDestroyDevice(s->dev, NULL);               s->dev   = VK_NULL_HANDLE; }
+    if (s->inst)  { vkDestroyInstance(s->inst, NULL);            s->inst  = VK_NULL_HANDLE; }
+    s->cmd   = VK_NULL_HANDLE;
+    s->queue = VK_NULL_HANDLE;
+    s->phys  = VK_NULL_HANDLE;
+
+    gu_inputs_uninit(&s->g);
+    s->cfg_w = s->cfg_h = 0;
+}
+
 static int config_output(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
@@ -381,6 +414,27 @@ static int config_output(AVFilterLink *outlink)
     size_t scratch_size;
     FfxErrorCode err;
     int ret;
+
+    /* config_props runs again whenever the link is reconfigured.  Everything
+     * below creates device-level state, so running it a second time over the
+     * live handles leaks the instance, the device, every image and the FSR2
+     * context.  Unchanged geometry means there is nothing to do; changed
+     * geometry means the old state goes first. */
+    if (s->cfg_w) {
+        if (s->fsr2_ready && s->cfg_w == inlink->w && s->cfg_h == inlink->h) {
+            outlink->w = s->out_w;
+            outlink->h = s->out_h;
+            return 0;
+        }
+        s->out_w = s->req_w;
+        s->out_h = s->req_h;
+        fsr2_teardown(s);
+    } else {
+        s->req_w = s->out_w;
+        s->req_h = s->out_h;
+    }
+    s->cfg_w = inlink->w;
+    s->cfg_h = inlink->h;
 
     s->out_w = s->out_w ? s->out_w : inlink->w * 2;
     s->out_h = s->out_h ? s->out_h : inlink->h * 2;
@@ -615,24 +669,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
-    FSR2Context *s = ctx->priv;
-
-    if (s->dev) vkDeviceWaitIdle(s->dev);
-    if (s->fsr2_ready) ffxFsr2ContextDestroy(&s->fsr2);
-    av_freep(&s->scratch);
-
-    image_destroy(s, &s->color);
-    image_destroy(s, &s->depth);
-    image_destroy(s, &s->mv);
-    image_destroy(s, &s->reactive);
-    image_destroy(s, &s->out);
-
-    if (s->fence) vkDestroyFence(s->dev, s->fence, NULL);
-    if (s->pool)  vkDestroyCommandPool(s->dev, s->pool, NULL);
-    if (s->dev)   vkDestroyDevice(s->dev, NULL);
-    if (s->inst)  vkDestroyInstance(s->inst, NULL);
-
-    gu_inputs_uninit(&s->g);
+    fsr2_teardown(ctx->priv);
 }
 
 static const AVFilterPad fsr2_inputs[] = {

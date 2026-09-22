@@ -20,6 +20,7 @@ falls through to the real ffmpeg with the original argument list untouched.
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -44,6 +45,10 @@ PATCHED_FILTERS = ("oidn", "optix", "ort", "fsr2", "dlss")
 # a bare substring match would also catch "transport" or "distort" in an unrelated
 # drawtext arg and corrupt a chain that never asked for a patched node.
 PATCHED_NODE_RE = re.compile(r"^(?:%s)(=.*)?$" % "|".join(PATCHED_FILTERS))
+
+# In a filter_complex graph a node wears its pad labels: "[a]oidn=...[b]". They come
+# off before any node-name match, so wants_patched and strip_patched see the same name.
+FILTER_LABEL_RE = re.compile(r"^(?:\s*\[[^\]]*\])+|(?:\[[^\]]*\]\s*)+$")
 REAL_FFPROBE = "/usr/lib/jellyfin-ffmpeg/ffprobe"
 CONFIG_PATH = "/etc/jellyfin-upscale.json"
 LOG_PATH = "/var/log/jellyfin-upscale.log"
@@ -74,8 +79,13 @@ def load_config():
     try:
         with open(CONFIG_PATH) as fh:
             cfg.update(json.load(fh))
-    except Exception:
+    except FileNotFoundError:
         pass
+    except Exception:
+        # Falling back to DEFAULTS here would drop plugin_patch_active, so a malformed
+        # or half-written config would have the shim rewrite a command the plugin's
+        # Harmony patches are rewriting too. Fail closed instead.
+        cfg["config_unreadable"] = True
     return cfg
 
 
@@ -93,12 +103,15 @@ def wants_patched(args):
     """The patched-only filters this command asks for, if any.
 
     Matched on whole filter names so that a node is recognised wherever it sits in the
-    chain and nothing else is ever mistaken for one.
+    chain and nothing else is ever mistaken for one. The leading boundary includes "]"
+    and ";" because in a filter_complex graph a node follows its input label or the
+    previous graph segment, and missing one there routes the session to the stock
+    binary, which fails outright instead of degrading.
     """
     found = []
     for a in args:
         for name in PATCHED_FILTERS:
-            if name in a and re.search(r"(^|,|\[)%s(=|,|\]|$)" % name, a) and name not in found:
+            if name in a and re.search(r"(^|,|;|\[|\])%s(=|,|;|\]|$)" % name, a) and name not in found:
                 found.append(name)
     return found
 
@@ -115,16 +128,20 @@ def strip_patched(args):
         if not any(name in a for name in PATCHED_FILTERS):
             continue
         nodes = split_filters(a)
+        names = [filter_name(n) for n in nodes]
         drop = set()
-        for j, n in enumerate(nodes):
-            if not PATCHED_NODE_RE.match(n.strip()):
+        for j, n in enumerate(names):
+            if not PATCHED_NODE_RE.match(n):
                 continue
             drop.add(j)
-            if j > 0 and nodes[j - 1].strip() == "format=gbrpf32le":
+            if j > 0 and names[j - 1] == "format=gbrpf32le":
                 drop.add(j - 1)
-            if j + 1 < len(nodes) and nodes[j + 1].strip() == "format=yuv420p":
+            if j + 1 < len(names) and names[j + 1] == "format=yuv420p":
                 drop.add(j + 1)
-        out[i] = ",".join(n for j, n in enumerate(nodes) if j not in drop)
+        # Nodes carry their own separator, so plain concatenation preserves the graph;
+        # only a trailing one can be left dangling when the last node goes.
+        out[i] = re.sub(r"[,;]\s*$", "",
+                        "".join(n for j, n in enumerate(nodes) if j not in drop))
     return out
 
 
@@ -252,8 +269,8 @@ def target_from_filter(args):
         return None
     # Anchor to the scale node itself: scanning the whole -vf string lets any other
     # min(...) in the chain shift the indices and silently target the wrong resolution.
-    scale_node = next((n for n in split_filters(args[idx + 1])
-                        if re.match(r"scale\w*\s*(=|$)", n.strip())), None)
+    scale_node = next((n for n in (filter_name(x) for x in split_filters(args[idx + 1]))
+                        if re.match(r"scale\w*\s*(=|$)", n)), None)
     if scale_node is None:
         return None
     consts = [int(c) for c in MIN_CONST.findall(scale_node)]
@@ -273,7 +290,12 @@ def target_from_bitrate(cfg, args):
 
 
 def split_filters(vf):
-    """Split a filter chain on commas that separate nodes, not ones inside ()."""
+    """Split a filter graph into nodes on separators that are not inside ().
+
+    ";" separates graph segments the same way "," separates chain nodes, so both count.
+    Each node keeps the separator that terminated it, so a caller that drops one can
+    rejoin the rest without turning a graph into a chain.
+    """
     nodes, depth, cur = [], 0, []
     prev = ""
     for ch in vf:
@@ -281,7 +303,8 @@ def split_filters(vf):
             depth += 1
         elif ch == ")" and prev != "\\":
             depth -= 1
-        if ch == "," and depth == 0 and prev != "\\":
+        if ch in ",;" and depth == 0 and prev != "\\":
+            cur.append(ch)
             nodes.append("".join(cur))
             cur = []
         else:
@@ -289,7 +312,12 @@ def split_filters(vf):
         prev = ch
     if cur:
         nodes.append("".join(cur))
-    return [n for n in nodes if n.strip()]
+    return [n for n in nodes if n.strip(" ,;")]
+
+
+def filter_name(node):
+    """A node as its bare name and arguments: no separator, no pad labels."""
+    return FILTER_LABEL_RE.sub("", node.strip().strip(",;").strip()).strip()
 
 
 def build_chain(cfg, tw, th):
@@ -322,8 +350,8 @@ def rewrite_args(cfg, args, chain):
     if idx is not None:
         # Keep Jellyfin's own non-scaling filters (setparams colour tagging and
         # friends); only its scaling/hwframe nodes are ours to replace.
-        keep = [n for n in split_filters(out[idx + 1])
-                if not re.match(r"(scale|hwupload|hwdownload|hwmap|format)\w*\s*(=|$)", n.strip())]
+        keep = [n for n in (filter_name(x) for x in split_filters(out[idx + 1]))
+                if not re.match(r"(scale|hwupload|hwdownload|hwmap|format)\w*\s*(=|$)", n)]
         out[idx + 1] = ",".join(keep + [chain]) if keep else chain
     else:
         # No filter chain yet: attach one in the output-options section, which is
@@ -369,7 +397,7 @@ def main():
     if cfg.get("log_args"):
         log(cfg, "argv: %s" % " ".join(args))
 
-    if not cfg.get("enabled") or "-i" not in args:
+    if cfg.get("config_unreadable") or not cfg.get("enabled") or "-i" not in args:
         passthrough(args)
 
     # The Jellyfin plugin patches the transcode command itself when its Harmony
@@ -429,36 +457,74 @@ def main():
         log(cfg, "rewritten: %s" % " ".join(new_args))
     log(cfg, "upscale %dx%d -> %dx%d %s" % (sw, sh, scaled_w, th, src))
 
+    # Per-pid path under SLOT_DIR, not a fixed name in world-writable /tmp: a shared
+    # path lets concurrent transcodes stomp each other's log, and a symlink planted
+    # at a fixed path would let this process truncate whatever it points to. Opened
+    # before the child exists, because a failure here once the child is running would
+    # escape to the passthrough handler and exec a second ffmpeg onto the same output.
+    err_path = os.path.join(SLOT_DIR, "%d.err" % os.getpid())
+    try:
+        os.unlink(err_path)
+    except FileNotFoundError:
+        pass
+    try:
+        errfh = os.fdopen(
+            os.open(err_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600), "w")
+    except Exception as exc:
+        log(cfg, "cannot open %s, stderr copy disabled: %s" % (err_path, exc))
+        errfh = None
+
+    proc = None
+
+    def forward(signum, _frame):
+        # Jellyfin stops a transcode by killing the shim. Without this the ffmpeg child
+        # is orphaned and keeps writing segments and holding the GPU; the read loop and
+        # the wait() below are what reap it.
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.send_signal(signum)
+            except Exception:
+                pass
+
     rc = 1
+    tail = []
     try:
         _binary, new_args = pick_binary(cfg, new_args)
         proc = subprocess.Popen([_binary] + new_args, stderr=subprocess.PIPE, text=True)
-        tail = []
-        # Per-pid path under SLOT_DIR, not a fixed name in world-writable /tmp: a shared
-        # path lets concurrent transcodes stomp each other's log, and a symlink planted
-        # at a fixed path would let this process truncate whatever it points to.
-        err_path = os.path.join(SLOT_DIR, "%d.err" % os.getpid())
+        for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(_sig, forward)
         try:
-            os.unlink(err_path)
-        except FileNotFoundError:
-            pass
-        err_fd = os.open(err_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        errfh = os.fdopen(err_fd, "w")
-        for line in proc.stderr:
-            sys.stderr.write(line)
-            errfh.write(line)
-            tail = (tail + [line.rstrip()])[-6:]
-        errfh.close()
-        rc = proc.wait()
+            for line in proc.stderr:
+                sys.stderr.write(line)
+                if errfh is not None:
+                    errfh.write(line)
+                tail = (tail + [line.rstrip()])[-6:]
+            rc = proc.wait()
+        except BaseException as exc:
+            # A child is running, so passthrough() is off the table: it would exec a
+            # second ffmpeg onto the same output. Stop ours and report the failure.
+            log(cfg, "upscale aborted, killing ffmpeg: %s" % exc)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            rc = proc.wait()
         if rc != 0:
             log(cfg, "ffmpeg stderr: %s" % " | ".join(tail))
     finally:
+        if errfh is not None:
+            errfh.close()
         try:
             os.unlink(slot)
         except Exception:
             pass
 
-    if rc != 0:
+    if rc < 0:
+        # Killed on purpose, usually Jellyfin stopping the session. Retrying would put
+        # the transcode straight back, and sys.exit(-15) would report status 241.
+        log(cfg, "upscale killed by signal %d" % -rc)
+        sys.exit(128 - rc)
+    if rc > 0:
         log(cfg, "upscale exited rc=%d, retrying stock chain" % rc)
         passthrough(args)
     sys.exit(rc)

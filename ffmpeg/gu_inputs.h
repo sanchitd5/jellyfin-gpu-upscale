@@ -545,7 +545,11 @@ static void gu_depth_close(GUInputs *g)
         if (g->ort_env)     GU_ORT->ReleaseEnv(g->ort_env);
     }
     g->ort_sess = g->ort_opts = g->ort_meminfo = g->ort_env = NULL;
-    if (g->ort_lib) dlclose(g->ort_lib);
+    /* The handle is dropped and the image deliberately left mapped.  ONNX
+     * Runtime keeps worker threads, thread-local arenas and CUDA EP state alive
+     * past session release and registers static destructors, so unmapping it at
+     * filter teardown faults the whole ffmpeg process and takes the viewer's
+     * playback with it.  One leaked image per process is the cheap side. */
     g->ort_lib = NULL;
     g->ort_api = NULL;
     g->depth_ready = 0;
@@ -663,6 +667,9 @@ static int gu_depth_run(AVFilterContext *ctx, GUInputs *g, const AVFrame *in)
     char *in_name = NULL, *out_name = NULL;
     OrtAllocator *alloc = NULL;
     OrtValue *tin = NULL, *tout = NULL;
+    OrtTensorTypeAndShapeInfo *info = NULL;
+    ONNXTensorElementDataType etype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    size_t count = 0;
     OrtStatus *st;
     float *raw = NULL, lo = FLT_MAX, hi = -FLT_MAX;
     int x, y, ret = 0;
@@ -679,6 +686,25 @@ static int gu_depth_run(AVFilterContext *ctx, GUInputs *g, const AVFrame *in)
              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &tin))) goto fail;
     if ((st = GU_ORT->Run(g->ort_sess, NULL, in_names, (const OrtValue *const *)&tin, 1,
                           out_names, 1, &tout))) goto fail;
+
+    /* dmodel= is a user path, so the output geometry is not ours to assume: a
+     * model that is not 518x518 float32 would be read past its end here, which
+     * is a crash or a leak of whatever follows it, not a bad picture. */
+    if ((st = GU_ORT->GetTensorTypeAndShape(tout, &info))) goto fail;
+    st = GU_ORT->GetTensorElementType(info, &etype);
+    if (!st) st = GU_ORT->GetTensorShapeElementCount(info, &count);
+    GU_ORT->ReleaseTensorTypeAndShapeInfo(info);
+    info = NULL;
+    if (st) goto fail;
+    if (etype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+        count != (size_t)g->depth_in_w * g->depth_in_h) {
+        av_log(ctx, AV_LOG_WARNING,
+               "depth model returns %zu elements of type %d, expected %d float32 "
+               "values; flat depth this frame\n",
+               count, (int)etype, g->depth_in_w * g->depth_in_h);
+        goto flat;
+    }
+
     if ((st = GU_ORT->GetTensorMutableData(tout, (void **)&raw))) goto fail;
 
     for (x = 0; x < g->depth_in_w * g->depth_in_h; x++) {
@@ -706,6 +732,8 @@ fail:
     av_log(ctx, AV_LOG_WARNING, "depth inference failed (%s); flat depth this frame\n",
            st ? GU_ORT->GetErrorMessage(st) : "?");
     if (st) GU_ORT->ReleaseStatus(st);
+
+flat:
     for (x = 0; x < g->w * g->h; x++) g->depth[x] = 0.5f;
     ret = AVERROR_EXTERNAL;
 
