@@ -213,19 +213,17 @@ static av_cold int config_output(AVFilterLink *outlink)
     s->out_w = outlink->w;
     s->out_h = outlink->h;
 
-    if (!s->models_dir || !*s->models_dir) {
-        av_log(ctx, AV_LOG_ERROR,
-               "models= is required: point it at a directory holding the "
-               "nvvfxvideosuperres feature's TensorRT model files. See VSR.md - "
-               "this SDK download does not include them.\n");
-        return AVERROR(EINVAL);
-    }
-
     CHECK_NVCV(ctx, NvVFX_CreateEffect(NVVFX_FX_VIDEO_SUPER_RES, &s->effect));
     CHECK_NVCV(ctx, NvVFX_CudaStreamCreate(&s->stream));
     CHECK_NVCV(ctx, NvVFX_SetCudaStream(s->effect, NVVFX_CUDA_STREAM, s->stream));
     CHECK_NVCV(ctx, NvVFX_SetU32(s->effect, NVVFX_GPU, (unsigned)s->device_index));
-    CHECK_NVCV(ctx, NvVFX_SetString(s->effect, NVVFX_MODEL_DIRECTORY, s->models_dir));
+    /* models= is optional, not required: NVIDIA's own `nvidia-vfx` PyPI package
+     * (nvvfx._lib_loader, confirmed working against libnvidia-ngx-vsr.so.1.8.2)
+     * never calls NVVFX_MODEL_DIRECTORY at all - that library version bundles
+     * its model internally. Only set it when the operator supplies a directory,
+     * for whichever SDK/library combination still expects one (see VSR.md). */
+    if (s->models_dir && *s->models_dir)
+        CHECK_NVCV(ctx, NvVFX_SetString(s->effect, NVVFX_MODEL_DIRECTORY, s->models_dir));
     CHECK_NVCV(ctx, NvVFX_SetU32(s->effect, NVVFX_QUALITY_LEVEL, (unsigned)s->quality));
     CHECK_NVCV(ctx, NvVFX_SetU32(s->effect, NVVFX_IMAGE_ENCODING_MODE, NVVFX_IMAGE_ENCODING_RGB8));
 
@@ -263,7 +261,8 @@ static av_cold int config_output(AVFilterLink *outlink)
     s->loaded = 1;
 
     av_log(ctx, AV_LOG_VERBOSE, "Maxine VideoSuperRes %dx%d -> %dx%d quality=%d models=%s\n",
-           s->in_w, s->in_h, s->out_w, s->out_h, s->quality, s->models_dir);
+           s->in_w, s->in_h, s->out_w, s->out_h, s->quality,
+           (s->models_dir && *s->models_dir) ? s->models_dir : "(bundled)");
     return 0;
 }
 
@@ -375,7 +374,8 @@ static const AVOption vsr_options[] = {
         /* 21/23: Ampere+ only, not enforced here - NvVFX_Load fails cleanly on Turing. */
         { "streaming_medium",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 21 }, 0, 0, VF, .unit = "quality" },
         { "streaming_ultra",     NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 23 }, 0, 0, VF, .unit = "quality" },
-    { "models", "directory holding the nvvfxvideosuperres feature's model files (required, no default; see VSR.md)",
+    { "models", "directory holding the nvvfxvideosuperres feature's model files, only needed if "
+      "libnvidia-ngx-vsr.so does not bundle its own (no default; see VSR.md)",
       OFFSET(models_dir), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, VF },
     { "device", "CUDA device index (NVVFX_GPU)", OFFSET(device_index), AV_OPT_TYPE_INT,
       { .i64 = 0 }, 0, 64, VF },

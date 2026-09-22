@@ -54,22 +54,19 @@
 #               NGX_LIB    libnvsdk_ngx.a         same repo, lib/Linux_x86_64.  The DLSS runtime blob
 #                                                 is installed by hand under <prefix>/dlss; see
 #                                                 DLSS.md.
-#   WITH_VSR    VFXSDK_DIR nvVideoEffects.h,      NVIDIA Maxine VFX SDK Core package (NGC, gated
-#                          libVideoFX.so           behind an NVIDIA Developer Program / NGC login -
-#                                                  not fetchable by this script).  NVIDIA proprietary.
-#               VFXVSR_DIR nvVFXVideoSuperRes.h,  the nvvfxvideosuperres feature package, same NGC
-#                          libnvVFXVideoSuperRes.so gate.  Ships library + headers only - the
-#                                                  TensorRT model files this effect needs to actually
-#                                                  run are a SEPARATE NGC download this project does
-#                                                  not have yet.  See VSR.md; vsr will build and
-#                                                  register but is not confirmed to run.
-#               VFXSDK_DIR/lib also needs libcudart.so.12 and five libnpp*.so.12 files, which the
-#                                                  NGC SDK does NOT ship - CT114 has no CUDA toolkit
-#                                                  installed at all.  Fetched from NVIDIA's own public
-#                                                  PyPI wheels (nvidia-cuda-runtime-cu12, nvidia-npp-
-#                                                  cu12, nvidia-cudnn-cu12 for libcudnn.so.9), same
-#                                                  convention NEURAL.md documents for ORT's CUDA/cuDNN
-#                                                  libs.  See VSR.md for the exact commands.
+#   WITH_VSR    VFXSDK_DIR nvVideoEffects.h,      Headers only, from the NGC SDK Core package and the
+#               VFXVSR_DIR nvVFXVideoSuperRes.h,  nvvfxvideosuperres feature package (NGC, gated behind
+#                                                  an NVIDIA Developer Program login - not fetchable by
+#                                                  this script).  NVIDIA proprietary.
+#               VFXLIBS_DIR libVideoFX.so,        The actual runtime: a straight copy of the
+#                           libnvinfer.so.10, ...  `nvvfx/libs/` folder inside NVIDIA's own `nvidia-vfx`
+#                                                  PyPI wheel - fetchable with no NGC login at all
+#                                                  (`pip download --extra-index-url
+#                                                  https://pypi.nvidia.com/ nvidia-vfx`).  This is not
+#                                                  a shortcut: it is the confirmed-working combination,
+#                                                  including TensorRT (libnvinfer.so.10 and friends),
+#                                                  which CreateEffect silently requires and the NGC SDK
+#                                                  Core download never mentions.  See VSR.md.
 
 set -euo pipefail
 
@@ -103,11 +100,20 @@ FSR2_LIB="${FSR2_LIB:-/root/gameupscale/lib}"
 NGX_SDK="${NGX_SDK:-/root/gameupscale/dlss}"
 NGX_LIB="${NGX_LIB:-${NGX_SDK}/lib/Linux_x86_64}"
 NVOF_SDK="${NVOF_SDK:-/root/gameupscale/NVIDIAOpticalFlowSDK-nvof_2_0_bsd}"
-# The Core package's extracted VideoFX/ dir (contains include/ and lib/), and the nvvfxvideosuperres
-# feature package's own extracted dir (contains include/ and lib/) - see VSR.md for where these
-# NGC downloads come from and why they are not fetched here.
+# Headers only, from the NGC SDK Core package and the nvvfxvideosuperres feature package - see
+# VSR.md for where these downloads come from and why they are not fetched here.
 VFXSDK_DIR="${VFXSDK_DIR:-/root/gameupscale/vfx/VideoFX}"
 VFXVSR_DIR="${VFXVSR_DIR:-/root/gameupscale/vfx/nvvfxvideosuperres}"
+# The actual runtime .so's - libVideoFX.so, libnvVFXVideoSuperRes.so, libnvidia-ngx-vsr.so.1.8.2,
+# plus every one of THEIR OWN dependencies (NPP, cuDNN 9, and critically TensorRT: libnvinfer.so.10,
+# libnvinfer_plugin.so.10, libnvonnxparser.so.10 - CreateEffect returns "not yet implemented"
+# without TensorRT present, which the NGC SDK Core download does not mention needing at all). This
+# whole directory is a straight copy of the `nvvfx/libs/` folder inside NVIDIA's own `nvidia-vfx`
+# PyPI wheel (`pip download --no-deps --extra-index-url https://pypi.nvidia.com/ nvidia-vfx`, no
+# NGC login - see VSR.md), confirmed self-contained (`ldd` against nothing but itself resolves
+# clean) and confirmed to get CreateEffect+Load further than the NGC SDK Core + hand-fetched
+# CUDA/NPP/cuDNN combination this project assembled first.
+VFXLIBS_DIR="${VFXLIBS_DIR:-/root/gameupscale/vfx/pywheel-libs}"
 OIDN_VER="${OIDN_VER:-2.5.1}"
 LIBPLACEBO_TAG="${LIBPLACEBO_TAG:-v7.351.0}"
 # Pinned, like every other source build here. 2026.4 knows GL_EXT_expect_assume; the distro 2023.8
@@ -196,15 +202,16 @@ if [[ "$WITH_VSR" == "1" ]]; then
         || die "WITH_VSR=1 needs WITH_OPTIX=1 WITH_ORT=1 WITH_FSR2=1 WITH_DLSS=1: patch 0005 applies on top of 0001-0004"
     [[ -f "$VFXSDK_DIR/include/nvVideoEffects.h" ]] \
         || die "WITH_VSR=1: no nvVideoEffects.h under VFXSDK_DIR=$VFXSDK_DIR/include (see VSR.md)"
-    [[ -f "$VFXSDK_DIR/lib/libVideoFX.so.1.3.0" ]] \
-        || die "WITH_VSR=1: no libVideoFX.so.1.3.0 under VFXSDK_DIR=$VFXSDK_DIR/lib (see VSR.md)"
     [[ -f "$VFXVSR_DIR/include/nvVFXVideoSuperRes.h" ]] \
         || die "WITH_VSR=1: no nvVFXVideoSuperRes.h under VFXVSR_DIR=$VFXVSR_DIR/include (see VSR.md)"
+    [[ -f "$VFXLIBS_DIR/libVideoFX.so" ]] \
+        || die "WITH_VSR=1: no libVideoFX.so under VFXLIBS_DIR=$VFXLIBS_DIR (see VSR.md)"
+    [[ -f "$VFXLIBS_DIR/libnvinfer.so.10" ]] \
+        || die "WITH_VSR=1: no libnvinfer.so.10 (TensorRT) under VFXLIBS_DIR=$VFXLIBS_DIR - CreateEffect" \
+               "returns \"not yet implemented\" without it, confirmed the hard way (see VSR.md)"
     command -v patchelf >/dev/null || die "WITH_VSR=1: patchelf not found (apt install patchelf) - needed to fix libVideoFX.so's own rpath, see VSR.md"
-    say "note: WITH_VSR builds and registers the filter but cannot be confirmed to RUN - the" \
-        "nvvfxvideosuperres feature's TensorRT model files are a separate NGC download this project" \
-        "does not have yet (VSR.md). Expect NvVFX_Load to fail until a models= directory with real" \
-        "model files is supplied at runtime."
+    say "note: WITH_VSR builds and registers the filter. CreateEffect+Load are now confirmed to work" \
+        "against VFXLIBS_DIR's exact library set (VSR.md) - this build stages that same set."
 fi
 
 say "installing build dependencies"
@@ -357,7 +364,7 @@ if [[ "$WITH_VSR" == "1" ]]; then
     # own shared libraries. rpath, not -L, decides what the installed binary loads at runtime, same
     # reasoning as ORT above: the build tree may not survive this script.
     export CFLAGS="-I${VFXSDK_DIR}/include -I${VFXVSR_DIR}/include ${CFLAGS:-}"
-    export LDFLAGS="-L${VFXSDK_DIR}/lib -Wl,-rpath,${PREFIX}/vfx/lib ${LDFLAGS:-}"
+    export LDFLAGS="-L${VFXLIBS_DIR} -Wl,-rpath,${PREFIX}/vfx/lib ${LDFLAGS:-}"
     VSR_FLAGS=(--enable-libvfxsdk)
 fi
 
@@ -405,28 +412,21 @@ if [[ "$WITH_DLSS" == "1" && ! -d "$PREFIX/dlss" ]]; then
 fi
 
 if [[ "$WITH_VSR" == "1" ]]; then
-    # Stage the core SDK's shared libraries where the rpath above points, and the feature package
-    # in the layout install_feature.sh's own README documents ($VFXSDK_PATH/features/<name>) - the
-    # best-documented convention available, unverified beyond that since NvVFX_Load has not been
-    # exercised against real model files yet (VSR.md).
-    mkdir -p "$PREFIX/vfx/lib" "$PREFIX/vfx/features/nvvfxvideosuperres"
-    cp -a "$VFXSDK_DIR"/lib/*.so* "$PREFIX/vfx/lib/"
-    cp -a "$VFXVSR_DIR"/lib/*.so* "$PREFIX/vfx/features/nvvfxvideosuperres/"
-    cp -a "$VFXVSR_DIR/include" "$PREFIX/vfx/features/nvvfxvideosuperres/"
+    # Stage VFXLIBS_DIR wholesale where the rpath above points. No separate features/<name>
+    # subdirectory is needed - confirmed directly: CreateEffect finds libnvVFXVideoSuperRes.so and
+    # libnvidia-ngx-vsr.so.1.8.2 from plain LD_LIBRARY_PATH/rpath resolution alone, sitting flat
+    # beside libVideoFX.so, same as every other shared library here (VSR.md).
+    mkdir -p "$PREFIX/vfx/lib"
+    cp -a "$VFXLIBS_DIR"/. "$PREFIX/vfx/lib/"
     # ffmpeg's own rpath (set above) is not transitive: it resolves ffmpeg's direct NEEDED entries
-    # but not libVideoFX.so's own NEEDED entries (the CUDA/NPP/cuDNN libs staged beside it), the
-    # same RUNPATH-non-transitivity NEURAL.md already documents and fixes for ORT's CUDA provider.
+    # but not libVideoFX.so's own NEEDED entries (NPP, cuDNN, TensorRT, staged beside it), the same
+    # RUNPATH-non-transitivity NEURAL.md already documents and fixes for ORT's CUDA provider.
     # Without this, ffmpeg fails to start at all with "error while loading shared libraries" - hit
     # twice building this filter before this fix existed (VSR.md).
-    for lib in "$PREFIX/vfx/lib"/libVideoFX.so.* "$PREFIX/vfx/lib"/libVideoFXLocal.so.* \
-               "$PREFIX/vfx/lib"/libNVCVImage.so.* \
-               "$PREFIX/vfx/features/nvvfxvideosuperres"/libnvVFXVideoSuperRes.so; do
+    for lib in "$PREFIX/vfx/lib"/libVideoFX.so "$PREFIX/vfx/lib"/libVideoFXLocal.so \
+               "$PREFIX/vfx/lib"/libNVCVImage.so "$PREFIX/vfx/lib"/libnvVFXVideoSuperRes.so; do
         [[ -e "$lib" && ! -L "$lib" ]] && patchelf --set-rpath '$ORIGIN' "$lib"
     done
-    if [[ ! -d "$PREFIX/vfx/models" ]] || [[ -z "$(ls -A "$PREFIX/vfx/models" 2>/dev/null)" ]]; then
-        say "note: $PREFIX/vfx/models is empty - vsr will build and register but NvVFX_Load will" \
-            "fail without a models= directory holding real TensorRT model files (VSR.md)"
-    fi
 fi
 
 say "verifying"
