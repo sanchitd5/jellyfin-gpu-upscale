@@ -81,6 +81,67 @@ TensorRT engine files, and NGC has none to give it right now. Expect
 `NvVFX_Load` to fail with a "model not found" class of error until NVIDIA publishes them - there is
 nothing left to fetch or configure on this project's side.
 
+## Update (2026-09-22, later the same day): build now succeeds, filter registers, but a second wall
+
+`ffmpeg/vf_vsr.c` now builds and runs against the real SDK end to end (see "Two build-time bugs
+fixed" below). With a real `models=` path supplied, `NvVFX_CreateEffect(NVVFX_FX_VIDEO_SUPER_RES,
+...)` itself fails: `The requested feature is not yet implemented (-2)`. This happens **before**
+model loading, `NvVFX_Load`, or anything image-related - the effect handle is never created. Ruled
+out by direct testing, not assumed:
+
+- **Not a path/discovery problem.** `$PREFIX/vfx/features/nvvfxvideosuperres/` holds exactly the
+  layout `install_feature.sh` itself produces (flat `libnvVFXVideoSuperRes.so` and
+  `libnvidia-ngx-vsr.so.1.8.3` beside the feature's `include/`), staged next to `libVideoFX.so` the
+  same way the SDK's own installer lays it out under `/usr/local/VideoFX/features/`. Symlinking
+  `/usr/local/VideoFX` at the real SDK's canonical path and re-testing changed nothing.
+- **Not a missing-dependency problem.** Every `.so` in the chain resolves clean (`ldd` shows zero
+  "not found" after the rpath fix below).
+- **Not the pixel-format design** - `vf_vsr.c` already converts `AV_PIX_FMT_GBRPF32LE` to
+  `NVCV_RGBA`/`NVCV_U8` via `NvCVImage_Transfer` before touching the effect, matching the bundled
+  SDK doc's own filter spec (interleaved 8-bit BGRA/RGBA) exactly. Checked against the doc actually
+  shipped inside the SDK Core tarball
+  (`VideoFX/share/docs/videoFX-user-guide/Filters/VideoSuperResolution.html`, v1.3.0.0,
+  "Last updated on Mar 06, 2026") rather than the public website, which turned out to describe an
+  older mode ladder (`STREAMING_MEDIUM`/`STREAMING_ULTRA` don't appear in the bundled doc at all -
+  the real modes are `VSR_Bicubic`..`VSR_Ultra` plus separate `Denoise_*`/`Deblur_*`/
+  `HighBitrate_*` modes 8-19).
+
+**What's left unproven, stated as a hypothesis, not a fact:** `install_feature.sh`'s own
+`GPU_MAP` - the table it uses to pick which TensorRT models to fetch - lists only data-center parts
+(`a100 a30 a2 a10 a16 a40 t4 l4 l40 h100 b100 b200 b40`). No consumer GeForce/RTX card appears
+anywhere in it. It's plausible `NvVFX_CreateEffect` gates VideoSuperRes to recognised data-center
+GPUs regardless of raw compute capability matching (CT114's RTX 3090 auto-detects as SM86, same
+number as the datacenter A40/A10/A16, but a different, ungated product line) - this would explain
+"not yet implemented" independent of the missing-models problem. Not confirmed: would need testing
+on an actual A-series/L-series/H100 box, which this project doesn't have. Do not treat this as
+settled; it's the most consistent explanation of what was actually observed, nothing more.
+
+So the filter now has **two independent, stacked blockers**, either of which alone would stop it
+running: no TensorRT models published on NGC for any GPU (confirmed), and a `CreateEffect`-level
+rejection whose cause (data-center gating, a bug in this SDK build, something else) is not yet
+identified. Continuing further needs either an NVIDIA support answer or hardware this project does
+not have.
+
+## Two build-time bugs fixed getting this far
+
+1. **`libVideoFX.so`'s own CUDA/NPP/cuDNN dependencies were never resolvable at runtime.**
+   `ffmpeg`'s own rpath is not transitive: it resolves ffmpeg's direct `NEEDED` entries but not
+   `libVideoFX.so`'s own `NEEDED` entries (the CUDA/NPP/cuDNN libraries staged beside it) - the same
+   RUNPATH-non-transitivity gotcha `NEURAL.md` already documents and fixes for ORT's CUDA provider.
+   Without this the freshly built `ffmpeg` binary failed to even start:
+   `error while loading shared libraries: libnppial.so.12: cannot open shared object file`. Fixed by
+   `patchelf --set-rpath '$ORIGIN'` on every staged VideoFX `.so`, now automatic in
+   `build-ffmpeg.sh`. CT114 also has no CUDA toolkit installed at all, so `libcudart.so.12` and five
+   `libnpp*.so.12` files, plus cuDNN 9's `libcudnn*.so.9`, came from NVIDIA's own public PyPI wheels
+   (`nvidia-cuda-runtime-cu12`, `nvidia-npp-cu12`, `nvidia-cudnn-cu12`) - no login, same convention
+   `NEURAL.md` documents for ORT's own CUDA/cuDNN libs.
+2. **`proxmox-build.sh`'s own restore-the-previous-binary safety net never ran.** Under `set -e`, a
+   `die` inside `build-ffmpeg.sh`'s internal filter check unwound straight past the caller's own
+   restore logic and left a broken binary installed and live - hit twice on this exact task before a
+   `|| true` guard was added. **This broke the box Jellyfin actively uses, twice, mid-session** -
+   found and fixed by restoring `.prev` by hand both times, then closing the actual bug rather than
+   just working around it once.
+
 ## Path forward, none of it actionable right now
 
 - **Wait for NVIDIA to publish VideoSuperRes models to NGC.** No ETA available; this project has no
@@ -112,6 +173,8 @@ nothing left to fetch or configure on this project's side.
 
 ## Nothing measured
 
-No fps number - can't run the filter without model files. `ffmpeg/vf_vsr.c` exists, builds, and
-registers; that's the entire deliverable available right now. See `vfx-sdk-vsr-task.md` for the
-original task brief.
+No fps number - `NvVFX_CreateEffect` itself fails before a single frame could be processed (see
+above), independent of the missing models. `ffmpeg/vf_vsr.c` exists, builds, links, and registers
+correctly in `ffmpeg -filters`; the five pre-existing filters (`oidn`, `optix`, `ort`, `fsr2`,
+`dlss`) were smoke-tested against real output after this work and are unaffected. See
+`vfx-sdk-vsr-task.md` for the original task brief.
