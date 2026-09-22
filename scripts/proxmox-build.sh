@@ -102,12 +102,17 @@ if [ "$WITH_FFMPEG" = "1" ]; then
     # them. Asking for one and then demanding five is how this script spent a build producing a
     # binary it then rejected. build-ffmpeg.sh fails in preflight, in seconds, when an SDK is not
     # where it expects, and each WITH_* and SDK path here can be overridden from the environment.
+    # WITH_VSR is NOT defaulted to 1 like the other five: it is new, unverified beyond "builds and
+    # registers" (the SDK's own TensorRT model files are a separate NGC download this project does
+    # not have - see VSR.md), so it stays opt-in rather than mandatory-by-default. Pass WITH_VSR=1
+    # explicitly to include it.
     PREFIX="$FFMPEG_PREFIX" \
         WITH_OIDN="${WITH_OIDN:-1}" \
         WITH_OPTIX="${WITH_OPTIX:-1}" \
         WITH_ORT="${WITH_ORT:-1}" \
         WITH_FSR2="${WITH_FSR2:-1}" \
         WITH_DLSS="${WITH_DLSS:-1}" \
+        WITH_VSR="${WITH_VSR:-0}" \
         OPTIX_SDK="${OPTIX_SDK:-/root/gameupscale/optix-dev-8.1.0}" \
         ./scripts/build-ffmpeg.sh
 
@@ -117,8 +122,10 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         exit 1
     }
 
+    required_filters="oidn optix ort fsr2 dlss"
+    [ "${WITH_VSR:-0}" = "1" ] && required_filters="$required_filters vsr"
     missing=""
-    for f in oidn optix ort fsr2 dlss; do
+    for f in $required_filters; do
         "$PATCHED_FFMPEG" -hide_banner -filters 2>/dev/null | grep -qE "^ *[TSC.]* *$f " || missing="$missing $f"
     done
     if [ -n "$missing" ]; then
@@ -131,7 +138,7 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         fi
         exit 1
     fi
-    echo "    all five custom filters present"
+    echo "    all five custom filters present$([ "${WITH_VSR:-0}" = "1" ] && echo ", plus vsr")"
     # The snapshot STAYS. Deleting it on success left no way back from the case this check cannot
     # see: a binary that builds, installs and lists all five filters, and then fails against the
     # driver on the first frame. OptiX, NGX and NVOFA all negotiate at runtime, so linking proves

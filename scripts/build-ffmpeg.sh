@@ -28,8 +28,13 @@
 #        sudo -E ./scripts/build-ffmpeg.sh             # all five, SDK paths defaulted below
 #   PREFIX=/usr/lib/my-ffmpeg sudo -E ./scripts/build-ffmpeg.sh
 #
-# The build patches stack in order (0001 oidn, 0002 optix, 0003 ort, 0004 fsr2+dlss), each patching
-# context the previous one added, so the later options require the earlier ones.
+# The build patches stack in order (0001 oidn, 0002 optix, 0003 ort, 0004 fsr2+dlss, 0005 vsr), each
+# patching context the previous one added, so the later options require the earlier ones. vf_vsr.c
+# itself has no CODE dependency on optix/ort/fsr2/dlss (it is a standalone new file, pure CUDA, no
+# shared plumbing) - but its patch (0005) was written against the tree state with 0001-0004 already
+# applied, because that is what this project's own production build (proxmox-build.sh) always
+# produces: every WITH_* defaults to 1 there. WITH_VSR=1 therefore requires the same four SDKs
+# WITH_DLSS already requires, purely as a build-mechanics constraint, not a functional one.
 #
 # WHAT YOU MUST OBTAIN YOURSELF (nothing proprietary is vendored in this repo, and nothing here
 # downloads any of it)
@@ -49,6 +54,15 @@
 #               NGX_LIB    libnvsdk_ngx.a         same repo, lib/Linux_x86_64.  The DLSS runtime blob
 #                                                 is installed by hand under <prefix>/dlss; see
 #                                                 DLSS.md.
+#   WITH_VSR    VFXSDK_DIR nvVideoEffects.h,      NVIDIA Maxine VFX SDK Core package (NGC, gated
+#                          libVideoFX.so           behind an NVIDIA Developer Program / NGC login -
+#                                                  not fetchable by this script).  NVIDIA proprietary.
+#               VFXVSR_DIR nvVFXVideoSuperRes.h,  the nvvfxvideosuperres feature package, same NGC
+#                          libnvVFXVideoSuperRes.so gate.  Ships library + headers only - the
+#                                                  TensorRT model files this effect needs to actually
+#                                                  run are a SEPARATE NGC download this project does
+#                                                  not have yet.  See VSR.md; vsr will build and
+#                                                  register but is not confirmed to run.
 
 set -euo pipefail
 
@@ -60,6 +74,7 @@ WITH_OPTIX="${WITH_OPTIX:-0}"
 WITH_ORT="${WITH_ORT:-0}"
 WITH_FSR2="${WITH_FSR2:-0}"
 WITH_DLSS="${WITH_DLSS:-0}"
+WITH_VSR="${WITH_VSR:-0}"
 
 # Defaults are where these SDKs were unpacked on the build box. Nothing fetches them; a wrong path
 # fails in preflight naming the variable rather than 20 minutes into a compile.
@@ -81,6 +96,11 @@ FSR2_LIB="${FSR2_LIB:-/root/gameupscale/lib}"
 NGX_SDK="${NGX_SDK:-/root/gameupscale/dlss}"
 NGX_LIB="${NGX_LIB:-${NGX_SDK}/lib/Linux_x86_64}"
 NVOF_SDK="${NVOF_SDK:-/root/gameupscale/NVIDIAOpticalFlowSDK-nvof_2_0_bsd}"
+# The Core package's extracted VideoFX/ dir (contains include/ and lib/), and the nvvfxvideosuperres
+# feature package's own extracted dir (contains include/ and lib/) - see VSR.md for where these
+# NGC downloads come from and why they are not fetched here.
+VFXSDK_DIR="${VFXSDK_DIR:-/root/gameupscale/vfx/VideoFX}"
+VFXVSR_DIR="${VFXVSR_DIR:-/root/gameupscale/vfx/nvvfxvideosuperres}"
 OIDN_VER="${OIDN_VER:-2.5.1}"
 LIBPLACEBO_TAG="${LIBPLACEBO_TAG:-v7.351.0}"
 # Pinned, like every other source build here. 2026.4 knows GL_EXT_expect_assume; the distro 2023.8
@@ -159,6 +179,24 @@ if [[ "$WITH_DLSS" == "1" ]]; then
         || die "WITH_DLSS=1: no nvsdk_ngx_vk.h under NGX_SDK=$NGX_SDK/include (see DLSS.md)"
     [[ -f "$NGX_LIB/libnvsdk_ngx.a" ]] \
         || die "WITH_DLSS=1: no libnvsdk_ngx.a under NGX_LIB=$NGX_LIB (see DLSS.md)"
+fi
+
+# 0005's patch context assumes 0001-0004 all applied (see the note above this script's header) -
+# enforced here for the same reason 0004's own chain is: failing in seconds beats failing after the
+# SDKs are already staged and the build is 20 minutes in.
+if [[ "$WITH_VSR" == "1" ]]; then
+    [[ "$WITH_OPTIX" == "1" && "$WITH_ORT" == "1" && "$WITH_FSR2" == "1" && "$WITH_DLSS" == "1" ]] \
+        || die "WITH_VSR=1 needs WITH_OPTIX=1 WITH_ORT=1 WITH_FSR2=1 WITH_DLSS=1: patch 0005 applies on top of 0001-0004"
+    [[ -f "$VFXSDK_DIR/include/nvVideoEffects.h" ]] \
+        || die "WITH_VSR=1: no nvVideoEffects.h under VFXSDK_DIR=$VFXSDK_DIR/include (see VSR.md)"
+    [[ -f "$VFXSDK_DIR/lib/libVideoFX.so.1.3.0" ]] \
+        || die "WITH_VSR=1: no libVideoFX.so.1.3.0 under VFXSDK_DIR=$VFXSDK_DIR/lib (see VSR.md)"
+    [[ -f "$VFXVSR_DIR/include/nvVFXVideoSuperRes.h" ]] \
+        || die "WITH_VSR=1: no nvVFXVideoSuperRes.h under VFXVSR_DIR=$VFXVSR_DIR/include (see VSR.md)"
+    say "note: WITH_VSR builds and registers the filter but cannot be confirmed to RUN - the" \
+        "nvvfxvideosuperres feature's TensorRT model files are a separate NGC download this project" \
+        "does not have yet (VSR.md). Expect NvVFX_Load to fail until a models= directory with real" \
+        "model files is supplied at runtime."
 fi
 
 say "installing build dependencies"
@@ -303,6 +341,18 @@ if [[ "$WITH_FSR2" == "1" || "$WITH_DLSS" == "1" ]]; then
     fi
 fi
 
+VSR_FLAGS=()
+if [[ "$WITH_VSR" == "1" ]]; then
+    cp "$HERE/ffmpeg/vf_vsr.c" libavfilter/
+    patch -p1 < "$HERE/ffmpeg/0005-add-vsr-filter-to-build.patch"
+    # Pure CUDA, no Vulkan/ffnvcodec involvement (see the file's own header comment) - just the SDK's
+    # own shared libraries. rpath, not -L, decides what the installed binary loads at runtime, same
+    # reasoning as ORT above: the build tree may not survive this script.
+    export CFLAGS="-I${VFXSDK_DIR}/include -I${VFXVSR_DIR}/include ${CFLAGS:-}"
+    export LDFLAGS="-L${VFXSDK_DIR}/lib -Wl,-rpath,${PREFIX}/vfx/lib ${LDFLAGS:-}"
+    VSR_FLAGS=(--enable-libvfxsdk)
+fi
+
 say "configure"
 PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}" ./configure \
     --prefix="$PREFIX" \
@@ -310,7 +360,7 @@ PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
     --enable-gpl --enable-version3 \
     --enable-vulkan --enable-libplacebo --enable-libshaderc --enable-libx264 \
     --enable-ffnvcodec --enable-cuda --enable-cuvid --enable-nvdec --enable-nvenc \
-    "${OIDN_FLAGS[@]}" "${OPTIX_FLAGS[@]}" "${ORT_FLAGS[@]}" "${GAME_FLAGS[@]}" \
+    "${OIDN_FLAGS[@]}" "${OPTIX_FLAGS[@]}" "${ORT_FLAGS[@]}" "${GAME_FLAGS[@]}" "${VSR_FLAGS[@]}" \
     --extra-libs="-lstdc++"
 
 say "make -j$(nproc)"
@@ -346,6 +396,21 @@ if [[ "$WITH_DLSS" == "1" && ! -d "$PREFIX/dlss" ]]; then
     say "note: $PREFIX/dlss is missing, so the dlss and dlaa levels will not be offered (DLSS.md)"
 fi
 
+if [[ "$WITH_VSR" == "1" ]]; then
+    # Stage the core SDK's shared libraries where the rpath above points, and the feature package
+    # in the layout install_feature.sh's own README documents ($VFXSDK_PATH/features/<name>) - the
+    # best-documented convention available, unverified beyond that since NvVFX_Load has not been
+    # exercised against real model files yet (VSR.md).
+    mkdir -p "$PREFIX/vfx/lib" "$PREFIX/vfx/features/nvvfxvideosuperres"
+    cp -a "$VFXSDK_DIR"/lib/*.so* "$PREFIX/vfx/lib/"
+    cp -a "$VFXVSR_DIR"/lib/*.so* "$PREFIX/vfx/features/nvvfxvideosuperres/"
+    cp -a "$VFXVSR_DIR/include" "$PREFIX/vfx/features/nvvfxvideosuperres/"
+    if [[ ! -d "$PREFIX/vfx/models" ]] || [[ -z "$(ls -A "$PREFIX/vfx/models" 2>/dev/null)" ]]; then
+        say "note: $PREFIX/vfx/models is empty - vsr will build and register but NvVFX_Load will" \
+            "fail without a models= directory holding real TensorRT model files (VSR.md)"
+    fi
+fi
+
 say "verifying"
 "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\boidn\b" \
     && echo "  oidn: present" || die "oidn filter missing from the build"
@@ -364,6 +429,11 @@ fi
 if [[ "$WITH_DLSS" == "1" ]]; then
     "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bdlss\b" \
         && echo "  dlss: present" || die "dlss filter missing from the build"
+fi
+if [[ "$WITH_VSR" == "1" ]]; then
+    "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bvsr\b" \
+        && echo "  vsr: present (registered - NOT confirmed to run, see VSR.md)" \
+        || die "vsr filter missing from the build"
 fi
 
 cat <<EOF

@@ -1,0 +1,49 @@
+--- a/configure
++++ b/configure
+@@ -2075,6 +2075,7 @@
+     libonnxruntime
+     libffxfsr2
+     libngx
++    libvfxsdk
+     libopenimagedenoise
+     libplacebo
+     libpulse
+@@ -4162,6 +4163,7 @@
+ optix_filter_deps="libnvoptix ffnvcodec"
+ fsr2_filter_deps="libffxfsr2 ffnvcodec vulkan"
+ dlss_filter_deps="libngx ffnvcodec vulkan"
++vsr_filter_deps="libvfxsdk"
+ lv2_filter_deps="lv2"
+ mcdeint_filter_deps="avcodec gpl"
+ metadata_filter_deps="avformat"
+@@ -7382,6 +7384,10 @@
+ enabled libngx && { check_headers nvsdk_ngx_vk.h || \
+     die "ERROR: nvsdk_ngx_vk.h not found (see DLSS.md; the NVIDIA DLSS SDK is not bundled)"; } && \
+     add_extralibs -lnvsdk_ngx -lvulkan -lstdc++ -ldl
++# NVIDIA Maxine VFX SDK.  Headers, libVideoFX/libNVCVImage and the VideoSuperRes feature's
++# TensorRT model files are NVIDIA proprietary and are NOT bundled with this repository.
++# See VSR.md - model files in particular are a separate NGC download, not shipped here.
++enabled libvfxsdk && require libvfxsdk nvVideoEffects.h NvVFX_CreateEffect -lVideoFX -lNVCVImage -lstdc++ -ldl
+ enabled libplacebo        && require_pkg_config libplacebo "libplacebo >= 5.229.0" libplacebo/vulkan.h pl_vulkan_create
+ enabled libpulse          && require_pkg_config libpulse libpulse pulse/pulseaudio.h pa_context_new
+ enabled libqrencode       && require_pkg_config libqrencode libqrencode qrencode.h QRcode_encodeString
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -421,6 +421,7 @@
+ OBJS-$(CONFIG_OPTIX_FILTER)                  += vf_optix.o
+ OBJS-$(CONFIG_FSR2_FILTER)                   += vf_fsr2.o
+ OBJS-$(CONFIG_DLSS_FILTER)                   += vf_dlss.o
++OBJS-$(CONFIG_VSR_FILTER)                    += vf_vsr.o
+ OBJS-$(CONFIG_OSCILLOSCOPE_FILTER)           += vf_datascope.o
+ OBJS-$(CONFIG_OVERLAY_FILTER)                += vf_overlay.o framesync.o
+ OBJS-$(CONFIG_OVERLAY_CUDA_FILTER)           += vf_overlay_cuda.o framesync.o vf_overlay_cuda.ptx.o \
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -395,6 +395,7 @@
+ extern const FFFilter ff_vf_ort;
+ extern const FFFilter ff_vf_fsr2;
+ extern const FFFilter ff_vf_dlss;
++extern const FFFilter ff_vf_vsr;
+ extern const FFFilter ff_vf_oscilloscope;
+ extern const FFFilter ff_vf_ocio;
+ extern const FFFilter ff_vf_overlay;
