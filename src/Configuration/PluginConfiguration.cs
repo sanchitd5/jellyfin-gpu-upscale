@@ -55,7 +55,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// <summary>
         /// Neural super-resolution used when a session does not name one: off, realesr-anime-x2,
         /// realesr-anime-x4, realesr-general-x4. Advanced and off by default - every one of them
-        /// is far below realtime on this hardware.
+        /// is far below realtime on this hardware. A fifth level, vsr (NVIDIA Maxine Video Super
+        /// Resolution), exists in the plumbing but is withheld by ShaderLibrary.VsrOffered until
+        /// a hang in NvVFX_Load is fixed - see VSR.md. Not selectable by naming it here.
         /// </summary>
         public string NeuralLevel { get; set; } = "off";
 

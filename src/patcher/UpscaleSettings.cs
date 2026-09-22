@@ -148,6 +148,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// Off by default and it should stay off: measured at 24, 15 and 10 fps respectively on a
         /// 540p source at a 1080p target, against 265 fps with it off. None of them reaches
         /// realtime for one session. It is offered, not recommended.
+        ///
+        /// vsr (NVIDIA Maxine Video Super Resolution) shares this axis's plumbing but is not a
+        /// selectable value yet - ShaderLibrary.VsrOffered gates it off pending a fix to a
+        /// NvVFX_Load hang. See VSR.md.
         /// </summary>
         public string NeuralLevel { get; set; } = "off";
 

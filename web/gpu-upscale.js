@@ -143,13 +143,21 @@
             // 265 fps with this off: x2 24 fps (0.56x realtime), anime x4 15 fps (0.34x), general
             // x4 10 fps (0.24x). NONE of them reaches realtime for one session, so every entry
             // says so in its own name. Not a ladder rung and never chosen for anyone.
+            //
+            // 'vsr' (NVIDIA Maxine Video Super Resolution) is listed here ready to go, but the
+            // server's probe never actually reports it (ShaderLibrary.VsrOffered is false), so
+            // serverLevels()'s intersection at axisControls() always filters this entry back out -
+            // it never reaches a real viewer. NvVFX_Load hangs indefinitely rather than returning;
+            // see VSR.md. Do not remove the server-side gate to make this entry "work" - that would
+            // let a real session hang forever instead of degrading.
             key: 'neural', label: 'Neural super-resolution', fallback: 'off', group: 'Detail',
             probeKey: 'Neural', costKey: 'neural',
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },
                 { id: 'realesr-anime-x4', name: 'Real-ESRGAN x4 anime (0.34x realtime - very slow)' },
-                { id: 'realesr-general-x4', name: 'Real-ESRGAN x4 general (0.24x realtime - slowest)' }
+                { id: 'realesr-general-x4', name: 'Real-ESRGAN x4 general (0.24x realtime - slowest)' },
+                { id: 'vsr', name: 'NVIDIA Maxine Video Super Resolution (not yet working - see VSR.md)' }
             ]
         },
         {

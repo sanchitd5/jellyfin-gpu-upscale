@@ -592,6 +592,20 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             { "off", "realesr-anime-x2", "realesr-anime-x4", "realesr-general-x4" };
 
         /// <summary>
+        /// NVIDIA Maxine Video Super Resolution - NOT YET OFFERED. Present in the neural axis's
+        /// plumbing (this file, UpscaleEngine, the web client's CONTROLS entry) so the feature is
+        /// ready to switch on, but AvailableNeuralLevels() withholds it from the probe until this
+        /// flips to true. Reason: NvVFX_Load hangs indefinitely rather than returning or failing -
+        /// confirmed with a hard 180-second timeout, not merely a slow first-time TensorRT engine
+        /// build - so offering it today would let a viewer's session hang forever instead of
+        /// degrading. See VSR.md for the full investigation. Flip this only after that is fixed
+        /// and re-verified with a real smoke test producing a real frame.
+        /// </summary>
+        private const bool VsrOffered = false;
+
+        private const string VsrLevel = "vsr";
+
+        /// <summary>
         /// The factor each weight was trained at. libplacebo scales whatever the network produces
         /// to the size the session asked for, so a x4 weight at a 2x target computes four times the
         /// pixels and half of them are thrown away. At 15 and 10 fps that discarded half is most of
@@ -847,7 +861,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return Path.Combine(NeuralModelDirectoryFor(cfg), file);
         }
 
-        public static bool IsNeuralLevel(string level) => level != null && _neuralModels.ContainsKey(level.Trim());
+        public static bool IsNeuralLevel(string level) =>
+            level != null
+            && (_neuralModels.ContainsKey(level.Trim())
+                || level.Trim().Equals(VsrLevel, StringComparison.OrdinalIgnoreCase));
 
         public static bool IsGameLevel(string level) =>
             level != null && _gameFilters.ContainsKey(level.Trim());
@@ -1141,6 +1158,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 }
             }
 
+            // No weight file to check for this one - it is native to the patched binary, same as
+            // oidn/optix under denoise. Gated on VsrOffered instead: see that constant's own
+            // comment for why it stays false.
+            if (VsrOffered)
+            {
+                list.Add(VsrLevel);
+            }
+
             return list;
         }
 
@@ -1220,6 +1245,25 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             string level, int sourceHeight, int outputHeight, out string levelUsed, UpscaleSettings cfg = null)
         {
             levelUsed = "off";
+
+            // No weight file, no ratio-based family substitution - vsr takes a fixed quality enum,
+            // not a scale factor. Gated on VsrOffered (see that constant): today this always
+            // returns null, identically to "off", even if a hand-crafted request asks for it by
+            // name - IsNeuralLevel("vsr") is true so it is not rejected outright, but nothing runs.
+            if (level != null && level.Trim().Equals(VsrLevel, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!VsrOffered)
+                {
+                    return null;
+                }
+
+                levelUsed = VsrLevel;
+                // Quality 3 = VSR_High in the SDK's real enum (VSR_Bicubic=0 .. VSR_Ultra=4) - the
+                // same "quality-favoring default" posture as this project's other neural levels.
+                // No models= passed: libnvidia-ngx-vsr.so.1.8.2 bundles its own model (see VSR.md).
+                return "format=gbrpf32le,vsr=quality=3,format=yuv420p";
+            }
+
             if (NeuralModelPath(level, cfg) == null)
             {
                 return null;
