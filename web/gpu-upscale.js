@@ -3064,8 +3064,21 @@
             return url;
         }
 
-        var out = url;
+        // Only a negotiation records what was sent. The HLS marking below runs per playlist and
+        // per segment, and letting it write here would keep resetting the comparison the stale
+        // note depends on, so a changed selection would stop announcing itself.
         state.sentSig = paramSig(params);
+        return applyParams(url, params);
+    }
+
+    /* The same append, without claiming a negotiation happened. */
+    function markHlsUrl(url) {
+        var params = wireParams();
+        return (!url || !params) ? url : applyParams(url, params);
+    }
+
+    function applyParams(url, params) {
+        var out = url;
 
         Object.keys(params).forEach(function (k) {
             var re = new RegExp('([?&])' + k + '=[^&]*');
@@ -3234,6 +3247,21 @@
     // spelling fails silently and completely, which is the worst shape a failure can take here.
     var IS_PLAYBACK_INFO = /\/playbackinfo(\?|$|\/)/i;
 
+    /*
+     * THE REQUEST THAT BUILDS THE COMMAND IS NOT THE ONE THIS SCRIPT MARKS.
+     *
+     * The TranscodingUrl marked on the PlaybackInfo response is the MASTER playlist. Jellyfin then
+     * writes the VARIANT urls into that playlist itself, carrying the parameters it knows about and
+     * dropping ours, and it is the variant request that actually starts ffmpeg. So a session whose
+     * axes were marked perfectly still transcoded on the dashboard defaults, and reported honestly
+     * on those, while the panel showed the viewer's own picks: the server never saw them.
+     *
+     * hls.js fetches that variant through the same fetch and XHR this script already wraps, so the
+     * axes are appended there too. Marking the request that builds the command is the only place
+     * that cannot be undone by a playlist somebody else generates.
+     */
+    var IS_HLS_MEDIA = /\/videos\/[^?]*\/(main\.m3u8|master\.m3u8|hls1\/|live\.m3u8)/i;
+
     function hookFetch() {
         if (!window.fetch) {
             return;
@@ -3249,6 +3277,25 @@
             }
 
             var args = arguments;
+
+            // Any HLS request for this session, not only the one this script handed over.
+            if (url && IS_HLS_MEDIA.test(url) && !IS_PLAYBACK_INFO.test(url)) {
+                try {
+                    var marked = markHlsUrl(url);
+                    if (marked !== url) {
+                        if (typeof input === 'string') {
+                            args = [marked, init];
+                        } else if (input && typeof Request !== 'undefined' && input instanceof Request) {
+                            args = [new Request(marked, input), init];
+                        }
+
+                        url = marked;
+                    }
+                } catch (err) {
+                    log('could not mark the HLS request', err);
+                }
+            }
+
             if (url && IS_PLAYBACK_INFO.test(url) && anyEnhancement()) {
                 try {
                     var newUrl = forceTranscodeUrl(url);
@@ -3338,6 +3385,18 @@
                 // Case-insensitive: the endpoint is spelled PlaybackInfo today, and a match that
                 // depends on that spelling fails silently and completely, which is the worst shape
                 // a failure can take here.
+                // Same reason as the fetch hook: the variant playlist is where the command is
+                // built, and it is fetched without the axes unless they are put back here.
+                if (url && IS_HLS_MEDIA.test(url) && !IS_PLAYBACK_INFO.test(url)) {
+                    var markedUrl = markHlsUrl(url);
+                    if (markedUrl !== url) {
+                        this.__gpuUpscaleUrl = markedUrl;
+                        var hlsArgs = Array.prototype.slice.call(arguments);
+                        hlsArgs[1] = markedUrl;
+                        return originalOpen.apply(this, hlsArgs);
+                    }
+                }
+
                 if (url && IS_PLAYBACK_INFO.test(url) && anyEnhancement()) {
                     var forced = forceTranscodeUrl(url);
                     if (forced !== url) {
