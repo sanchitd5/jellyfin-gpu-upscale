@@ -357,16 +357,51 @@ Ordered by what is at stake.
    exists, and no decision reads `state.VideoStream.BitRate` though it is in scope. The evidence is
    already in the repo, read as something else: Anime4K below plain lanczos at 1.5x, EASU losing
    outright because it locks onto compression-noise gradients. Measure one source at two CRFs.
-3. **GPU-resident NVENC handoff — TESTED, DOES NOT WORK ON THIS BOX.** `hwdownload,format=yuv420p`
-   sends every output frame through system memory, about 12 MB per frame at 2160p, paid at output
-   size. Wired as an opt-in setting, `GpuResidentEncode` (off by default, `BuildChain` emits
+3. **GPU-resident NVENC handoff — INVESTIGATED 2026-09-22, NOT ACHIEVABLE with `hwmap`. Root cause
+   found: upstream FFmpeg limitation, not this box.** `hwdownload,format=yuv420p` sends every output
+   frame through system memory, about 12 MB per frame at 2160p, paid at output size. Wired as an
+   opt-in setting, `GpuResidentEncode` (off by default, `BuildChain` emits
    `hwmap=derive_device=cuda` in its place when enabled). Smoke-tested directly against the patched
-   ffmpeg on CT114 2026-09-22 (`-init_hw_device vulkan=vk:0 -filter_hw_device vk`, testsrc through
-   `hwupload,libplacebo,hwmap=derive_device=cuda`, `-c:v hevc_nvenc`): `Failed to map frame: -38`
-   (`Function not implemented`), encoder never opens. Vulkan-CUDA interop is absent from this
-   ffmpeg/driver build. Setting stays in the code, off, and should stay off until a patched ffmpeg
-   rebuild actually carries that interop - re-run this exact smoke test after any such rebuild
-   before ever flipping the default. Live config confirmed reverted to off same session.
+   ffmpeg on CT114 2026-09-22: `Failed to map frame: -38` (`Function not implemented`), encoder
+   never opens.
+
+   Ruled out first: driver/Vulkan/CUDA stack is fully capable. `ffmpeg -buildconf` carries
+   `--enable-vulkan --enable-cuda --enable-ffnvcodec` already. `nvidia-smi` and `libcuda.so.1` work
+   inside CT114. `vulkaninfo` on the NVIDIA device (driver 595.84, Vulkan apiVersion 1.4.329) lists
+   every extension the interop needs: `VK_KHR_external_memory`, `VK_KHR_external_memory_fd`,
+   `VK_KHR_external_semaphore`, `VK_KHR_external_semaphore_fd`, `VK_KHR_timeline_semaphore`. None of
+   that is the problem.
+
+   Actual root cause, read out of `libavutil/hwcontext_vulkan.c`: `av_hwframe_map()` for a Vulkan
+   source frame calls the Vulkan hwcontext's `map_from` callback (`vulkan_map_from`, confirmed at
+   both the `n8.1.2` tag this box builds and current FFmpeg `master` as of 2026-09-22 - not a
+   version gap). That function's `switch (dst->format)` only has cases for `AV_PIX_FMT_DRM_PRIME`
+   and `AV_PIX_FMT_VAAPI`; there is no `AV_PIX_FMT_CUDA` case, so it falls through to
+   `return AVERROR(ENOSYS)` unconditionally - the exact `-38` seen, on every build, on any hardware.
+   `hwmap=derive_device=cuda` for a Vulkan source can never succeed against any FFmpeg release that
+   exists today, patched or stock. No configure flag, no driver version, no SDK fixes this.
+
+   Real Vulkan-CUDA interop code DOES exist in the same file - `vulkan_export_to_cuda`,
+   `vulkan_transfer_data_to_cuda`/`_from_cuda` - and is real GPU-to-GPU traffic (imports the Vulkan
+   image as a CUDA external-memory array, `cuMemcpy2DAsync` device-to-device, never touches system
+   RAM). But it's wired only into `av_hwframe_transfer_data` (a copy call), not into
+   `av_hwframe_map`'s zero-copy contract, and no filter in any graph calls `transfer_data` for this
+   direction - `hwmap` is the only filter that reaches for `map`. So there's no way to express this
+   in a filtergraph today, copy or zero-copy, without a new patch. Likely why upstream never wired
+   it: CUDA imports the Vulkan image as a texture array (`CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC`),
+   not a linear device pointer, and NVENC's CUDA frame input wants linear/pitched memory - so even a
+   hypothetical "map" would need a device-side copy under the hood, not true pointer aliasing.
+
+   Fixing this for real needs a patch to `hwcontext_vulkan.c` itself (add a CUDA case to
+   `vulkan_map_from`, or a new filter calling `transfer_data` directly) - not the kind of scoped,
+   single `vf_*.c` patch this project's patch stack (0001-0004) is built around. That file backs
+   every filter that runs through Vulkan here (oidn, optix, ort, fsr2, dlss all sit on
+   `hwcontext_vulkan`/libplacebo), so patching it is a different risk class from adding a filter
+   beside it. Not attempted. **No ffmpeg rebuild was performed this session - CT114's
+   `/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg` is unchanged from before this investigation.** Setting
+   stays in the code, off. Don't re-attempt this via configure flags or a driver bump; the fix, if
+   ever done, is a `hwcontext_vulkan.c` source patch, and it should get its own review given the
+   blast radius. Live config was never touched this session (already `GpuResidentEncode=false`).
 4. **10-bit output.** Deband is requantised to 8 bit on exit, throwing away most of what it did.
 5. **Cost-budget admission.** `HasCapacity()` counts processes, so a dlss session and a sharpen-only
    session each consume one of two, and foreign libplacebo transcodes count too. The `/proc` walk is
