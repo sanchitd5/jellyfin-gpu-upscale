@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using HarmonyLib;
@@ -25,13 +27,29 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private static ILogger _logger;
         private static Harmony _harmony;
 
+        // Apply can be reached from more than one caller, and a second one arriving while the first
+        // is still patching would double-patch every target: the null check and the assignment are
+        // not one operation.
+        private static readonly object _applyLock = new object();
+
+        private static volatile bool _active;
+
         public static string Status { get; private set; } = "not applied";
 
-        public static bool Active { get; private set; }
+        /// <summary>Written on the patch thread, read on request threads, hence volatile.</summary>
+        public static bool Active => _active;
 
         public static void Apply(ILogger logger)
         {
             _logger = logger;
+            lock (_applyLock)
+            {
+                ApplyLocked(logger);
+            }
+        }
+
+        private static void ApplyLocked(ILogger logger)
+        {
             if (_harmony != null)
             {
                 return;
@@ -70,7 +88,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 var missing = core.Where(p => p.Target == null).Select(p => p.Name).ToList();
                 if (missing.Count > 0)
                 {
-                    Active = false;
+                    _active = false;
                     Status = "failed: EncodingHelper method(s) not found on this Jellyfin build: "
                         + string.Join(", ", missing);
                     logger?.LogError(
@@ -80,14 +98,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     return;
                 }
 
+                // Published BEFORE the loop so that a throw part way through it has something to
+                // unpatch: the catch below rolls the whole set back, and a core set left half
+                // installed is exactly the failure this file refuses to ship - Vulkan device args
+                // on a session whose filter graph was never replaced.
+                _harmony = harmony;
+
                 foreach (var (name, target, postfix) in core)
                 {
                     harmony.Patch(target, postfix: new HarmonyMethod(typeof(UpscalePatches).GetMethod(postfix, BindingFlags.Static | BindingFlags.NonPublic)));
                     logger?.LogInformation("GpuUpscale: patched {Method}", name);
                 }
 
-                _harmony = harmony;
-                Active = true;
+                _active = true;
 
                 // OPTIONAL PATCHES. Each is installed in its own try/catch after the core set is
                 // already live, so a target that a future Jellyfin renames or removes degrades that
@@ -96,7 +119,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 var optionalFailed = new List<string>();
                 ApplyOptional(harmony, logger, optional, optionalFailed);
 
-                Status = "active (5 EncodingHelper methods patched)";
+                Status = "active (" + core.Count.ToString(CultureInfo.InvariantCulture)
+                    + " EncodingHelper methods patched)";
                 if (optional.Count > 0)
                 {
                     Status += "; optional: " + string.Join(", ", optional);
@@ -112,7 +136,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             catch (Exception ex)
             {
                 Status = "failed: " + ex.Message;
-                Active = false;
+                _active = false;
                 logger?.LogError(ex, "GpuUpscale: Harmony patching failed; Jellyfin will transcode normally.");
                 try
                 {
@@ -238,19 +262,136 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
         }
 
-        private static bool ShouldAct(EncodingJobInfo state, out UpscaleEngine.Plan plan)
+        /// <summary>
+        /// ONE ANSWER PER SESSION, for all four command-shaping patches.
+        ///
+        /// They used to decide separately, and the filter patch alone bailed on burned-in subtitles
+        /// and on the concurrency cap. A burn-in session therefore kept Jellyfin's filter graph
+        /// while its device args had already been swapped to Vulkan and its hardware decoder
+        /// removed, which is the partial core install this file exists to prevent. Deciding once
+        /// also stops HasCapacity, which walks /proc, running up to five times per command build
+        /// with the possibility of five different answers.
+        /// </summary>
+        private sealed class Verdict
         {
-            plan = UpscaleEngine.Plan.No("ineligible", "n/a");
+            public UpscaleEngine.Plan Plan { get; set; } = UpscaleEngine.Plan.No("ineligible", "n/a");
+
+            public bool Act { get; set; }
+
+            public string Status { get; set; } = "ineligible";
+
+            public string Reason { get; set; } = "n/a";
+        }
+
+        private static readonly ConcurrentDictionary<string, Verdict> _verdicts =
+            new ConcurrentDictionary<string, Verdict>();
+
+        /// <summary>Nothing removes a verdict on its own, so the table is dropped when it grows.</summary>
+        private const int VerdictLimit = 256;
+
+        /// <summary>
+        /// The verdict for this session, computed once. A session with no play session id cannot be
+        /// memoised and is decided afresh, which is the behaviour every patch had before.
+        /// </summary>
+        private static Verdict VerdictFor(EncodingJobInfo state)
+        {
+            string key = UpscaleEngine.SessionKey(state);
+            if (!string.IsNullOrEmpty(key) && _verdicts.TryGetValue(key, out var cached))
+            {
+                return cached;
+            }
+
+            var verdict = BuildVerdict(state);
+            if (string.IsNullOrEmpty(key))
+            {
+                return verdict;
+            }
+
+            if (_verdicts.Count > VerdictLimit)
+            {
+                _verdicts.Clear();
+            }
+
+            return _verdicts.GetOrAdd(key, verdict);
+        }
+
+        private static Verdict BuildVerdict(EncodingJobInfo state)
+        {
+            var verdict = new Verdict();
             try
             {
-                plan = UpscaleEngine.Decide(state);
-                return plan.Act;
+                verdict.Plan = UpscaleEngine.Decide(state);
+                verdict.Status = verdict.Plan.Status;
+                verdict.Reason = verdict.Plan.Reason;
+                if (!verdict.Plan.Act)
+                {
+                    return verdict;
+                }
+
+                if (SubtitlesAreBurnedIn(state))
+                {
+                    verdict.Status = "subtitle-burn-in";
+                    verdict.Reason = "subtitles are burned in";
+                    return verdict;
+                }
+
+                if (!UpscaleEngine.HasCapacity())
+                {
+                    verdict.Status = "concurrency-cap";
+                    verdict.Reason = "all enhancement slots busy";
+                    return verdict;
+                }
+
+                verdict.Act = true;
+                return verdict;
             }
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "GpuUpscale: decision failed");
+                verdict.Act = false;
+                return verdict;
+            }
+        }
+
+        /// <summary>
+        /// True when this job burns subtitles in, which Jellyfin renders as a -filter_complex graph
+        /// this plugin leaves alone.
+        ///
+        /// Read by reflection for the same reason as UpscaleEngine.UserKey: this assembly is loaded
+        /// beside a server it was not compiled against, and a member that moved must degrade to "not
+        /// burned in" rather than throw into the transcode path. The filter patch still recognises
+        /// the -filter_complex it is handed; this is what lets the other three patches know the
+        /// answer before that patch runs.
+        /// </summary>
+        private static bool SubtitlesAreBurnedIn(EncodingJobInfo state)
+        {
+            try
+            {
+                if (state == null)
+                {
+                    return false;
+                }
+
+                var type = state.GetType();
+                if (type.GetProperty("SubtitleStream")?.GetValue(state) == null)
+                {
+                    return false;
+                }
+
+                object method = type.GetProperty("SubtitleDeliveryMethod")?.GetValue(state);
+                return string.Equals(method?.ToString(), "Encode", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception)
+            {
                 return false;
             }
+        }
+
+        private static bool ShouldAct(EncodingJobInfo state, out UpscaleEngine.Plan plan)
+        {
+            var verdict = VerdictFor(state);
+            plan = verdict.Plan;
+            return verdict.Act;
         }
 
         /// <summary>
@@ -273,27 +414,33 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     // not fatal; the check falls back to the known install paths
                 }
 
-                if (!ShouldAct(state, out var plan))
+                var verdict = VerdictFor(state);
+                var plan = verdict.Plan;
+                if (!verdict.Act)
                 {
-                    if (plan.Status != "ineligible")
+                    if (verdict.Status == "concurrency-cap")
                     {
-                        UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, plan.Status, plan.Reason));
+                        _logger?.LogInformation("GpuUpscale: concurrency cap reached, leaving stock chain for {Path}", state.MediaPath);
+                    }
+
+                    if (verdict.Status != "ineligible")
+                    {
+                        UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, verdict.Status, verdict.Reason));
                     }
 
                     return;
                 }
 
-                // Subtitle burn-in produces a -filter_complex graph; leave that to Jellyfin.
+                // Subtitle burn-in produces a -filter_complex graph; leave that to Jellyfin. The
+                // verdict already asked the job state about it, so this is the case the state did
+                // not name - and the answer is written back, because the other three patches must
+                // not keep acting on a session whose filter graph stays Jellyfin's.
                 if (!string.IsNullOrEmpty(__result) && __result.IndexOf("-filter_complex", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
+                    verdict.Act = false;
+                    verdict.Status = "subtitle-burn-in";
+                    verdict.Reason = "subtitles are burned in";
                     UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, "subtitle-burn-in", "subtitles are burned in"));
-                    return;
-                }
-
-                if (!UpscaleEngine.HasCapacity())
-                {
-                    _logger?.LogInformation("GpuUpscale: concurrency cap reached, leaving stock chain for {Path}", state.MediaPath);
-                    UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, "concurrency-cap", "all enhancement slots busy"));
                     return;
                 }
 
@@ -394,14 +541,27 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     return;
                 }
 
-                if (__result.IndexOf("copy", StringComparison.OrdinalIgnoreCase) < 0)
+                // Equality, not a substring: an encoder whose NAME merely contains "copy" is a real
+                // encoder, and treating it as a stream copy sends the job down the replace-the-copy
+                // path instead of honouring the configured encoder.
+                if (!string.Equals(__result.Trim(), "copy", StringComparison.OrdinalIgnoreCase))
                 {
                     ApplyConfiguredEncoderToTranscode(state, cfg, ref __result);
                     return;
                 }
 
-                if (!ShouldAct(state, out var plan))
+                var verdict = VerdictFor(state);
+                var plan = verdict.Plan;
+                if (!verdict.Act)
                 {
+                    // The cap is part of the shared verdict now, so it is reported here rather than
+                    // re-tested below: a viewer told nothing at all would read a stream copy as a
+                    // plugin that did not run.
+                    if (verdict.Status == "concurrency-cap")
+                    {
+                        UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, verdict.Status, verdict.Reason));
+                    }
+
                     return;
                 }
 
@@ -419,12 +579,6 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     || UpscaleEngine.SessionNamedEnhancement(state);
                 if (!explicitlyAsked && !cfg.ForceTranscode)
                 {
-                    return;
-                }
-
-                if (!UpscaleEngine.HasCapacity())
-                {
-                    UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, "concurrency-cap", "all enhancement slots busy"));
                     return;
                 }
 

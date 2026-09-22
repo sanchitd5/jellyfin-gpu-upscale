@@ -647,10 +647,46 @@
         };
     }
 
+    /*
+     * What the panel SHOWS: the viewer's own preferences with whatever stage is in force laid over
+     * them. Deliberately NOT written back into state.prefs. Seeding effective() into the
+     * preferences let a ladder stage overwrite the viewer's sr, and an Off stage wipe their neural
+     * and game out of localStorage, where nothing could bring them back.
+     */
+    function displayPrefs() {
+        var live = effective();
+        var out = {};
+        Object.keys(state.prefs).forEach(function (k) {
+            out[k] = (live && live[k] != null) ? live[k] : state.prefs[k];
+        });
+        // A null target means "the server picks the size", which no control can show: read it Off.
+        if (live && live.upscale == null) { out.upscale = 'off'; }
+        return out;
+    }
+
+    /* What the render in progress is showing, or the bare preferences before one has run. */
+    function shownPrefs() {
+        return state.shown || state.prefs;
+    }
+
     function anyEnhancement() {
         var e = effective();
+        if (!e) {
+            return false;
+        }
+
         // upscale === null is "let the server pick the target", which is still an enhancement.
-        return !!e && (e.upscale !== 'off' || e.deblur !== 'off' || e.denoise !== 'off');
+        if (e.upscale == null) {
+            return true;
+        }
+
+        // THE WHOLE WIRE OBJECT, not three axes of it. A Custom selection carrying only sr, neural,
+        // game, refine, chroma, kernel or deband used to answer false here, so no transcode was
+        // forced, the response kept no TranscodingUrl and the session direct-played with none of it.
+        var params = wireParams() || {};
+        return Object.keys(params).some(function (k) {
+            return !isOff(params[k]) && params[k] !== 'default';
+        });
     }
 
     /* ------------------------------------------------------------ the Enhance settings menu */
@@ -833,7 +869,7 @@
                 }
 
                 var acts = (caps.levels && caps.levels[c.showWhen.levelsKey]) || [];
-                return acts.indexOf(state.prefs[c.showWhen.key]) >= 0;
+                return acts.indexOf(shownPrefs()[c.showWhen.key]) >= 0;
             })
             .map(function (c) {
                 var allowed = serverLevels(caps, c);
@@ -885,7 +921,8 @@
                 }
 
                 return {
-                    key: c.key, label: c.label, fallback: c.fallback, group: c.group || 'Detail',
+                    key: c.key, label: c.label, fallback: c.fallback, probeKey: c.probeKey || null,
+                    group: c.group || 'Detail',
                     grade: c.grade || null, chips: !!c.chips, costKey: c.costKey || null,
                     showWhen: c.showWhen || null, options: options
                 };
@@ -902,7 +939,7 @@
             key: 'sr',
             text: function () {
                 var s = state.lastServerState;
-                return (s && s.Known && s.SrBypassed && state.prefs.sr !== 'off')
+                return (s && s.Known && s.SrBypassed && shownPrefs().sr !== 'off')
                     ? 'The server bypassed this at the current ratio: plain scaling plus the sharpener ran instead.'
                     : '';
             }
@@ -914,7 +951,7 @@
                 // and reports SrLevel "off" with GameApplied true. That is the SERVER'S signal, read
                 // straight out of the record - never worked out from what the viewer picked.
                 var s = state.lastServerState;
-                return (s && s.Known && s.GameApplied && isOff(s.SrLevel) && state.prefs.sr !== 'off')
+                return (s && s.Known && s.GameApplied && isOff(s.SrLevel) && shownPrefs().sr !== 'off')
                     ? 'The game temporal upscaler produced the target size, so the server dropped'
                       + ' this pass. It did not run.'
                     : '';
@@ -1404,7 +1441,7 @@
 
     /* One axis row: chips, a picker, or both. onPick receives the chosen level id. */
     function controlRow(c, onPick) {
-        var cur = state.prefs[c.key] || c.fallback;
+        var cur = shownPrefs()[c.key] || c.fallback;
         var ids = c.options.map(function (o) { return o.id; });
         var grade = (c.grade || []).filter(function (id) { return ids.indexOf(id) >= 0; });
         // Chips only where the data says the short form is safe to show, because a chip drops
@@ -1837,16 +1874,11 @@
 
         body.appendChild(qualitySection(rerender));
 
-        // Seed the controls from whatever is in force, BEFORE axisControls reads state.prefs.game
-        // for showWhen - otherwise jitter/depth/reactive render against a stale game value on
-        // first paint and only catch up on the next 3s live poll.
-        var live = effective();
-        if (live) {
-            Object.keys(state.prefs).forEach(function (k) {
-                if (live[k] != null) { state.prefs[k] = live[k]; }
-                if (k === 'upscale' && live.upscale == null) { state.prefs.upscale = 'off'; }
-            });
-        }
+        // What this render shows, BEFORE axisControls reads the game value for showWhen -
+        // otherwise jitter/depth/reactive render against a stale game value on first paint and only
+        // catch up on the next 3s live poll. It is a separate object: state.prefs holds the
+        // viewer's overrides and nothing else ever writes the stage into it.
+        state.shown = displayPrefs();
 
         var controls = axisControls(caps);
 
@@ -1854,11 +1886,16 @@
         // target this source is too tall for) must not leave a control showing something the
         // server would refuse.
         controls.forEach(function (c) {
-            var current = state.prefs[c.key];
-            if (current && !c.options.some(function (o) { return o.id === current; })) {
+            var current = state.shown[c.key];
+            // Only when the probe POSITIVELY listed this axis. A probe that answered without Game
+            // is silence, not a withdrawal, and resetting on silence rewrote a stored level to off.
+            // Never persisted either: a level dropped because this server cannot serve it now must
+            // come back when it can, so the reset lives on the display object alone.
+            var listed = !c.probeKey || !!(caps.levels && caps.levels[c.probeKey]
+                && caps.levels[c.probeKey].length);
+            if (current && listed && !c.options.some(function (o) { return o.id === current; })) {
                 log('dropping unavailable preference', c.key, current);
-                state.prefs[c.key] = c.fallback;
-                savePrefs();
+                state.shown[c.key] = c.fallback;
             }
         });
 
@@ -2259,7 +2296,13 @@
             params.upscale = e.upscale;
         }
 
-        if (state.serverCaps && state.serverCaps.full) {
+        // UNKNOWN CAPABILITIES ARE NOT "NO CAPABILITIES". A failed probe is not cached on purpose,
+        // so serverCaps stays undefined while the server restarts; gating on it meant that one
+        // failed boot probe dropped every axis but the target from every request for the life of
+        // the page, silently. Sending them is safe - a server that does not read a parameter
+        // ignores it - and re-probing from here is not, since this is called synchronously while a
+        // URL is being built. Only a probe that positively answered "target only" suppresses them.
+        if (!state.serverCaps || state.serverCaps.full) {
             params.deblur = e.deblur || 'off';
             params.denoise = e.denoise || 'off';
             params.sr = e.sr || 'off';
@@ -2296,7 +2339,8 @@
             // viewer picked something other than "Server default". Otherwise nothing is written
             // and the dashboard value stands.
             GAME_OPTION_KEYS.forEach(function (k) {
-                var acts = (state.serverCaps.levels && state.serverCaps.levels.GameOptionLevels) || [];
+                var acts = (state.serverCaps && state.serverCaps.levels
+                    && state.serverCaps.levels.GameOptionLevels) || [];
                 if (acts.indexOf(params.game) >= 0 && state.prefs[k] && state.prefs[k] !== 'default') {
                     params[k] = state.prefs[k];
                 }

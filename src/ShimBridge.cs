@@ -61,9 +61,39 @@ namespace Jellyfin.Plugin.GpuUpscale
 
                 // The shim reads this file on every transcode, so it must never be observed
                 // half-written: write beside it and rename, which is atomic on the same filesystem.
-                string temp = ConfigPath + ".tmp";
-                File.WriteAllText(temp, json);
-                File.Move(temp, ConfigPath, true);
+                // The name is unique per call because a fixed one is shared state: a config save
+                // and a startup sync running together would write the same temp file and could
+                // rename a half-written interleave, which is the very thing the rename removes.
+                string temp = ConfigPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(temp, json);
+
+                    // The rename replaces the inode, so without this the shim's config would take
+                    // this process's umask instead of the mode it was installed with. Only the mode
+                    // travels: owner and group are not settable from .NET, so a config owned by
+                    // another user ends up owned by Jellyfin.
+                    if (OperatingSystem.IsLinux())
+                    {
+                        File.SetUnixFileMode(temp, File.GetUnixFileMode(ConfigPath));
+                    }
+
+                    File.Move(temp, ConfigPath, true);
+                }
+                catch (Exception)
+                {
+                    try
+                    {
+                        File.Delete(temp);
+                    }
+                    catch (Exception)
+                    {
+                        // A failed sync must not also leave litter, but it is not worth a second failure.
+                    }
+
+                    throw;
+                }
+
                 LastResult = "synced (shim standing down: " + patchActive + ")";
             }
             catch (Exception ex)

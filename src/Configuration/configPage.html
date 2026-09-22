@@ -392,10 +392,12 @@
                     </div>
                 </div>
 
-                <div class="inputContainer">
-                    <input is="emby-input" type="text" id="Upscaler" label="Upscaler kernel" />
+                <div class="selectContainer">
+                    <select is="emby-select" id="Upscaler" label="Upscaler kernel"></select>
                     <div class="fieldDescription">
                         libplacebo scaling kernel used underneath the shaders. Default: ewa_lanczos.
+                        The list comes from the server, because a kernel name libplacebo does not know
+                        fails the whole transcode rather than falling back.
                     </div>
                 </div>
 
@@ -435,12 +437,15 @@
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
                         <input is="emby-checkbox" type="checkbox" id="RequireClientOptIn" />
-                        <span>Only upscale when the viewer picks it in the quality menu</span>
+                        <span>Only upscale when the viewer asks for it</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        On: upscaling happens only for playback started from an "Upscaled ..." entry in the
-                        player's quality menu (the client asks for a maxHeight above the source). Off: every
-                        eligible transcode is upscaled to the target height above.
+                        On: upscaling happens only for a session that carried an <code>upscale</code>
+                        request, which is what the injected player script sends when a viewer picks a
+                        size in the Enhance panel. A session with no such request is transcoded
+                        untouched, so clients that do not run the script never spend GPU time.
+                        Off: every eligible transcode is upscaled to the target height above, whether
+                        or not anybody asked.
                     </div>
                 </div>
 
@@ -527,6 +532,33 @@
                     .replace(/"/g, '&quot;')
                     .replace(/'/g, '&#39;');
             }
+            // The kernel select is built from the server's own list rather than typed, because a
+            // misspelt kernel is not a worse picture: libplacebo refuses it and the transcode fails.
+            // The probe already serves that list, so ask it for an unknown session and read Levels.
+            // If it cannot be reached the saved value is still offered, so a reload never silently
+            // rewrites a good setting to something else.
+            function loadUpscalers(page, current) {
+                var select = page.querySelector('#Upscaler');
+                function render(list) {
+                    var names = list && list.length ? list.slice() : [];
+                    if (current && names.indexOf(current) === -1) { names.unshift(current); }
+                    if (!names.length) { names = ['ewa_lanczos']; }
+                    select.innerHTML = names.map(function (n) {
+                        return '<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + '</option>';
+                    }).join('');
+                    select.value = current || names[0];
+                }
+                ApiClient.ajax({
+                    type: 'GET',
+                    url: ApiClient.getUrl('GpuUpscale/Session/dashboard'),
+                    dataType: 'json'
+                }).then(function (s) {
+                    render(s && s.Levels ? s.Levels.Upscalers : null);
+                }, function () {
+                    render(null);
+                });
+            }
+
             function loadStatus(page) {
                 ApiClient.ajax({
                     type: 'GET',
@@ -575,7 +607,7 @@
                     page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
                     page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
                     page.querySelector('#Deband').checked = config.Deband !== false;
-                    page.querySelector('#Upscaler').value = config.Upscaler;
+                    loadUpscalers(page, config.Upscaler || 'ewa_lanczos');
                     page.querySelector('#MinScaleFactor').value = config.MinScaleFactor;
                     page.querySelector('#SrMinScaleFactor').value =
                         config.SrMinScaleFactor == null ? 1.6 : config.SrMinScaleFactor;
@@ -618,7 +650,10 @@
                     config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
                     config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
                     config.Deband = page.querySelector('#Deband').checked;
-                    config.Upscaler = page.querySelector('#Upscaler').value;
+                    // The select is filled asynchronously, so a save during that window reads empty.
+                    // Keep the stored kernel rather than writing a blank one over it.
+                    var kernelPicked = page.querySelector('#Upscaler').value;
+                    if (kernelPicked) { config.Upscaler = kernelPicked; }
                     config.MinScaleFactor = parseFloat(page.querySelector('#MinScaleFactor').value);
                     config.SrMinScaleFactor = parseFloat(page.querySelector('#SrMinScaleFactor').value);
                     config.MaxSourceHeight = parseInt(page.querySelector('#MaxSourceHeight').value, 10);

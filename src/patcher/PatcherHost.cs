@@ -90,12 +90,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // Neural super-resolution: an axis of its own, and one that can be EMPTY. The
                 // weights are not shipped, so on a server where they were never exported this
                 // list is just "off" and the menu renders no choice rather than one that fails.
-                ["Neural"] = ShaderLibrary.AvailableNeuralLevels(),
+                // With the master switch off the list is "off" alone, for the same reason Refine
+                // and Chroma are gated below: Decide would force the level back to off anyway.
+                ["Neural"] = cfg?.NeuralAllowed == false
+                    ? new List<string> { "off" }
+                    : ShaderLibrary.AvailableNeuralLevels(),
 
                 // Game temporal upscalers: another axis of its own, and another that can be
                 // short. dlss and dlaa need an NVIDIA DLSS runtime that is not shipped with
                 // this plugin, so they are listed only where one was installed.
-                ["Game"] = ShaderLibrary.AvailableGameLevels(),
+                // Gated by its master switch too, for the same reason.
+                ["Game"] = cfg?.GameAllowed == false
+                    ? new List<string> { "off" }
+                    : ShaderLibrary.AvailableGameLevels(),
                 ["GameLabels"] = GameLabels(),
 
                 // The three synthesised-input options of those upscalers, their allowed values and

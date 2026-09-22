@@ -199,6 +199,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             /// <summary>True when that level was dropped because the ratio was below SrMinScaleFactor.</summary>
             public bool SrBypassed { get; set; }
 
+            /// <summary>
+            /// True when the source carries no colour range tag, so the chain has to declare one
+            /// rather than let libplacebo guess. See where this is set in Decide.
+            /// </summary>
+            public bool RangeUntagged { get; set; }
+
             public string DeblurLevel { get; set; } = "off";
 
             public string RefineLevel { get; set; } = "off";
@@ -297,7 +303,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 {
                     foreach (var dropped in _history.Skip(HistoryLimit).ToList())
                     {
-                        if (!string.IsNullOrEmpty(dropped.PlaySessionId))
+                        // Record runs more than once per session - GetVideoEncoder and the filter
+                        // patch are separate call sites - so an OLDER record for a session that is
+                        // still playing can fall off the tail while the live one is in the
+                        // dictionary. Dropping the key on that would make the per-session endpoint
+                        // answer "unknown" mid-playback and lose the parked encoder with it, so the
+                        // entry only goes when it is still this very record.
+                        if (!string.IsNullOrEmpty(dropped.PlaySessionId)
+                            && _bySession.TryGetValue(dropped.PlaySessionId, out var current)
+                            && ReferenceEquals(current, dropped))
                         {
                             _bySession.TryRemove(dropped.PlaySessionId, out _);
                             _encoderBySession.TryRemove(dropped.PlaySessionId, out _);
@@ -690,6 +704,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
                 var plan = new Plan { SourceWidth = sw, SourceHeight = sh, Width = sw, Height = sh };
 
+                // A source that never declared its range is the one case libplacebo has to guess
+                // at, and guessing full on limited material lifts black by about 9/255 across the
+                // whole frame. That is larger than any shader difference this plugin measures, and
+                // it was previously corrected only inside the benchmark harness, so the served
+                // segment carried a shift the measurements did not. Video is limited range unless
+                // it says otherwise, so an untagged source is told so before anything scales it.
+                plan.RangeUntagged = string.IsNullOrWhiteSpace(vs.ColorRange);
+
                 // ---- upscale target -------------------------------------------------------
                 // "upscale" is a lowercase query parameter, so Jellyfin puts it in the request's
                 // StreamOptions verbatim (Jellyfin.Api ParseStreamOptions). Unlike a bitrate or a
@@ -785,16 +807,25 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // ---- sharpening -----------------------------------------------------------
                 string deblurDefault = clientSaidOff ? "off" : cfg.DeblurLevel;
                 string deblurLevel = cfg.DeblurAllowed ? (Option(state, "deblur") ?? deblurDefault) : "off";
+                // A VALUE THAT FAILS ITS CHECK FALLS BACK TO THE COMPUTED DEFAULT, NOT THE
+                // DASHBOARD ONE. The two are the same until the session says Off, and there the
+                // dashboard value would defeat the explicit Off: a stale or misspelt level would
+                // buy the viewer a server-side pass they asked not to have, and a transcode with
+                // it. Every axis below is guarded the same way and for the same reason.
                 if (!ShaderLibrary.IsDeblurLevel(deblurLevel))
                 {
-                    deblurLevel = ShaderLibrary.IsDeblurLevel(cfg.DeblurLevel) ? cfg.DeblurLevel : "off";
+                    deblurLevel = ShaderLibrary.IsDeblurLevel(deblurDefault) ? deblurDefault : "off";
                 }
 
                 // ---- super-resolution level ----------------------------------------------
+                // No clientSaidOff default of its own: an explicit Off leaves no upscale, and an
+                // SR level without one is forced off below. An unusable value falls back to the
+                // dashboard and then to "off" - never to a named network, which would put a level
+                // nobody chose into SrRequested and report the viewer as having asked for it.
                 string srLevel = Option(state, "sr") ?? cfg.SrLevel;
                 if (!ShaderLibrary.IsSrLevel(srLevel))
                 {
-                    srLevel = ShaderLibrary.IsSrLevel(cfg.SrLevel) ? cfg.SrLevel : "fsrcnnx";
+                    srLevel = ShaderLibrary.IsSrLevel(cfg.SrLevel) ? cfg.SrLevel : "off";
                 }
 
                 plan.SrRequested = ShaderLibrary.CanonicalSr(srLevel) ?? "off";
@@ -810,14 +841,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 string refineLevel = cfg.RefineAllowed ? (Option(state, "refine") ?? refineDefault) : "off";
                 if (!ShaderLibrary.IsRefineLevel(refineLevel))
                 {
-                    refineLevel = ShaderLibrary.IsRefineLevel(cfg.RefineLevel) ? cfg.RefineLevel : "off";
+                    refineLevel = ShaderLibrary.IsRefineLevel(refineDefault) ? refineDefault : "off";
                 }
 
                 string chromaDefault = clientSaidOff ? "off" : cfg.ChromaLevel;
                 string chromaLevel = cfg.ChromaAllowed ? (Option(state, "chroma") ?? chromaDefault) : "off";
                 if (!ShaderLibrary.IsChromaLevel(chromaLevel))
                 {
-                    chromaLevel = ShaderLibrary.IsChromaLevel(cfg.ChromaLevel) ? cfg.ChromaLevel : "off";
+                    chromaLevel = ShaderLibrary.IsChromaLevel(chromaDefault) ? chromaDefault : "off";
                 }
 
                 if (!plan.UpscaleApplied)
@@ -862,7 +893,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 string denoiseLevel = cfg.DenoiseAllowed ? (Option(state, "denoise") ?? denoiseDefault) : "off";
                 if (!ShaderLibrary.IsDenoiseLevel(denoiseLevel))
                 {
-                    denoiseLevel = ShaderLibrary.IsDenoiseLevel(cfg.DenoiseLevel) ? cfg.DenoiseLevel : "off";
+                    denoiseLevel = ShaderLibrary.IsDenoiseLevel(denoiseDefault) ? denoiseDefault : "off";
                 }
 
                 plan.DenoiseFilter = ShaderLibrary.DenoiseFilter(denoiseLevel, out string denoiseUsed, out bool denoiseHw);
@@ -879,7 +910,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 string neuralLevel = cfg.NeuralAllowed ? (Option(state, "neural") ?? neuralDefault) : "off";
                 if (!ShaderLibrary.IsNeuralLevel(neuralLevel))
                 {
-                    neuralLevel = ShaderLibrary.IsNeuralLevel(cfg.NeuralLevel) ? cfg.NeuralLevel : "off";
+                    neuralLevel = ShaderLibrary.IsNeuralLevel(neuralDefault) ? neuralDefault : "off";
                 }
 
                 plan.NeuralFilter = ShaderLibrary.NeuralFilter(neuralLevel, out string neuralUsed);
@@ -893,7 +924,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 string gameLevel = cfg.GameAllowed ? (Option(state, "game") ?? gameDefault) : "off";
                 if (!ShaderLibrary.IsGameLevel(gameLevel))
                 {
-                    gameLevel = ShaderLibrary.IsGameLevel(cfg.GameLevel) ? cfg.GameLevel : "off";
+                    gameLevel = ShaderLibrary.IsGameLevel(gameDefault) ? gameDefault : "off";
                 }
 
                 // jitter / depth / reactive are per-session on exactly the same carrier as the
@@ -1066,6 +1097,20 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     return false;
                 }
 
+                // More than one patch asks this while a single ffmpeg command is being built, and
+                // the walk below opens and reads /proc/<pid>/cmdline for EVERY process on the box.
+                // The answer cannot meaningfully change inside one build, so it is computed once
+                // and reused for a window just long enough to cover one. This is a memo, not a
+                // change to the concurrency model: the count and the cap are unchanged, and a stale
+                // answer can at worst admit or refuse one job at the boundary.
+                lock (_capacityLock)
+                {
+                    if (DateTime.UtcNow - _capacityAt < CapacityWindow)
+                    {
+                        return _capacityLive < max;
+                    }
+                }
+
                 int live = 0;
                 foreach (string dir in Directory.EnumerateDirectories("/proc"))
                 {
@@ -1090,6 +1135,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     }
                 }
 
+                lock (_capacityLock)
+                {
+                    _capacityLive = live;
+                    _capacityAt = DateTime.UtcNow;
+                }
+
                 return live < max;
             }
             catch (Exception)
@@ -1098,12 +1149,25 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
         }
 
+        private static readonly object _capacityLock = new object();
+        private static readonly TimeSpan CapacityWindow = TimeSpan.FromSeconds(2);
+        private static int _capacityLive;
+        private static DateTime _capacityAt = DateTime.MinValue;
+
         /* ------------------------------------------------------------------- encoder selection */
 
         /// <summary>The ffmpeg binary Jellyfin is using, captured from EncodingOptions when seen.</summary>
         private static string _ffmpegPath;
 
         private static HashSet<string> _encoders;
+
+        /// <summary>
+        /// True once the probe has been attempted, whatever it returned. A failure has to be
+        /// remembered SEPARATELY from the result: without this, "I could not ask" re-spawned up to
+        /// three ffmpeg processes on the transcode path for every session on a server where the
+        /// probe cannot work at all.
+        /// </summary>
+        private static bool _encodersProbed;
         private static readonly object _encodersLock = new object();
 
         public static void NoteFfmpegPath(string path)
@@ -1122,14 +1186,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         private static HashSet<string> AvailableEncoders()
         {
-            if (_encoders != null)
+            if (_encodersProbed)
             {
                 return _encoders;
             }
 
             lock (_encodersLock)
             {
-                if (_encoders != null)
+                if (_encodersProbed)
                 {
                     return _encoders;
                 }
@@ -1161,11 +1225,34 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
                         using (var proc = System.Diagnostics.Process.Start(psi))
                         {
-                            string stdout = proc.StandardOutput.ReadToEnd();
+                            // BOTH pipes are drained before the wait. Reading stdout to the end
+                            // with stderr redirected and never read deadlocks the moment the child
+                            // fills the stderr pipe - forever, with no timeout, on a transcode
+                            // thread holding the probe lock.
+                            var stdoutRead = proc.StandardOutput.ReadToEndAsync();
+                            var stderrRead = proc.StandardError.ReadToEndAsync();
                             if (!proc.WaitForExit(15000))
+                            {
+                                // Leaving it running would strand an ffmpeg per attempt.
+                                try
+                                {
+                                    proc.Kill();
+                                    proc.WaitForExit(2000);
+                                }
+                                catch (Exception)
+                                {
+                                    // already gone
+                                }
+
+                                continue;
+                            }
+
+                            if (!System.Threading.Tasks.Task.WaitAll(new[] { stdoutRead, stderrRead }, 5000))
                             {
                                 continue;
                             }
+
+                            string stdout = stdoutRead.Result;
 
                             var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                             foreach (string line in stdout.Split('\n'))
@@ -1190,6 +1277,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                             if (found.Count > 0)
                             {
                                 _encoders = found;
+                                _encodersProbed = true;
                                 return _encoders;
                             }
                         }
@@ -1200,6 +1288,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     }
                 }
 
+                // Every candidate failed. Remember that, so the next session does not spawn the
+                // same three processes again; null still means "unknown", not "missing".
+                _encodersProbed = true;
                 return null;
             }
         }
@@ -1421,6 +1512,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             UpscaleSettings cfg = Settings;
             var sb = new StringBuilder();
             sb.Append("format=yuv420p");
+
+            // Declared before anything reads the pixels. Only for a source that said nothing: a
+            // file that declares full range is left alone, because forcing tv on genuinely full
+            // material is the same error in the other direction.
+            if (plan.RangeUntagged)
+            {
+                sb.Append(",setparams=range=tv");
+            }
 
             var cpuNodes = new List<string>();
 

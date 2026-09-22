@@ -17,6 +17,7 @@ Fail-open by design: any parse surprise, probe failure or non-transcode call
 falls through to the real ffmpeg with the original argument list untouched.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -267,16 +268,17 @@ def target_from_filter(args):
     idx = filter_index(args)
     if idx is None:
         return None
-    # Anchor to the scale node itself: scanning the whole -vf string lets any other
+    # Anchor to the scale nodes themselves: scanning the whole -vf string lets any other
     # min(...) in the chain shift the indices and silently target the wrong resolution.
-    scale_node = next((n for n in (filter_name(x) for x in split_filters(args[idx + 1]))
-                        if re.match(r"scale\w*\s*(=|$)", n)), None)
-    if scale_node is None:
-        return None
-    consts = [int(c) for c in MIN_CONST.findall(scale_node)]
-    if len(consts) < 2:
-        return None
-    return consts[0], consts[1]      # first min() caps width, second caps height
+    # Every scale-like node is tried, because Jellyfin can put a plain scale=640:-2 in
+    # front of the min() one and stopping at the first would lose the target entirely.
+    for node in (filter_name(x) for x in split_filters(args[idx + 1])):
+        if not re.match(r"(z)?scale\w*\s*(=|$)", node):
+            continue
+        consts = [int(c) for c in MIN_CONST.findall(node)]
+        if len(consts) >= 2:
+            return consts[0], consts[1]  # first min() caps width, second caps height
+    return None
 
 
 def target_from_bitrate(cfg, args):
@@ -361,32 +363,94 @@ def rewrite_args(cfg, args, chain):
     return ["-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk"] + out
 
 
+# Held open, and locked, for as long as this shim runs: the lock is what proves the
+# slot live, so it must never be closed while the transcode is going.
+_SLOT_FD = None
+
+
+def slot_dead(path, grace=True):
+    """True when no running shim holds this slot.
+
+    /proc existence plus an mtime window got this wrong both ways: a recycled pid read
+    as live and shrank the cap for good, while a transcode longer than the window had
+    its own slot reaped and let the cap be exceeded. A lock held by the owner until it
+    exits cannot say either. The grace window covers only the instant between creating
+    a slot file and locking it.
+    """
+    if grace:
+        try:
+            if time.time() - os.path.getmtime(path) < 10:
+                return False
+        except OSError:
+            return True
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
 def take_slot(cfg):
     """Cheap concurrency cap. Returns the slot path, or None when full."""
+    global _SLOT_FD
+    slot = fd = None
     try:
         os.makedirs(SLOT_DIR, exist_ok=True)
         slot = os.path.join(SLOT_DIR, str(os.getpid()))
         # Claim the slot before counting: check-then-act would let two shims
         # started together both pass the "live < max_concurrent" check.
-        fd = os.open(slot, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-        now = time.time()
+        try:
+            fd = os.open(slot, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            # Jellyfin SIGKILLs in-flight transcodes on restart and SLOT_DIR survives
+            # until reboot, so a leftover slot for a recycled pid is expected. Letting
+            # that escape would reach the top-level handler and leave upscaling silently
+            # off for every process that lands on that pid. No other running process can
+            # own our own pid, so only the lock decides, without the grace window.
+            if not slot_dead(slot, grace=False):
+                return None
+            os.unlink(slot)
+            fd = os.open(slot, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _SLOT_FD = fd
         live = 0
         for name in os.listdir(SLOT_DIR):
             p = os.path.join(SLOT_DIR, name)
             try:
-                pid = int(name)
-                if os.path.exists("/proc/%d" % pid) and now - os.path.getmtime(p) < 86400:
+                # The stderr copies are per-run and nothing else reaps them; SLOT_DIR is
+                # tmpfs, so a missed one sits in RAM until reboot.
+                if name.endswith(".err"):
+                    if not os.path.exists("/proc/%d" % int(name[:-4])):
+                        os.unlink(p)
+                    continue
+                int(name)
+                if p == slot or not slot_dead(p):
                     live += 1
                 else:
                     os.unlink(p)
             except Exception:
                 pass
         if live > int(cfg["max_concurrent"]):    # own slot is already counted above
+            _SLOT_FD = None
+            os.close(fd)
             os.unlink(slot)
             return None
         return slot
     except Exception:
+        # Returning None with the file still on disk would count against the cap for
+        # the rest of the uptime, so give the claim back before failing open.
+        _SLOT_FD = None
+        for undo in (lambda: os.close(fd), lambda: os.unlink(slot)):
+            try:
+                undo()
+            except Exception:
+                pass
         return None
 
 
@@ -452,43 +516,48 @@ def main():
         log(cfg, "concurrency cap hit, passthrough %s" % src)
         passthrough(args)
 
-    new_args = rewrite_args(cfg, args, build_chain(cfg, scaled_w, th))
-    if cfg.get("log_args"):
-        log(cfg, "rewritten: %s" % " ".join(new_args))
-    log(cfg, "upscale %dx%d -> %dx%d %s" % (sw, sh, scaled_w, th, src))
-
     # Per-pid path under SLOT_DIR, not a fixed name in world-writable /tmp: a shared
     # path lets concurrent transcodes stomp each other's log, and a symlink planted
-    # at a fixed path would let this process truncate whatever it points to. Opened
-    # before the child exists, because a failure here once the child is running would
-    # escape to the passthrough handler and exec a second ffmpeg onto the same output.
+    # at a fixed path would let this process truncate whatever it points to.
     err_path = os.path.join(SLOT_DIR, "%d.err" % os.getpid())
-    try:
-        os.unlink(err_path)
-    except FileNotFoundError:
-        pass
-    try:
-        errfh = os.fdopen(
-            os.open(err_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600), "w")
-    except Exception as exc:
-        log(cfg, "cannot open %s, stderr copy disabled: %s" % (err_path, exc))
-        errfh = None
-
+    errfh = None
     proc = None
-
-    def forward(signum, _frame):
-        # Jellyfin stops a transcode by killing the shim. Without this the ffmpeg child
-        # is orphaned and keeps writing segments and holding the GPU; the read loop and
-        # the wait() below are what reap it.
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.send_signal(signum)
-            except Exception:
-                pass
-
     rc = 1
     tail = []
+
+    # Everything after the claim runs under this, because an exception anywhere in it
+    # reaches the top-level handler and execs stock ffmpeg, and the slot file would then
+    # count live for the whole playback with nothing left to remove it.
     try:
+        new_args = rewrite_args(cfg, args, build_chain(cfg, scaled_w, th))
+        if cfg.get("log_args"):
+            log(cfg, "rewritten: %s" % " ".join(new_args))
+        log(cfg, "upscale %dx%d -> %dx%d %s" % (sw, sh, scaled_w, th, src))
+
+        # Opened before the child exists, because a failure here once the child is
+        # running would escape to the passthrough handler and exec a second ffmpeg
+        # onto the same output.
+        try:
+            os.unlink(err_path)
+        except FileNotFoundError:
+            pass
+        try:
+            errfh = os.fdopen(
+                os.open(err_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600), "w")
+        except Exception as exc:
+            log(cfg, "cannot open %s, stderr copy disabled: %s" % (err_path, exc))
+            errfh = None
+
+        def forward(signum, _frame):
+            # Jellyfin stops a transcode by killing the shim. Without this the ffmpeg child
+            # is orphaned and keeps writing segments and holding the GPU; the read loop and
+            # the wait() below are what reap it.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.send_signal(signum)
+                except Exception:
+                    pass
+
         _binary, new_args = pick_binary(cfg, new_args)
         proc = subprocess.Popen([_binary] + new_args, stderr=subprocess.PIPE, text=True)
         for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -514,10 +583,12 @@ def main():
     finally:
         if errfh is not None:
             errfh.close()
-        try:
-            os.unlink(slot)
-        except Exception:
-            pass
+        # SLOT_DIR is tmpfs, so a stderr copy left behind holds that RAM until reboot.
+        for stale in (slot, err_path):
+            try:
+                os.unlink(stale)
+            except Exception:
+                pass
 
     if rc < 0:
         # Killed on purpose, usually Jellyfin stopping the session. Retrying would put
