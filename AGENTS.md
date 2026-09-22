@@ -92,11 +92,21 @@ still beat CAS-after, but the reasoning must be checked, not assumed, whenever a
 filter that binary alone provides, and it asks the binary which filters it actually carries, stripping
 chain nodes it lacks. So a rebuild that quietly drops a `vf_*.c` degrades to unenhanced playback
 rather than failing every session, which means **nothing will tell you it happened**. Check `-filters`
-after every rebuild. Rollback copies sit beside the binary.
+after every rebuild. `scripts/proxmox-build.sh` keeps the previous binary at `<binary>.prev` on
+success as well as on failure, so there is something to fall back to when a build lists all five
+filters and one of them then fails against the driver.
+
+**Presence is not capability, and the two binaries differ in BOTH directions.** The probe asks which
+filters exist. It cannot ask whether one runs. `nlmeans_vulkan` exists in both binaries and, until
+the shaderc fix, compiled its shader only in the stock one, so a session combining a Vulkan denoise
+with a patched-only filter routed to the patched binary and died with FFmpeg exit 234. A dead stream,
+not a degraded picture. When adding a filter that compiles anything at run time, assume the two
+builds disagree until a test on the actual binary says otherwise, and keep the engine's guard that
+drops the conflicting pass and reports it.
 
 **11. An axis is only real when `UpscaleEngine.Option(state, ...)` reads it.**
-Thirteen parameters reach the command today: `upscale`, `sr`, `deblur`, `denoise`, `neural`, `game`,
-`refine`, `chroma`, `deband`, `kernel`, `jitter`, `depth`, `reactive`. A control that renders, stores
+Fourteen parameters reach the command today: `upscale`, `sr`, `deblur`, `denoise`, `deblock`,
+`neural`, `game`, `refine`, `chroma`, `deband`, `kernel`, `jitter`, `depth`, `reactive`. A control that renders, stores
 a preference and sends a parameter nothing reads is dead UI that reports success. Do not ship one.
 The client is data-driven on purpose: a new level is one entry in an options array, a new axis is one
 `CONTROLS` entry plus one `LIVE_ROWS` line, and display names come from the probe rather than from
@@ -246,3 +256,19 @@ This project is **GPLv2 or later**, which decides what can be taken:
 Model weights carry their own licences, separate from the code that runs them. Record the licence and
 the origin beside each model the way the model catalogue does, and verify a hash before a downloaded
 model is used, so what ran can be identified later.
+
+## The source file is never touched
+
+Enhancement happens inside the transcode. This plugin reads a file and writes nothing back: no
+pre-upscaled copies, no sidecar renditions, no library it has altered. Remove it and the library is
+exactly as it was.
+
+A batch pre-upscale pass was planned and then dropped for this reason. It would have bought the
+expensive models - the neural levels measure 24, 15 and 10 fps, and frame interpolation, face
+restoration and region-selective upscaling are all far below realtime - and the price was a second
+copy of every processed item and a library this plugin had written into. The property was worth more
+than the features.
+
+So a feature that only works by writing files first does not belong here, however good it looks. If
+that changes, the shape to revisit is a cache outside the library served through the plugin, never
+a file written beside the original.
