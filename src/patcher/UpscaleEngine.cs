@@ -89,6 +89,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// <summary>The SR level that was asked for, even when it was bypassed.</summary>
         public string SrRequested { get; set; }
 
+        /// <summary>
+        /// The neural level that was asked for, even when it did not run. NeuralLevel carries only
+        /// what was applied, so without this a requested-but-dropped network is indistinguishable
+        /// from one nobody asked for, which is how the neural axis shipped dead once already.
+        /// </summary>
+        public string NeuralRequested { get; set; }
+
         public string DenoiseLevel { get; set; }
 
         /// <summary>The neural super-resolution level that ran, or "off".</summary>
@@ -400,6 +407,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ChromaLevel = plan.Act && plan.ChromaApplied ? plan.ChromaLevel : "off",
                 ChromaApplied = plan.Act && plan.ChromaApplied,
                 SrRequested = plan.SrRequested ?? "off",
+                // Unconditional, unlike NeuralLevel below: what was asked for, whether or not it ran.
+                NeuralRequested = plan.NeuralLevel ?? "off",
                 SrBypassed = plan.Act && plan.SrBypassed,
                 SrOwnsSharpening = plan.Act && plan.SrOwnsSharpening,
                 Upscaler = plan.Act ? plan.Upscaler : null,
@@ -753,7 +762,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     else
                     {
                         target -= target % 2;
-                        int tw = (int)Math.Round(sw * ((double)target / sh) / 2.0, MidpointRounding.AwayFromZero) * 2;
+
+                        // Width rounds to a multiple of 8, not 2. NVENC allocates surfaces on an
+                        // 8-pixel alignment, so a width like 1918 is padded internally and the
+                        // encoder works on a surface wider than the picture it is given. The
+                        // nearest multiple of 8 moves the width by at most 4 pixels, which on a
+                        // 16:9 target is inside a pixel of the exact aspect ratio.
+                        int tw = (int)Math.Round(sw * ((double)target / sh) / 8.0, MidpointRounding.AwayFromZero) * 8;
                         if (tw > 0)
                         {
                             plan.UpscaleApplied = true;
@@ -1407,6 +1422,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             var sb = new StringBuilder();
             sb.Append("format=yuv420p");
 
+            var cpuNodes = new List<string>();
+
             // Denoise runs BEFORE the upscale, always: denoising after enlargement would be asked
             // to remove noise the network has already turned into structure. Which SIDE of
             // hwupload it lands on is decided by the filter, not by the level name: atadenoise is
@@ -1415,7 +1432,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             // ShaderLibrary._denoiseFilters.
             if (plan.DenoiseApplied && !plan.DenoiseWantsHwFrames)
             {
-                sb.Append(',').Append(plan.DenoiseFilter);
+                cpuNodes.Add(plan.DenoiseFilter);
             }
 
             // Neural super-resolution runs AFTER denoise and BEFORE hwupload. After denoise for
@@ -1426,7 +1443,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             // match the target ratio.
             if (plan.NeuralApplied)
             {
-                sb.Append(',').Append(plan.NeuralFilter);
+                cpuNodes.Add(plan.NeuralFilter);
             }
 
             // The game temporal upscalers run last on the CPU side, after denoise and after
@@ -1435,8 +1452,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             // dlaa hands it the source size and libplacebo still does the scaling.
             if (plan.GameApplied)
             {
-                sb.Append(',').Append(plan.GameFilter);
+                cpuNodes.Add(plan.GameFilter);
             }
+
+            AppendCpuNodes(sb, cpuNodes);
 
             sb.Append(",hwupload");
 
@@ -1463,10 +1482,68 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (!string.IsNullOrEmpty(plan.ShaderPath) && File.Exists(plan.ShaderPath))
             {
                 sb.Append(":custom_shader_path=").Append(plan.ShaderPath);
+
+                // Without a cache, every ffmpeg process compiles the composed GLSL again - and
+                // FSRCNNX plus RCAS is a lot of it - so the first segment stalls, and so does the
+                // restart after every seek. The prefix is per shader combination, because a cache
+                // keyed on one combination is useless to another.
+                string cachePrefix = ShaderLibrary.ShaderCachePrefix(cfg, plan.ShaderPath);
+                if (!string.IsNullOrEmpty(cachePrefix))
+                {
+                    sb.Append(":shader_cache=").Append(cachePrefix);
+                }
             }
 
             sb.Append(",hwdownload,format=yuv420p");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Appends the CPU-side nodes, converting into planar float ONCE around a run of nodes
+        /// that want it rather than once per node.
+        ///
+        /// oidn, optix, ort, fsr2 and dlss each carry their own format=gbrpf32le,...,format=yuv420p
+        /// because each has to work in float. Emitted per node, two of them in a row (denoise=oidn
+        /// plus a neural level) converted back to yuv420p and straight into float again BETWEEN the
+        /// two passes, which re-subsamples chroma to 4:2:0 and requantises to 8 bit in the middle
+        /// of the group. The wrappers are stripped and the conversions emitted around the run, so
+        /// the group stays in float throughout. A single float node, or one with a non-float node
+        /// such as atadenoise beside it, produces exactly the string it produced before.
+        /// </summary>
+        private static void AppendCpuNodes(StringBuilder sb, List<string> nodes)
+        {
+            const string floatIn = "format=gbrpf32le,";
+            const string floatOut = ",format=yuv420p";
+
+            bool inFloat = false;
+            foreach (string node in nodes)
+            {
+                string body = node;
+                bool wantsFloat = body.StartsWith(floatIn, StringComparison.Ordinal)
+                    && body.EndsWith(floatOut, StringComparison.Ordinal);
+                if (wantsFloat)
+                {
+                    body = body.Substring(floatIn.Length, body.Length - floatIn.Length - floatOut.Length);
+                }
+
+                if (wantsFloat && !inFloat)
+                {
+                    sb.Append(",format=gbrpf32le");
+                    inFloat = true;
+                }
+                else if (!wantsFloat && inFloat)
+                {
+                    sb.Append(",format=yuv420p");
+                    inFloat = false;
+                }
+
+                sb.Append(',').Append(body);
+            }
+
+            if (inFloat)
+            {
+                sb.Append(",format=yuv420p");
+            }
         }
 
         /// <summary>

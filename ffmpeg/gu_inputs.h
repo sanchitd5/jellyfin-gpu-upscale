@@ -123,7 +123,7 @@ typedef struct GUInputs {
     int16_t *grid;          /* raw NVOFA output, grid_w*grid_h*2              */
     int16_t *grid_bwd;
 
-    uint8_t *luma, *luma_prev, *luma_s;
+    uint8_t *luma, *luma_s;
 
     /* phase correlation */
     AVTXContext *tx_fwd_row, *tx_fwd_col, *tx_inv_row, *tx_inv_col;
@@ -137,8 +137,12 @@ typedef struct GUInputs {
     void  *ort_lib;
     void  *ort_api;                      /* const OrtApi*                     */
     void  *ort_env, *ort_sess, *ort_opts, *ort_meminfo;
+    /* The model's tensor names do not change once the session exists, so they
+     * are fetched once rather than allocated and freed per frame. */
+    void  *ort_alloc;                    /* OrtAllocator*                     */
+    char  *depth_in_name, *depth_out_name;
     int    depth_in_w, depth_in_h;
-    float *depth_in, *depth_out_raw;
+    float *depth_in;
     float *depth_prev;
     int    depth_ready;
 } GUInputs;
@@ -539,11 +543,17 @@ typedef const OrtApiBase *(*gu_ort_base_fn)(void);
 static void gu_depth_close(GUInputs *g)
 {
     if (g->ort_api) {
+        if (g->ort_alloc && g->depth_in_name)
+            GU_ORT->AllocatorFree(g->ort_alloc, g->depth_in_name);
+        if (g->ort_alloc && g->depth_out_name)
+            GU_ORT->AllocatorFree(g->ort_alloc, g->depth_out_name);
         if (g->ort_sess)    GU_ORT->ReleaseSession(g->ort_sess);
         if (g->ort_opts)    GU_ORT->ReleaseSessionOptions(g->ort_opts);
         if (g->ort_meminfo) GU_ORT->ReleaseMemoryInfo(g->ort_meminfo);
         if (g->ort_env)     GU_ORT->ReleaseEnv(g->ort_env);
     }
+    g->depth_in_name = g->depth_out_name = NULL;
+    g->ort_alloc = NULL;
     g->ort_sess = g->ort_opts = g->ort_meminfo = g->ort_env = NULL;
     /* The handle is dropped and the image deliberately left mapped.  ONNX
      * Runtime keeps worker threads, thread-local arenas and CUDA EP state alive
@@ -559,6 +569,7 @@ static int gu_depth_init(AVFilterContext *ctx, GUInputs *g)
 {
     gu_ort_base_fn base_fn;
     const OrtApiBase *base;
+    OrtAllocator *alloc = NULL;
     OrtStatus *st;
 
     if (!g->depth_model || !*g->depth_model) {
@@ -623,13 +634,18 @@ static int gu_depth_init(AVFilterContext *ctx, GUInputs *g)
     GU_ORT_CHECK(GU_ORT->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault,
                                              (OrtMemoryInfo **)&g->ort_meminfo));
 
+    GU_ORT_CHECK(GU_ORT->GetAllocatorWithDefaultOptions(&alloc));
+    /* recorded before the names exist so a failed second fetch still frees the first */
+    g->ort_alloc = alloc;
+    GU_ORT_CHECK(GU_ORT->SessionGetInputName(g->ort_sess, 0, alloc, &g->depth_in_name));
+    GU_ORT_CHECK(GU_ORT->SessionGetOutputName(g->ort_sess, 0, alloc, &g->depth_out_name));
+
     /* Depth Anything V2 and MiDaS both want a square, stride-14 or stride-32
      * input.  518 is DA-V2's native size and the cheapest that keeps its
      * accuracy; nothing here depends on the exact number. */
     g->depth_in_w = g->depth_in_h = 518;
     g->depth_in       = av_malloc_array((size_t)g->depth_in_w * g->depth_in_h * 3, sizeof(float));
-    g->depth_out_raw  = av_malloc_array((size_t)g->depth_in_w * g->depth_in_h, sizeof(float));
-    if (!g->depth_in || !g->depth_out_raw)
+    if (!g->depth_in)
         return AVERROR(ENOMEM);
 
     g->depth_ready = 1;
@@ -663,9 +679,8 @@ static void gu_depth_pack(GUInputs *g, const AVFrame *in)
 static int gu_depth_run(AVFilterContext *ctx, GUInputs *g, const AVFrame *in)
 {
     const int64_t shape[4] = { 1, 3, g->depth_in_h, g->depth_in_w };
-    const char *in_names[1], *out_names[1];
-    char *in_name = NULL, *out_name = NULL;
-    OrtAllocator *alloc = NULL;
+    const char *in_names[1]  = { g->depth_in_name };
+    const char *out_names[1] = { g->depth_out_name };
     OrtValue *tin = NULL, *tout = NULL;
     OrtTensorTypeAndShapeInfo *info = NULL;
     ONNXTensorElementDataType etype = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
@@ -675,11 +690,6 @@ static int gu_depth_run(AVFilterContext *ctx, GUInputs *g, const AVFrame *in)
     int x, y, ret = 0;
 
     gu_depth_pack(g, in);
-
-    if ((st = GU_ORT->GetAllocatorWithDefaultOptions(&alloc))) goto fail;
-    if ((st = GU_ORT->SessionGetInputName(g->ort_sess, 0, alloc, &in_name)))   goto fail;
-    if ((st = GU_ORT->SessionGetOutputName(g->ort_sess, 0, alloc, &out_name))) goto fail;
-    in_names[0] = in_name; out_names[0] = out_name;
 
     if ((st = GU_ORT->CreateTensorWithDataAsOrtValue(g->ort_meminfo, g->depth_in,
              (size_t)g->depth_in_w * g->depth_in_h * 3 * sizeof(float), shape, 4,
@@ -740,8 +750,6 @@ flat:
 done:
     if (tin)  GU_ORT->ReleaseValue(tin);
     if (tout) GU_ORT->ReleaseValue(tout);
-    if (alloc && in_name)  GU_ORT->AllocatorFree(alloc, in_name);
-    if (alloc && out_name) GU_ORT->AllocatorFree(alloc, out_name);
     return ret;
 }
 
@@ -800,11 +808,11 @@ static void gu_inputs_uninit(GUInputs *g)
 
     av_freep(&g->flow);      av_freep(&g->depth);    av_freep(&g->reactive);
     av_freep(&g->grid);      av_freep(&g->grid_bwd);
-    av_freep(&g->luma);      av_freep(&g->luma_prev); av_freep(&g->luma_s);
+    av_freep(&g->luma);      av_freep(&g->luma_s);
     av_freep(&g->win_x);     av_freep(&g->win_y);
     av_freep(&g->A);         av_freep(&g->B);        av_freep(&g->T);
     av_freep(&g->pc_prev);
-    av_freep(&g->depth_in);  av_freep(&g->depth_out_raw); av_freep(&g->depth_prev);
+    av_freep(&g->depth_in);  av_freep(&g->depth_prev);
 }
 
 static int gu_inputs_init(AVFilterContext *ctx, GUInputs *g, int w, int h)
@@ -819,10 +827,9 @@ static int gu_inputs_init(AVFilterContext *ctx, GUInputs *g, int w, int h)
     g->depth    = av_calloc(npix, sizeof(float));
     g->reactive = av_calloc(npix, sizeof(float));
     g->luma     = av_calloc(npix, 1);
-    g->luma_prev= av_calloc(npix, 1);
     g->luma_s   = av_calloc(npix, 1);
     g->depth_prev = av_calloc(npix, sizeof(float));
-    if (!g->flow || !g->depth || !g->reactive || !g->luma || !g->luma_prev ||
+    if (!g->flow || !g->depth || !g->reactive || !g->luma ||
         !g->luma_s || !g->depth_prev)
         return AVERROR(ENOMEM);
 
@@ -957,7 +964,6 @@ static int gu_inputs_frame(AVFilterContext *ctx, GUInputs *g, const AVFrame *in)
         for (x = 0; x < g->w * g->h; x++) g->depth[x] = 0.5f;
     }
 
-    memcpy(g->luma_prev, g->luma, (size_t)g->w * g->h);
     g->have_previous = 1;
     g->frame_index++;
     return 0;

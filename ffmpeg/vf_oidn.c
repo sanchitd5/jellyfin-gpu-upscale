@@ -154,6 +154,13 @@ static int config_input(AVFilterLink *inlink)
         av_log(ctx, AV_LOG_ERROR, "could not create an OIDN device\n");
         return AVERROR_EXTERNAL;
     }
+    /* The CPU backend defaults to one thread per core, each pinned to it.  Inside a
+     * restricted cpuset those pins all land on the same few cores and the threads
+     * thrash, which is the trap NEURAL.md records for ONNX Runtime.  Unknown
+     * parameters are ignored by a non-CPU device, so this costs the CUDA path
+     * nothing. */
+    oidnSetDeviceBool(s->device, "setAffinity", 0);
+    oidnSetDeviceInt(s->device, "numThreads", FFMAX(1, ff_filter_get_nb_threads(ctx)));
     oidnCommitDevice(s->device);
     if ((ret = check_error(ctx)) < 0)
         return ret;

@@ -129,7 +129,15 @@ typedef struct FSR2Context {
      * answer, which a rebuild would then default off. */
     int                cfg_w, cfg_h;
     int                req_w, req_h;
+
+    /* Last frame's PTS, for the frame time FSR2 scales its lock lifetime and
+     * history accumulation from when the link carries no frame rate. */
+    int64_t            prev_pts;
 } FSR2Context;
+
+typedef struct ThreadData {
+    AVFrame *in, *out;
+} ThreadData;
 
 #define OFFSET(x) offsetof(FSR2Context, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
@@ -435,6 +443,7 @@ static int config_output(AVFilterLink *outlink)
     }
     s->cfg_w = inlink->w;
     s->cfg_h = inlink->h;
+    s->prev_pts = AV_NOPTS_VALUE;
 
     s->out_w = s->out_w ? s->out_w : inlink->w * 2;
     s->out_h = s->out_h ? s->out_h : inlink->h * 2;
@@ -521,6 +530,99 @@ static int config_output(AVFilterLink *outlink)
     return 0;
 }
 
+/* gbrpf32le: plane 0 = G, plane 1 = B, plane 2 = R */
+static int pack_color_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    FSR2Context *s = ctx->priv;
+    ThreadData *td = arg;
+    const int h0 = (s->cfg_h * jobnr) / nb_jobs;
+    const int h1 = (s->cfg_h * (jobnr + 1)) / nb_jobs;
+
+    for (int y = h0; y < h1; y++) {
+        const float *g = (const float *)(td->in->data[0] + y * td->in->linesize[0]);
+        const float *b = (const float *)(td->in->data[1] + y * td->in->linesize[1]);
+        const float *r = (const float *)(td->in->data[2] + y * td->in->linesize[2]);
+        float *dst = (float *)s->color.host + (size_t)y * s->cfg_w * 4;
+
+        for (int x = 0; x < s->cfg_w; x++) {
+            dst[4 * x + 0] = r[x];
+            dst[4 * x + 1] = g[x];
+            dst[4 * x + 2] = b[x];
+            dst[4 * x + 3] = 1.0f;
+        }
+    }
+    return 0;
+}
+
+/* FSR2's motion vectors point from a pixel in the CURRENT frame to where that
+ * pixel was in the PREVIOUS one.  gu_inputs produces previous -> current, so it
+ * is negated here.  Units are render-resolution pixels, hence
+ * motionVectorScale = {1,1}. */
+static int pack_mv_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    FSR2Context *s = ctx->priv;
+    const int h0 = (s->cfg_h * jobnr) / nb_jobs;
+    const int h1 = (s->cfg_h * (jobnr + 1)) / nb_jobs;
+
+    for (int y = h0; y < h1; y++) {
+        const float *flow = s->g.flow + (size_t)y * s->cfg_w * 2;
+        float *dst = (float *)s->mv.host + (size_t)y * s->cfg_w * 2;
+
+        for (int x = 0; x < s->cfg_w; x++) {
+            dst[2 * x + 0] = -flow[2 * x + 0];
+            dst[2 * x + 1] = -flow[2 * x + 1];
+        }
+    }
+    return 0;
+}
+
+static int unpack_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    FSR2Context *s = ctx->priv;
+    ThreadData *td = arg;
+    const int h0 = (s->out_h * jobnr) / nb_jobs;
+    const int h1 = (s->out_h * (jobnr + 1)) / nb_jobs;
+
+    for (int y = h0; y < h1; y++) {
+        float *g = (float *)(td->out->data[0] + y * td->out->linesize[0]);
+        float *b = (float *)(td->out->data[1] + y * td->out->linesize[1]);
+        float *r = (float *)(td->out->data[2] + y * td->out->linesize[2]);
+        const float *src = (const float *)s->out.host + (size_t)y * s->out_w * 4;
+
+        for (int x = 0; x < s->out_w; x++) {
+            r[x] = src[4 * x + 0];
+            g[x] = src[4 * x + 1];
+            b[x] = src[4 * x + 2];
+        }
+    }
+    return 0;
+}
+
+/* Milliseconds per frame.  FSR2 scales lock lifetime and history accumulation
+ * from this, so telling 60 fps material it is 24 fps ages its locks 2.5x too
+ * fast.  The link's frame rate is the honest answer where there is one; the PTS
+ * delta covers variable frame rate input; the 24 fps constant is the last
+ * resort, and only reached before a second frame has been seen. */
+static float frame_time_delta_ms(AVFilterLink *inlink, FSR2Context *s, const AVFrame *in)
+{
+    const AVRational fr = ff_filter_link(inlink)->frame_rate;
+    float ms = 1000.0f / 24.0f;
+
+    if (fr.num > 0 && fr.den > 0)
+        ms = 1000.0f * fr.den / fr.num;
+    else if (s->prev_pts != AV_NOPTS_VALUE && in->pts != AV_NOPTS_VALUE &&
+             in->pts > s->prev_pts)
+        ms = 1000.0f * (in->pts - s->prev_pts) * av_q2d(inlink->time_base);
+
+    /* A wild delta is worse than a wrong constant: FSR2 disables its locks
+     * outright at the extremes. */
+    if (!(ms > 1.0f))
+        ms = 1.0f;
+    else if (ms > 1000.0f)
+        ms = 1000.0f;
+    return ms;
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -530,9 +632,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     FfxFsr2DispatchDescription dp;
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    const float *R, *G, *B;
-    float *dst;
-    int rls, gls, bls, x, y, ret;
+    const int nb_threads = ff_filter_get_nb_threads(ctx);
+    const int nb_in  = FFMIN(inlink->h, nb_threads);
+    const int nb_out = FFMIN(s->out_h, nb_threads);
+    ThreadData td;
+    int ret;
 
     if (!s->fsr2_ready) {
         av_frame_free(&in);
@@ -551,32 +655,17 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     }
     av_frame_copy_props(out, in);
 
-    R = (const float *)in->data[2]; G = (const float *)in->data[0]; B = (const float *)in->data[1];
-    rls = in->linesize[2] / 4; gls = in->linesize[0] / 4; bls = in->linesize[1] / 4;
+    td.in  = in;
+    td.out = out;
 
-    dst = (float *)s->color.host;
-    for (y = 0; y < inlink->h; y++)
-        for (x = 0; x < inlink->w; x++) {
-            size_t k = ((size_t)y * inlink->w + x) * 4;
-            dst[k]     = R[(size_t)y * rls + x];
-            dst[k + 1] = G[(size_t)y * gls + x];
-            dst[k + 2] = B[(size_t)y * bls + x];
-            dst[k + 3] = 1.0f;
-        }
+    if ((ret = ff_filter_execute(ctx, pack_color_slice, &td, NULL, nb_in)) < 0 ||
+        (ret = ff_filter_execute(ctx, pack_mv_slice,    &td, NULL, nb_in)) < 0) {
+        av_frame_free(&in); av_frame_free(&out);
+        return ret;
+    }
+
     memcpy(s->depth.host,    s->g.depth,    (size_t)inlink->w * inlink->h * sizeof(float));
     memcpy(s->reactive.host, s->g.reactive, (size_t)inlink->w * inlink->h * sizeof(float));
-
-    /* FSR2's motion vectors point from a pixel in the CURRENT frame to where
-     * that pixel was in the PREVIOUS one.  gu_inputs produces previous ->
-     * current, so it is negated here.  Units are render-resolution pixels,
-     * hence motionVectorScale = {1,1}. */
-    dst = (float *)s->mv.host;
-    for (y = 0; y < inlink->h; y++)
-        for (x = 0; x < inlink->w; x++) {
-            size_t k = (size_t)y * inlink->w + x;
-            dst[k * 2]     = -s->g.flow[k * 2];
-            dst[k * 2 + 1] = -s->g.flow[k * 2 + 1];
-        }
 
     vkResetFences(s->dev, 1, &s->fence);
     vkResetCommandBuffer(s->cmd, 0);
@@ -621,13 +710,14 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     dp.renderSize.height = inlink->h;
     dp.enableSharpening  = s->sharpness > 0.0f;
     dp.sharpness         = s->sharpness;
-    dp.frameTimeDelta    = 1000.0f / 24.0f;
+    dp.frameTimeDelta    = frame_time_delta_ms(inlink, s, in);
     dp.preExposure       = 1.0f;
     dp.reset             = s->g.frame_index <= 1;
     dp.cameraNear        = 0.1f;
     dp.cameraFar         = 1000.0f;
     dp.cameraFovAngleVertical = 1.0471975f;   /* 60 degrees: there is no real one */
     dp.viewSpaceToMetersFactor = 1.0f;
+    s->prev_pts = in->pts;
 
     if (ffxFsr2ContextDispatch(&s->fsr2, &dp) != FFX_OK) {
         av_log(ctx, AV_LOG_ERROR, "ffxFsr2ContextDispatch failed\n");
@@ -648,19 +738,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         return AVERROR_EXTERNAL;
     }
 
-    {
-        const float *src = (const float *)s->out.host;
-        float *oR = (float *)out->data[2], *oG = (float *)out->data[0],
-              *oB = (float *)out->data[1];
-        int ols_r = out->linesize[2] / 4, ols_g = out->linesize[0] / 4,
-            ols_b = out->linesize[1] / 4;
-        for (y = 0; y < s->out_h; y++)
-            for (x = 0; x < s->out_w; x++) {
-                size_t k = ((size_t)y * s->out_w + x) * 4;
-                oR[(size_t)y * ols_r + x] = src[k];
-                oG[(size_t)y * ols_g + x] = src[k + 1];
-                oB[(size_t)y * ols_b + x] = src[k + 2];
-            }
+    if ((ret = ff_filter_execute(ctx, unpack_slice, &td, NULL, nb_out)) < 0) {
+        av_frame_free(&in); av_frame_free(&out);
+        return ret;
     }
 
     av_frame_free(&in);
@@ -693,6 +773,7 @@ const FFFilter ff_vf_fsr2 = {
     .p.description = NULL_IF_CONFIG_SMALL("AMD FSR2 temporal upscale (DEGRADED: "
                                           "synthesised motion vectors, depth and jitter)"),
     .p.priv_class  = &fsr2_class,
+    .p.flags       = AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(FSR2Context),
     .uninit        = uninit,
     FILTER_INPUTS(fsr2_inputs),

@@ -1145,12 +1145,27 @@
      * code. `applied` false against a level that is not "off" is the "requested but not applied"
      * case, and it is always shown.
      */
+    /*
+     * The sizes, which are the only end-to-end proof that the size axis did anything. A kernel name
+     * in this row read as a size claim without being one, and the kernel has its own row below.
+     */
+    function sizeText(s) {
+        if (!s.OutputWidth || !s.OutputHeight) {
+            return null;
+        }
+
+        var to = s.OutputWidth + 'x' + s.OutputHeight;
+        return s.SourceWidth && s.SourceHeight
+            ? to + ' from ' + s.SourceWidth + 'x' + s.SourceHeight
+            : to;
+    }
+
     var LIVE_ROWS = [
-        { label: 'Upscaled', level: 'Upscaler', applied: 'UpscaleApplied' },
+        { label: 'Upscaled', derive: sizeText, applied: 'UpscaleApplied' },
         { label: 'Detail (SR)', level: 'SrLevel', requested: 'SrRequested' },
         { label: 'Unblur', level: 'DeblurLevel', applied: 'DeblurApplied' },
         { label: 'Denoise', level: 'DenoiseLevel', applied: 'DenoiseApplied' },
-        { label: 'Neural SR', level: 'NeuralLevel' },
+        { label: 'Neural SR', level: 'NeuralLevel', applied: 'NeuralApplied', requested: 'NeuralRequested' },
         { label: 'Game upscaler', level: 'GameLevel', applied: 'GameApplied' },
         // What the server actually ran those three with - read from the record, never from what
         // this panel asked for. Null when no game upscaler ran, and a null row prints nothing.
@@ -1160,9 +1175,8 @@
         { label: 'Refine', level: 'RefineLevel', applied: 'RefineApplied' },
         { label: 'Chroma', level: 'ChromaLevel', applied: 'ChromaApplied' },
         { label: 'Debanding', applied: 'DebandApplied' },
-        // Same field the 'Upscaled' row reads: the record names one libplacebo kernel, and this
-        // row is the only place a chosen 'default' is confirmed against what the server actually
-        // picked for it.
+        // The only row reading Upscaler now that 'Upscaled' prints sizes, so a chosen kernel is
+        // confirmed against what the server picked rather than sharing a field with a size claim.
         { label: 'Scaling kernel', level: 'Upscaler' },
         { label: 'Encoder', level: 'Encoder', note: 'EncoderReason' }
     ];
@@ -1241,8 +1255,8 @@
         }
 
         LIVE_ROWS.forEach(function (r) {
-            var val = r.level ? s[r.level] : null;
-            if (!r.level && r.applied) {
+            var val = r.derive ? r.derive(s) : (r.level ? s[r.level] : null);
+            if (!r.level && !r.derive && r.applied) {
                 val = s[r.applied] ? 'on' : 'off';
             }
 

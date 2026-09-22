@@ -121,6 +121,11 @@ typedef struct OptixContext {
     CUdeviceptr d_in;
     CUdeviceptr d_out[2];    /* ping-pong: OptiX forbids output == previousOutput */
     CUdeviceptr d_flow;
+    /* hdr only: the model is scale-dependent and needs an intensity value. The output is a single
+     * float; computeIntensitySizeInBytes is the SCRATCH that call needs (optix_types.h:1774), and
+     * nothing documents the denoiser's own scratch as large enough for it, so it gets its own. */
+    CUdeviceptr d_intensity;
+    CUdeviceptr d_intensity_scratch;
     int         out_slot;
     int         have_previous;
 
@@ -362,9 +367,18 @@ static av_cold int nvof_init(AVFilterContext *ctx)
         return AVERROR(ENOSYS);
     }
 
-    s->nvof.nvOFGPUBufferGetStrideInfo(s->nvof_frame[0], &stride);
+    /* These two pitches drive every cuMemcpy2D in and out of NVOFA.  On failure the
+     * stride struct is untouched, so an unchecked call leaves them holding stack
+     * garbage and the copies scribble at that stride.  Degrade to zero flow instead. */
+    if ((st = s->nvof.nvOFGPUBufferGetStrideInfo(s->nvof_frame[0], &stride)) != NV_OF_SUCCESS) {
+        av_log(ctx, AV_LOG_WARNING, "NVOFA input stride failed (%d)\n", st);
+        return AVERROR(ENOSYS);
+    }
     s->nvof_in_pitch = stride.strideInfo[0].strideXInBytes;
-    s->nvof.nvOFGPUBufferGetStrideInfo(s->nvof_out, &stride);
+    if ((st = s->nvof.nvOFGPUBufferGetStrideInfo(s->nvof_out, &stride)) != NV_OF_SUCCESS) {
+        av_log(ctx, AV_LOG_WARNING, "NVOFA output stride failed (%d)\n", st);
+        return AVERROR(ENOSYS);
+    }
     s->nvof_out_pitch = stride.strideInfo[0].strideXInBytes;
 
     s->host_luma   = av_malloc_array((size_t)s->w, s->h);
@@ -432,6 +446,17 @@ static int config_input_pushed(AVFilterLink *inlink)
     s->host_rgb = av_malloc_array(npix * 3, sizeof(float));
     if (!s->host_rgb)
         return AVERROR(ENOMEM);
+
+    /* The HDR model judges its input against an average intensity it does not carry
+     * itself.  Left null, it denoises as if the frame were already normalised and the
+     * output comes back off-scale, which looks like a broken filter rather than a
+     * missing parameter.  A zero size means this build of the driver wants none. */
+    if (s->mode == OPTIX_MODE_HDR) {
+        CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_intensity, sizeof(float)));
+        if (s->sizes.computeIntensitySizeInBytes)
+            CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_intensity_scratch,
+                                            s->sizes.computeIntensitySizeInBytes));
+    }
 
     if (s->mode == OPTIX_MODE_TEMPORAL) {
         CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_flow, npix * 2 * sizeof(float)));
@@ -653,6 +678,20 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         }
     }
 
+    /* Must precede the invoke: it writes the very field the invoke reads, on the same
+     * stream, so the ordering is the stream's rather than ours.  The header requires
+     * hdrIntensity stay null for every other model. */
+    if (s->mode == OPTIX_MODE_HDR && s->d_intensity) {
+        if (optixDenoiserComputeIntensity(s->denoiser, s->stream, &image, s->d_intensity,
+                                          s->d_intensity_scratch,
+                                          s->sizes.computeIntensitySizeInBytes) != OPTIX_SUCCESS) {
+            av_log(ctx, AV_LOG_ERROR, "optixDenoiserComputeIntensity failed\n");
+            ret = AVERROR_EXTERNAL;
+            goto fail_ctx;
+        }
+        params.hdrIntensity = s->d_intensity;
+    }
+
     if (optixDenoiserInvoke(s->denoiser, s->stream, &params,
                             s->d_state, s->sizes.stateSizeInBytes,
                             &guide, &layer, 1, 0, 0,
@@ -724,6 +763,8 @@ static av_cold void uninit(AVFilterContext *ctx)
         if (s->d_out[0])  s->cu->cuMemFree(s->d_out[0]);
         if (s->d_out[1])  s->cu->cuMemFree(s->d_out[1]);
         if (s->d_flow)    s->cu->cuMemFree(s->d_flow);
+        if (s->d_intensity) s->cu->cuMemFree(s->d_intensity);
+        if (s->d_intensity_scratch) s->cu->cuMemFree(s->d_intensity_scratch);
         if (s->stream)    s->cu->cuStreamDestroy(s->stream);
         if (s->cu_ctx) {
             if (pushed)

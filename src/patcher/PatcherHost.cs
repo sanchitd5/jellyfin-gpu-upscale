@@ -183,6 +183,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ["DenoiseApplied"] = false,
                     ["DenoiseLevel"] = "off",
                     ["NeuralLevel"] = "off",
+                    ["NeuralApplied"] = false,
+                    ["NeuralRequested"] = "off",
+                    ["SourceWidth"] = 0,
+                    ["SourceHeight"] = 0,
+                    ["OutputWidth"] = 0,
+                    ["OutputHeight"] = 0,
                     ["GameLevel"] = "off",
                     ["DebandApplied"] = false,
                     ["SrLevel"] = "off",
@@ -206,6 +212,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["DenoiseApplied"] = record.DenoiseApplied,
                 ["DenoiseLevel"] = record.DenoiseLevel ?? "off",
                 ["NeuralLevel"] = record.NeuralLevel ?? "off",
+                // Applied and requested both, so the panel can say "asked for, did not run" instead
+                // of showing a dropped network exactly like one nobody selected.
+                ["NeuralApplied"] = record.NeuralApplied,
+                ["NeuralRequested"] = record.NeuralRequested ?? "off",
+                // Flat, not only nested in Record: these four are the single end-to-end proof that
+                // the size axis did anything, and the panel cannot reach them where they are.
+                ["SourceWidth"] = record.SourceWidth,
+                ["SourceHeight"] = record.SourceHeight,
+                ["OutputWidth"] = record.OutputWidth,
+                ["OutputHeight"] = record.OutputHeight,
                 ["GameLevel"] = record.GameLevel ?? "off",
                 ["GameApplied"] = record.GameApplied,
                 ["GameJitter"] = record.GameJitter,

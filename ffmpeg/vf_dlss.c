@@ -122,6 +122,10 @@ typedef struct DLSSContext {
     int                  req_w, req_h;
 } DLSSContext;
 
+typedef struct ThreadData {
+    AVFrame *in, *out;
+} ThreadData;
+
 #define OFFSET(x) offsetof(DLSSContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM
 
@@ -562,6 +566,15 @@ static int config_output(AVFilterLink *outlink)
         (ret = image_create(ctx, s, &s->out,   s->out_w,  s->out_h,  VK_FORMAT_R16G16B16A16_SFLOAT, 8, 1)) < 0)
         return ret;
 
+    /* Alpha never varies, and nothing else writes that lane, so the staging
+     * buffer carries it from here instead of every pixel of every frame.
+     * 0x3c00 is half 1.0. */
+    {
+        uint16_t *a = (uint16_t *)s->color.host;
+        for (i = 0; i < (size_t)inlink->w * inlink->h; i++)
+            a[i * 4 + 3] = 0x3c00;
+    }
+
     cp.Feature.InWidth        = inlink->w;
     cp.Feature.InHeight       = inlink->h;
     cp.Feature.InTargetWidth  = s->out_w;
@@ -628,6 +641,84 @@ static uint16_t f2h(float f)
     return (uint16_t)(sign | (exp << 10) | (man >> 13));
 }
 
+static float h2f(uint16_t v)
+{
+    uint32_t sign = (uint32_t)(v & 0x8000) << 16;
+    int32_t  exp  = (v >> 10) & 0x1f;
+    uint32_t man  = v & 0x3ff;
+    uint32_t bits;
+
+    if (!exp)           bits = sign;
+    else if (exp == 31) bits = sign | 0x7f800000 | (man << 13);
+    else                bits = sign | ((uint32_t)(exp - 15 + 127) << 23) | (man << 13);
+    return av_int2float(bits);
+}
+
+/* gbrpf32le: plane 0 = G, plane 1 = B, plane 2 = R.  Alpha is not touched: it
+ * was staged once in config_output. */
+static int pack_color_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    DLSSContext *s = ctx->priv;
+    ThreadData *td = arg;
+    const int h0 = (s->cfg_h * jobnr) / nb_jobs;
+    const int h1 = (s->cfg_h * (jobnr + 1)) / nb_jobs;
+
+    for (int y = h0; y < h1; y++) {
+        const float *g = (const float *)(td->in->data[0] + y * td->in->linesize[0]);
+        const float *b = (const float *)(td->in->data[1] + y * td->in->linesize[1]);
+        const float *r = (const float *)(td->in->data[2] + y * td->in->linesize[2]);
+        uint16_t *dst = (uint16_t *)s->color.host + (size_t)y * s->cfg_w * 4;
+
+        for (int x = 0; x < s->cfg_w; x++) {
+            dst[4 * x + 0] = f2h(r[x]);
+            dst[4 * x + 1] = f2h(g[x]);
+            dst[4 * x + 2] = f2h(b[x]);
+        }
+    }
+    return 0;
+}
+
+/* current -> previous, render-resolution pixels, so InMVScale is 1,1 */
+static int pack_mv_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    DLSSContext *s = ctx->priv;
+    const int h0 = (s->cfg_h * jobnr) / nb_jobs;
+    const int h1 = (s->cfg_h * (jobnr + 1)) / nb_jobs;
+
+    for (int y = h0; y < h1; y++) {
+        const float *flow = s->g.flow + (size_t)y * s->cfg_w * 2;
+        uint16_t *dst = (uint16_t *)s->mv.host + (size_t)y * s->cfg_w * 2;
+
+        for (int x = 0; x < s->cfg_w; x++) {
+            dst[2 * x + 0] = f2h(-flow[2 * x + 0]);
+            dst[2 * x + 1] = f2h(-flow[2 * x + 1]);
+        }
+    }
+    return 0;
+}
+
+static int unpack_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
+{
+    DLSSContext *s = ctx->priv;
+    ThreadData *td = arg;
+    const int h0 = (s->out_h * jobnr) / nb_jobs;
+    const int h1 = (s->out_h * (jobnr + 1)) / nb_jobs;
+
+    for (int y = h0; y < h1; y++) {
+        float *g = (float *)(td->out->data[0] + y * td->out->linesize[0]);
+        float *b = (float *)(td->out->data[1] + y * td->out->linesize[1]);
+        float *r = (float *)(td->out->data[2] + y * td->out->linesize[2]);
+        const uint16_t *src = (const uint16_t *)s->out.host + (size_t)y * s->out_w * 4;
+
+        for (int x = 0; x < s->out_w; x++) {
+            r[x] = h2f(src[4 * x + 0]);
+            g[x] = h2f(src[4 * x + 1]);
+            b[x] = h2f(src[4 * x + 2]);
+        }
+    }
+    return 0;
+}
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -638,9 +729,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     NVSDK_NGX_Resource_VK r_color, r_depth, r_mv, r_bias, r_out;
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     NVSDK_NGX_Result r;
-    const float *R, *G, *B;
-    uint16_t *h16;
-    int rls, gls, bls, x, y, ret;
+    const int nb_threads = ff_filter_get_nb_threads(ctx);
+    const int nb_in  = FFMIN(inlink->h, nb_threads);
+    const int nb_out = FFMIN(s->out_h, nb_threads);
+    ThreadData td;
+    int ret;
 
     if (!s->ngx_ready) { av_frame_free(&in); return AVERROR(EINVAL); }
 
@@ -650,29 +743,17 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     if (!out) { av_frame_free(&in); return AVERROR(ENOMEM); }
     av_frame_copy_props(out, in);
 
-    R = (const float *)in->data[2]; G = (const float *)in->data[0]; B = (const float *)in->data[1];
-    rls = in->linesize[2] / 4; gls = in->linesize[0] / 4; bls = in->linesize[1] / 4;
+    td.in  = in;
+    td.out = out;
 
-    h16 = (uint16_t *)s->color.host;
-    for (y = 0; y < inlink->h; y++)
-        for (x = 0; x < inlink->w; x++) {
-            size_t k = ((size_t)y * inlink->w + x) * 4;
-            h16[k]     = f2h(R[(size_t)y * rls + x]);
-            h16[k + 1] = f2h(G[(size_t)y * gls + x]);
-            h16[k + 2] = f2h(B[(size_t)y * bls + x]);
-            h16[k + 3] = f2h(1.0f);
-        }
+    if ((ret = ff_filter_execute(ctx, pack_color_slice, &td, NULL, nb_in)) < 0 ||
+        (ret = ff_filter_execute(ctx, pack_mv_slice,    &td, NULL, nb_in)) < 0) {
+        av_frame_free(&in); av_frame_free(&out);
+        return ret;
+    }
+
     memcpy(s->depth.host, s->g.depth, (size_t)inlink->w * inlink->h * sizeof(float));
     memcpy(s->bias.host,  s->g.reactive, (size_t)inlink->w * inlink->h * sizeof(float));
-
-    /* current -> previous, render-resolution pixels, so InMVScale is 1,1 */
-    h16 = (uint16_t *)s->mv.host;
-    for (y = 0; y < inlink->h; y++)
-        for (x = 0; x < inlink->w; x++) {
-            size_t k = (size_t)y * inlink->w + x;
-            h16[k * 2]     = f2h(-s->g.flow[k * 2]);
-            h16[k * 2 + 1] = f2h(-s->g.flow[k * 2 + 1]);
-        }
 
     vkResetCommandBuffer(s->cmd, 0);
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -732,30 +813,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         return ret;
     }
 
-    {
-        const uint16_t *src = (const uint16_t *)s->out.host;
-        float *oR = (float *)out->data[2], *oG = (float *)out->data[0],
-              *oB = (float *)out->data[1];
-        int lr = out->linesize[2] / 4, lg = out->linesize[0] / 4, lb = out->linesize[1] / 4;
-        /* half -> float, straightforward and not on the hot path */
-        for (y = 0; y < s->out_h; y++)
-            for (x = 0; x < s->out_w; x++) {
-                size_t k = ((size_t)y * s->out_w + x) * 4;
-                int c;
-                float *dstp[3] = { &oR[(size_t)y * lr + x], &oG[(size_t)y * lg + x],
-                                   &oB[(size_t)y * lb + x] };
-                for (c = 0; c < 3; c++) {
-                    uint16_t v = src[k + c];
-                    uint32_t sign = (uint32_t)(v & 0x8000) << 16;
-                    int32_t  exp  = (v >> 10) & 0x1f;
-                    uint32_t man  = v & 0x3ff;
-                    uint32_t bits;
-                    if (!exp)       bits = sign;
-                    else if (exp == 31) bits = sign | 0x7f800000 | (man << 13);
-                    else            bits = sign | ((uint32_t)(exp - 15 + 127) << 23) | (man << 13);
-                    *dstp[c] = av_int2float(bits);
-                }
-            }
+    if ((ret = ff_filter_execute(ctx, unpack_slice, &td, NULL, nb_out)) < 0) {
+        av_frame_free(&in); av_frame_free(&out);
+        return ret;
     }
 
     av_frame_free(&in);
@@ -780,6 +840,7 @@ const FFFilter ff_vf_dlss = {
     .p.description = NULL_IF_CONFIG_SMALL("NVIDIA DLSS Super Resolution / DLAA (DEGRADED: "
                                           "synthesised motion vectors, depth and jitter)"),
     .p.priv_class  = &dlss_class,
+    .p.flags       = AVFILTER_FLAG_SLICE_THREADS,
     .priv_size     = sizeof(DLSSContext),
     .uninit        = uninit,
     FILTER_INPUTS(dlss_inputs),

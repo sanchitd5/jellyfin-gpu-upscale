@@ -1104,6 +1104,35 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return File.Exists(path) ? path : null;
         }
 
+        /// <summary>
+        /// The prefix libplacebo's shader_cache option takes for this shader combination, or null
+        /// when there is nowhere to put it.
+        ///
+        /// It is a PATH PREFIX, not a directory: libplacebo appends its own suffixes and will leave
+        /// hundreds of scratch files beside whatever it is pointed at. So it is pointed inside a
+        /// subdirectory of the shader cache directory, where that litter stays away from the
+        /// composed .glsl files Compose() writes and can be cleared wholesale. The composed file's
+        /// name already identifies the combination, which is exactly the key the cache needs.
+        /// </summary>
+        public static string ShaderCachePrefix(UpscaleSettings cfg, string shaderPath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(cfg?.ShaderCacheDirectory) || string.IsNullOrWhiteSpace(shaderPath))
+                {
+                    return null;
+                }
+
+                string dir = Path.Combine(cfg.ShaderCacheDirectory, "plcache");
+                Directory.CreateDirectory(dir);
+                return Path.Combine(dir, Path.GetFileNameWithoutExtension(shaderPath));
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private static string Compose(UpscaleSettings cfg, List<string> names, List<string> files)
         {
             string dir = cfg.ShaderCacheDirectory;
