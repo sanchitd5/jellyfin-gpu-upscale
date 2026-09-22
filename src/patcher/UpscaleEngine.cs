@@ -765,7 +765,102 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         /* ------------------------------------------------------------------------- the decision */
 
-        private static string Option(EncodingJobInfo state, string name)
+        /// <summary>
+        /// Every axis this plugin reads off the request, in one place, because two things now need
+        /// the same list: deciding whether a session named anything, and remembering what it named.
+        /// </summary>
+        private static readonly string[] _axisNames =
+        {
+            "upscale", "maxheight", "sr", "deblur", "deblock", "denoise", "neural", "game",
+            "refine", "chroma", "deband", "kernel", "jitter", "depth", "reactive"
+        };
+
+        // The axes a play session arrived with, kept so a later request for the SAME session that
+        // lost them can be answered with what the viewer actually chose. Bounded, and evicted with
+        // the session record, so a long-running server does not accumulate them.
+        private static readonly ConcurrentDictionary<string, Dictionary<string, string>> _optionsBySession =
+            new ConcurrentDictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// THE PARAMETERS DO NOT SURVIVE THE HLS MASTER PLAYLIST.
+        ///
+        /// The client marks the TranscodingUrl, which is the master playlist. Jellyfin then writes
+        /// the VARIANT urls into that playlist itself, and it writes the parameters it knows about,
+        /// not ours. The browser fetches the variant, and that request - the one that actually
+        /// builds the ffmpeg command - arrives with every axis missing, so the server falls back to
+        /// its dashboard defaults and honestly reports having done so. The viewer sees their picks
+        /// in the panel, a chain that is not theirs on the stream, and nothing anywhere saying why.
+        ///
+        /// PlaySessionId does survive that hop, so the axes are remembered against it the first
+        /// time they are seen and restored for later requests of the same session that lack them.
+        /// A request that carries axes always wins: this only ever fills a gap.
+        /// </summary>
+        private static void RememberOrRestoreOptions(EncodingJobInfo state)
+        {
+            try
+            {
+                string key = SessionKey(state);
+                if (string.IsNullOrEmpty(key))
+                {
+                    return;
+                }
+
+                var present = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string axis in _axisNames)
+                {
+                    string value = RawOption(state, axis);
+                    if (value != null)
+                    {
+                        present[axis] = value;
+                    }
+                }
+
+                if (present.Count > 0)
+                {
+                    // Bounded the crude way rather than leaked: this holds a handful of short
+                    // strings per session, and the cap is far above any real concurrent count.
+                    if (_optionsBySession.Count > 256)
+                    {
+                        _optionsBySession.Clear();
+                    }
+
+                    _optionsBySession[key] = present;
+                    return;
+                }
+
+                // Nothing on this request: restore what the session arrived with, if anything, by
+                // writing it back onto the request so every existing read path sees it unchanged.
+                if (!_optionsBySession.TryGetValue(key, out var remembered) || remembered == null)
+                {
+                    return;
+                }
+
+                foreach (var pair in remembered)
+                {
+                    try
+                    {
+                        // Indexer, not Add: Add throws on a key that is already there, and this
+                        // runs on the transcode path where that would be a failed session.
+                        var opts = state?.BaseRequest?.StreamOptions;
+                        if (opts != null)
+                        {
+                            opts[pair.Key] = pair.Value;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // A collection that refuses the write leaves the axis unset, which is the
+                        // behaviour before this existed rather than a new failure.
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Never throw into the transcode path for a convenience.
+            }
+        }
+
+        private static string RawOption(EncodingJobInfo state, string name)
         {
             try
             {
@@ -776,6 +871,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 return null;
             }
+        }
+
+        private static string Option(EncodingJobInfo state, string name)
+        {
+            return RawOption(state, name);
         }
 
         /// <summary>
@@ -809,6 +909,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         {
             try
             {
+                // Before anything reads an axis: the HLS variant request arrives without them, and
+                // this is where the session's own choices come back. See RememberOrRestoreOptions.
+                RememberOrRestoreOptions(state);
+
                 UpscaleSettings cfg = Settings;
                 if (cfg == null || !cfg.Enabled)
                 {
