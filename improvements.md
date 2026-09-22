@@ -97,45 +97,45 @@ Fixed immediately, because it was a regression introduced by round one:
 ## Red, unfixed
 
 ### Client sends nothing (`web/gpu-upscale.js`)
-- [ ] L650 `anyEnhancement()` tests only upscale/deblur/denoise, so a Custom pick of sr, neural, game,
+- [x] L650 `anyEnhancement()` tests only upscale/deblur/denoise, so a Custom pick of sr, neural, game,
   refine, chroma, kernel or deband never forces a transcode: direct play, nothing applied.
-- [ ] L1829 the seeding loop writes `effective()` over `state.prefs` and the next save persists it, so
+- [x] L1829 the seeding loop writes `effective()` over `state.prefs` and the next save persists it, so
   `stage: off` permanently wipes the viewer's stored sr/neural/game choices.
-- [ ] L2248 every axis but upscale is gated on `serverCaps.full`; a failed boot probe is never cached,
+- [x] L2248 every axis but upscale is gated on `serverCaps.full`; a failed boot probe is never cached,
   so all axes are silently dropped for the life of the page.
-- [ ] L1842 a partial probe answer rewrites stored preferences to `off` on disk.
+- [x] L1842 a partial probe answer rewrites stored preferences to `off` on disk.
 
 ### Shim (`shim/jellyfin-ffmpeg-upscale`)
-- [ ] L435 the upscale path runs ffmpeg via `Popen` with no signal handling. Jellyfin killing the shim
+- [x] L435 the upscale path runs ffmpeg via `Popen` with no signal handling. Jellyfin killing the shim
   orphans the child, still writing segments and holding the GPU.
-- [ ] L445 the per-pid error file is opened after `Popen`, and a failure there falls through to
+- [x] L445 the per-pid error file is opened after `Popen`, and a failure there falls through to
   `passthrough()` → `execv`, leaving two ffmpegs writing the same output.
-- [ ] L461 `rc != 0` retries the whole transcode even when the child was killed on purpose.
-- [ ] L464 `sys.exit(rc)` turns a signal death into exit status 241.
-- [ ] L77 a malformed config falls back to defaults that lack `plugin_patch_active`, so the shim
+- [x] L461 `rc != 0` retries the whole transcode even when the child was killed on purpose.
+- [x] L464 `sys.exit(rc)` turns a signal death into exit status 241.
+- [x] L77 a malformed config falls back to defaults that lack `plugin_patch_active`, so the shim
   rewrites a command the plugin is also rewriting. Should fail closed.
-- [ ] L101 `wants_patched` rejects `]` as a leading boundary, so a labelled filter_complex node routes
+- [x] L101 `wants_patched` rejects `]` as a leading boundary, so a labelled filter_complex node routes
   to the stock binary and fails outright instead of degrading.
 
 ### Patcher (`src/patcher/`)
-- [ ] `UpscalePatches.cs:83` `_harmony` is assigned after the core patch loop, so a throw mid-loop
+- [x] `UpscalePatches.cs:83` `_harmony` is assigned after the core patch loop, so a throw mid-loop
   leaves earlier patches installed and unpatchable: the partial core install the file forbids.
-- [ ] `UpscalePatches.cs:287` the four postfixes disagree on one session; a burn-in session gets Vulkan
+- [x] `UpscalePatches.cs:287` the four postfixes disagree on one session; a burn-in session gets Vulkan
   device args with the stock filter graph.
-- [ ] `UpscaleEngine.cs:291` history eviction deletes the live `_bySession` entry for a session that
+- [x] `UpscaleEngine.cs:291` history eviction deletes the live `_bySession` entry for a session that
   was recorded more than once, so the endpoint answers null for a playing session.
-- [ ] `UpscaleEngine.cs:750` an unrecognised session value falls back to the dashboard default rather
+- [x] `UpscaleEngine.cs:750` an unrecognised session value falls back to the dashboard default rather
   than to off, so a typo defeats an explicit Off and forces a transcode. Same at 775, 782, 827, 844, 858.
 
 ### ffmpeg filters
-- [ ] `gu_inputs.h:548` `dlclose` on ONNX Runtime crashes the process at teardown.
-- [ ] `gu_inputs.h:684` the depth output is read as 518x518 with no shape check; `dmodel=` is user-set,
+- [x] `gu_inputs.h:548` `dlclose` on ONNX Runtime crashes the process at teardown.
+- [x] `gu_inputs.h:684` the depth output is read as 518x518 with no shape check; `dmodel=` is user-set,
   so a different model is an out-of-bounds read.
-- [ ] `vf_dlss.c:361` and `vf_fsr2.c:376` `config_output` is not idempotent: a reconfigure leaks the
+- [x] `vf_dlss.c:361` and `vf_fsr2.c:376` `config_output` is not idempotent: a reconfigure leaks the
   instance, device, pool, fence, every image and the FSR2/NGX context.
-- [ ] `vf_dlss.c:672` NGX shutdown is process-wide but called per instance, so two dlss filters in one
+- [x] `vf_dlss.c:672` NGX shutdown is process-wide but called per instance, so two dlss filters in one
   process kill each other.
-- [ ] `vf_ort.c:348` a non-float32 model output is read as float32: an out-of-bounds read of megabytes.
+- [x] `vf_ort.c:348` a non-float32 model output is read as float32: an out-of-bounds read of megabytes.
 
 ## Amber
 Seventy-nine, recorded in the agent reports. The themes worth naming: no axis reserves its
@@ -323,3 +323,99 @@ sampling, the panel restructure, the ladder rework, and the apt hook.
 C# and no C in this repository has been compiled: the Jellyfin reference assemblies and the ffmpeg
 tree both live on the server. The next ffmpeg build is the first compile of every C change here,
 and a build failure on the first attempt is the expected outcome rather than a surprise.
+
+---
+
+# Round four: theory review (Opus, no measurements)
+
+Judged against signal-processing and imaging first principles rather than a benchmark.
+Sequencing came back sound: denoise strictly before SR, deband before the LUMA hooks. The errors
+are in colour spaces, scale ratios and a missing artefact model.
+
+- [x] **No colour range was ever declared.** libplacebo guessed on untagged sources and lifted black
+  by about 9/255, larger than every shader delta in README.md's own table. README recorded it as a
+  measurement trap and corrected it only in the benchmark harness, so the served segment carried a
+  shift the measurements did not. Sampled this server: 3 of 25 files untagged. Fixed: an untagged
+  source is told it is limited range, a file declaring full range is left alone.
+- Settled and closed, no action: chroma siting. Every sampled file reports `chroma_location=left`,
+  so libplacebo has the right siting and KrigBilateral's luma guide is aligned.
+
+## Pending
+
+Ordered by what is at stake. Nothing below is applied.
+
+### Needs a measurement before it can be done at all
+
+1. **Encoder rate control.** The plugin sets the encoder name and never the bitrate, so Jellyfin
+   sizes `-b:v`/`-maxrate` from the SOURCE resolution and clamps to source bitrate: four times the
+   pixels at 540p bitrate, and the quantiser removes what the shaders added. Two review agents and
+   the theory pass all put this first. Measure: served segment against ground truth at Jellyfin's
+   bitrate, at a pixel-scaled bitrate, and at `-cq`.
+2. **Source degradation is not modelled anywhere.** Every network here was trained on bicubic
+   downsampling of clean images and is fed DCT blocking and ringing. No deblock or dering pass
+   exists, and no decision reads the bitrate though `state.VideoStream.BitRate` is right there. The
+   evidence is already in the repo, read as something else: Anime4K below plain lanczos at 1.5x, and
+   EASU losing outright because it "locks onto compression-noise gradients". Measure: the deployed
+   chain on one source at two CRFs, ground-truth-referenced. If the gains hold at 0.085 bits/px,
+   this collapses to nothing.
+3. **GPU-resident NVENC handoff.** `hwdownload,format=yuv420p` sends every output frame through
+   system memory, about 12 MB per frame at 2160p, paid at output size.
+4. **10-bit output.** The deband pass is requantised to 8 bit on exit, throwing away most of what it
+   did. Effectively free on Ampere.
+5. **Cost-budget admission.** `HasCapacity()` counts processes, so a dlss session and a sharpen-only
+   session each consume one of two, and foreign libplacebo transcodes count too.
+6. **Depth every Nth frame**, warping between with the flow-warp EMA that already exists. The ViT is
+   probably the dominant cost of the game path. Measure the per-stage split inside
+   `gu_inputs_frame` first: that one number reorders this whole list.
+7. **Above 2x, the top octave gets no network.** A 2x network then `ewa_lanczos` across the second
+   octave. 540p to 2160p is reachable and offered. Either cascade the network or force a
+   ratio-agnostic level; `SrIsRatioAgnostic` already exists.
+8. **RCAS runs at 2x-source, not at output size**, which is what it was designed for, and is then
+   resampled. The README's own 1.5x detail numbers are consistent with the boost being partly
+   resampled away.
+9. **Sharpen-before-enlarge for the MAIN-hook families was never actually tested.** The comparison
+   that defends it changed the sharpener and its position at the same time.
+10. **The float group still exits to 8-bit 4:2:0 before libplacebo**, so a 4x network's output is
+    decimated before the scaler sees it.
+11. **OIDN is told `srgb=0`** (linear) while being handed gamma-encoded float.
+12. **Anti-ringing is never set**, and the kernel whitelist has no low-ringing default for degraded
+    material.
+13. Phase-correlation FFT cache: real, but not bit-exact, so it needs a measurement. Reason recorded
+    above.
+14. Bilinear flow sampling instead of nearest; Rec.709 luma weights instead of 601 for the NVOFA
+    input, plus a clamp on the cast.
+
+### Needs a decision, not a measurement
+
+- The panel restructure: Quality slider plus four rows, everything else behind one disclosure.
+- One content axis (photographic / animation / grainy) that the server maps to a recipe, seeded from
+  the library the server already knows.
+- The ladder recipe carrying `sr: 'ladder'` and the server resolving the family per ratio. The
+  client half of this wart is already fixed; the server half is a decision about what the ladder is.
+- Threshold arithmetic living in three places; a plan-preview endpoint would leave the client
+  deciding nothing.
+- The cost tables living in the browser as measurements of the server.
+- `scripts/99-jellyfin-gpuupscale`: the apt hook fires on every dpkg operation, and the other half of
+  the fix is host-side file ownership.
+
+### Cheap, no measurement, just not done yet
+
+- Accessibility: chips have no `role="radiogroup"` or `aria-checked`, the live block no `aria-live`,
+  the dialog no focus trap.
+- The apply timeout clears silently, so a change that did not land looks like one that did.
+- A failed probe still renders as "server understands upscale only", which is a lie during a restart.
+- The activity table: sizes, ratio, user, `SrBypassed`, and `EncoderReason` as text rather than a
+  `title` attribute invisible to touch and keyboard.
+- A worked line under the five interacting thresholds.
+- `Levels()` re-serialised into every 3s session poll.
+- The shim's fallback path contradicts the measurements: 16-weight FSRCNNX, no RCAS, no deband, and
+  it runs the fixed-2x network down to 1.15x.
+- `realesr-anime-x4` at a 2x target makes 4x pixels that libplacebo then halves.
+- The session record carries no throughput, so none of the measurements above can be settled by
+  looking rather than by hand-running a bench.
+
+### Verification state
+
+`py_compile` on the shim and `bash -n` on the shell scripts are the only checks that have run. No C
+and no C# in this repository has been compiled. The next ffmpeg build is the first compile of every
+C change, and the plugin build is the first compile of every C# change since this work began.
