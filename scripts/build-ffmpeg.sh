@@ -63,6 +63,13 @@
 #                                                  run are a SEPARATE NGC download this project does
 #                                                  not have yet.  See VSR.md; vsr will build and
 #                                                  register but is not confirmed to run.
+#               VFXSDK_DIR/lib also needs libcudart.so.12 and five libnpp*.so.12 files, which the
+#                                                  NGC SDK does NOT ship - CT114 has no CUDA toolkit
+#                                                  installed at all.  Fetched from NVIDIA's own public
+#                                                  PyPI wheels (nvidia-cuda-runtime-cu12, nvidia-npp-
+#                                                  cu12, nvidia-cudnn-cu12 for libcudnn.so.9), same
+#                                                  convention NEURAL.md documents for ORT's CUDA/cuDNN
+#                                                  libs.  See VSR.md for the exact commands.
 
 set -euo pipefail
 
@@ -193,6 +200,7 @@ if [[ "$WITH_VSR" == "1" ]]; then
         || die "WITH_VSR=1: no libVideoFX.so.1.3.0 under VFXSDK_DIR=$VFXSDK_DIR/lib (see VSR.md)"
     [[ -f "$VFXVSR_DIR/include/nvVFXVideoSuperRes.h" ]] \
         || die "WITH_VSR=1: no nvVFXVideoSuperRes.h under VFXVSR_DIR=$VFXVSR_DIR/include (see VSR.md)"
+    command -v patchelf >/dev/null || die "WITH_VSR=1: patchelf not found (apt install patchelf) - needed to fix libVideoFX.so's own rpath, see VSR.md"
     say "note: WITH_VSR builds and registers the filter but cannot be confirmed to RUN - the" \
         "nvvfxvideosuperres feature's TensorRT model files are a separate NGC download this project" \
         "does not have yet (VSR.md). Expect NvVFX_Load to fail until a models= directory with real" \
@@ -405,6 +413,16 @@ if [[ "$WITH_VSR" == "1" ]]; then
     cp -a "$VFXSDK_DIR"/lib/*.so* "$PREFIX/vfx/lib/"
     cp -a "$VFXVSR_DIR"/lib/*.so* "$PREFIX/vfx/features/nvvfxvideosuperres/"
     cp -a "$VFXVSR_DIR/include" "$PREFIX/vfx/features/nvvfxvideosuperres/"
+    # ffmpeg's own rpath (set above) is not transitive: it resolves ffmpeg's direct NEEDED entries
+    # but not libVideoFX.so's own NEEDED entries (the CUDA/NPP/cuDNN libs staged beside it), the
+    # same RUNPATH-non-transitivity NEURAL.md already documents and fixes for ORT's CUDA provider.
+    # Without this, ffmpeg fails to start at all with "error while loading shared libraries" - hit
+    # twice building this filter before this fix existed (VSR.md).
+    for lib in "$PREFIX/vfx/lib"/libVideoFX.so.* "$PREFIX/vfx/lib"/libVideoFXLocal.so.* \
+               "$PREFIX/vfx/lib"/libNVCVImage.so.* \
+               "$PREFIX/vfx/features/nvvfxvideosuperres"/libnvVFXVideoSuperRes.so; do
+        [[ -e "$lib" && ! -L "$lib" ]] && patchelf --set-rpath '$ORIGIN' "$lib"
+    done
     if [[ ! -d "$PREFIX/vfx/models" ]] || [[ -z "$(ls -A "$PREFIX/vfx/models" 2>/dev/null)" ]]; then
         say "note: $PREFIX/vfx/models is empty - vsr will build and register but NvVFX_Load will" \
             "fail without a models= directory holding real TensorRT model files (VSR.md)"

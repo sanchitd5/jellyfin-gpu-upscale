@@ -106,6 +106,10 @@ if [ "$WITH_FFMPEG" = "1" ]; then
     # registers" (the SDK's own TensorRT model files are a separate NGC download this project does
     # not have - see VSR.md), so it stays opt-in rather than mandatory-by-default. Pass WITH_VSR=1
     # explicitly to include it.
+    # build-ffmpeg.sh's own verify step `die`s on a missing filter, which under this script's
+    # `set -e` would abort straight past the restore logic below and leave the broken binary
+    # installed - happened twice on this exact VSR task before this guard existed. `|| true`
+    # keeps control here so the checks after this always run against whatever got installed.
     PREFIX="$FFMPEG_PREFIX" \
         WITH_OIDN="${WITH_OIDN:-1}" \
         WITH_OPTIX="${WITH_OPTIX:-1}" \
@@ -114,7 +118,7 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         WITH_DLSS="${WITH_DLSS:-1}" \
         WITH_VSR="${WITH_VSR:-0}" \
         OPTIX_SDK="${OPTIX_SDK:-/root/gameupscale/optix-dev-8.1.0}" \
-        ./scripts/build-ffmpeg.sh
+        ./scripts/build-ffmpeg.sh || true
 
     "$PATCHED_FFMPEG" -hide_banner -version >/dev/null 2>&1 || {
         echo "==> FAILED: $PATCHED_FFMPEG will not run at all (check its library paths)" >&2
