@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Jellyfin.Plugin.GpuUpscale.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -137,7 +138,8 @@ namespace Jellyfin.Plugin.GpuUpscale
             {
                 if (_host != null)
                 {
-                    return (string)_host.GetMethod("StatusJson", BindingFlags.Public | BindingFlags.Static).Invoke(null, null);
+                    string json = (string)_host.GetMethod("StatusJson", BindingFlags.Public | BindingFlags.Static).Invoke(null, null);
+                    return WithShimStatus(json);
                 }
             }
             catch (Exception)
@@ -145,7 +147,34 @@ namespace Jellyfin.Plugin.GpuUpscale
                 // fall through to the local status
             }
 
-            return JsonSerializer.Serialize(new { PatchActive = false, PatchStatus = Status, Sessions = Array.Empty<object>() });
+            return JsonSerializer.Serialize(new { PatchActive = false, PatchStatus = Status, ShimSync = ShimBridge.LastResult, Sessions = Array.Empty<object>() });
+        }
+
+        /// <summary>
+        /// Adds the shim's own sync result to the patcher's status.
+        ///
+        /// The dashboard has always printed this field and nothing has ever sent it, so the page
+        /// read "FFmpeg shim: undefined". The shim lives on this side of the load-context boundary,
+        /// so the patcher cannot report it and the plugin has to add it on the way out.
+        /// </summary>
+        private static string WithShimStatus(string json)
+        {
+            try
+            {
+                var node = JsonNode.Parse(json) as JsonObject;
+                if (node == null)
+                {
+                    return json;
+                }
+
+                node["ShimSync"] = ShimBridge.LastResult;
+                return node.ToJsonString();
+            }
+            catch (Exception)
+            {
+                // The status is worth more than the extra field.
+                return json;
+            }
         }
 
         private static string Serialize(PluginConfiguration configuration) => JsonSerializer.Serialize(configuration);

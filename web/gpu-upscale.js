@@ -6,11 +6,14 @@
  *
  *     Quality     Automatic / Off / Manual, and when Manual, a slider over the graded ladder
  *                 generated for the source now playing
- *     The axes    one row each, grouped by intent, the control type chosen from the data:
- *                 segmented chips for a graded or short axis, a compact picker for a long one
- *     What the    the server's own record for the session playing, refreshed while the panel is
- *     server is   open, including the negatives: bypassed, requested but not applied, no chain
- *     doing       built at all
+ *     Three axes  the ones a viewer mid-film actually reaches for - the target, the detail
+ *                 network and denoise - one row each, the control type chosen from the data
+ *     Advanced    ONE disclosure, closed by default, holding every other axis, with the game
+ *                 upscaler and its three synthesised inputs as one row inside it. Nothing is
+ *                 lost behind it: the summary says how many controls in there are set.
+ *     What the    the server's own record for the session playing, OUTSIDE the disclosure and
+ *     server is   always visible, refreshed while the panel is open, including the negatives:
+ *     doing       bypassed, requested but not applied, no chain built at all
  *
  * A NEW LEVEL IS DATA. Adding one means an entry in an options array; adding a whole axis means an
  * entry in CONTROLS (with its probe key, its group and, if it grades, its rungs) plus one line in
@@ -53,7 +56,11 @@
 
     var CONTROLS = [
         {
-            key: 'upscale', label: 'Upscale to', fallback: 'off', group: 'Size', chips: true,
+            // `basic` is the tier: a numbered basic control is always visible, in that number's
+            // order, and everything without one lives behind the Advanced disclosure. A number
+            // rather than a flag because the three always-visible rows are not in CONTROLS order
+            // and reordering the array would move the probe-driven groups with them.
+            key: 'upscale', label: 'Upscale to', fallback: 'off', group: 'Size', chips: true, basic: 1,
             options: [
                 { id: 'off', name: 'Off' },
                 { id: '1080', name: '1080p' },
@@ -88,7 +95,7 @@
             // a SPATIAL denoiser, kept because it attacks grain a temporal filter leaves alone.
             // hqdn3d was retired (no recovery at all) and tmix is deliberately absent (it ghosts
             // even on 96% still content) - both are recorded in ShaderLibrary.
-            key: 'denoise', label: 'Denoise', fallback: 'off', group: 'Noise',
+            key: 'denoise', label: 'Denoise', fallback: 'off', group: 'Noise', basic: 3,
             probeKey: 'Denoise', grade: ['off', 'light', 'strong', 'max'],
             options: [
                 { id: 'off', name: 'Off' },
@@ -138,7 +145,11 @@
             // They are the most expensive levels in the project - measured 960x540 to 1080p in the
             // deployed chain: 87.9 fps with the axis off against 7.8 (dlaa), 4.0 (dlss) and 2.7
             // (fsr2) - so each option carries its cost beside it. None is ever a ladder rung.
+            // `expert` names a cluster that reads as ONE axis to a viewer: the upscaler and the
+            // three inputs it is fed. The cluster's own disclosure is opened by the control whose
+            // `expertHead` says it leads, so the three inputs are one row until someone wants them.
             key: 'game', label: 'Game temporal upscaler', fallback: 'off', group: 'Detail',
+            expert: 'game', expertHead: true,
             probeKey: 'Game', labelsKey: 'GameLabels', fromProbe: true, costKey: 'game',
             options: [{ id: 'off', name: 'Off' }]
         },
@@ -154,18 +165,21 @@
             // 'default' is this script's own neutral id: it sends nothing, so the dashboard value
             // applies, exactly as it does on Refine, Chroma and Debanding.
             key: 'jitter', label: 'Game upscaler: jitter source', fallback: 'default', group: 'Detail',
+            expert: 'game',
             probeKey: 'GameJitter', labelsKey: 'GameJitterLabels', fromProbe: true,
             showWhen: { key: 'game', levelsKey: 'GameOptionLevels' },
             options: [{ id: 'default', name: 'Server default' }]
         },
         {
             key: 'depth', label: 'Game upscaler: depth source', fallback: 'default', group: 'Detail',
+            expert: 'game',
             probeKey: 'GameDepth', labelsKey: 'GameDepthLabels', fromProbe: true,
             showWhen: { key: 'game', levelsKey: 'GameOptionLevels' },
             options: [{ id: 'default', name: 'Server default' }]
         },
         {
             key: 'reactive', label: 'Game upscaler: reactive mask', fallback: 'default', group: 'Detail',
+            expert: 'game',
             probeKey: 'GameReactive', labelsKey: 'GameReactiveLabels', fromProbe: true,
             showWhen: { key: 'game', levelsKey: 'GameOptionLevels' },
             options: [{ id: 'default', name: 'Server default' }]
@@ -175,7 +189,7 @@
             // which weight, so the viewer can tell them apart rather than trusting an opaque
             // "Light / Standard / Max" that hid a family swap.
             key: 'sr', label: 'Detail (super-resolution)', fallback: 'fsrcnnx', group: 'Detail',
-            probeKey: 'Sr',
+            probeKey: 'Sr', basic: 2,
             options: [
                 { id: 'off', name: 'Off (plain scaling)' },
                 { id: 'fsrcnnx', name: 'FSRCNNX' },
@@ -358,6 +372,9 @@
         playbackHooked: false,
         applying: null,
         applyTimer: null,
+        // True once a re-negotiation was asked for and did not land. Kept because clearing
+        // `applying` on its own made a change that never happened look exactly like one that did.
+        applyFailed: false,
         // jellyfin-web does not put playbackManager on window, so it is recognised by shape
         // in the webpack module exports this script already wraps. Null until a module
         // carrying it has run.
@@ -812,7 +829,8 @@
             return Promise.resolve(state.serverCaps);
         }
 
-        var no = { full: false };
+        // Not "target only": not answered. The panel words the two differently.
+        var no = { full: false, failed: true };
         try {
             var client = window.ApiClient;
             if (!client || typeof client.getUrl !== 'function') {
@@ -827,13 +845,19 @@
                 // The probe answer carries the levels this server can really deliver. Keep them:
                 // axisControls narrows the option lists to them. A server too old to send Levels
                 // leaves it null, and the panel falls back to the full lists, which is what that
-                // generation could do anyway.
+                // generation could do anyway. This is the ONLY response that carries them: the
+                // session poll does not, because they change on a config change or an install and
+                // not three times a minute.
                 state.serverCaps = { full: true, levels: (res && res.Levels) || null };
                 log('server probe: full capabilities', state.serverCaps.levels);
                 return state.serverCaps;
             }, function (err) {
-                log('server probe failed; will retry on next panel open', err);
-                return no;
+                // A 404 is the server ANSWERING: this build has no probe endpoint, so it really is
+                // the generation that understands the target alone. Anything else - no response, a
+                // gateway error while Jellyfin restarts - is not an answer about capabilities.
+                var status = (err && (err.status || (err.response && err.response.status))) || 0;
+                log('server probe failed; will retry on next panel open', status, err);
+                return status === 404 ? { full: false, targetOnly: true } : no;
             });
         } catch (err) {
             return Promise.resolve(no);
@@ -923,6 +947,7 @@
                 return {
                     key: c.key, label: c.label, fallback: c.fallback, probeKey: c.probeKey || null,
                     group: c.group || 'Detail',
+                    basic: c.basic || 0, expert: c.expert || null, expertHead: !!c.expertHead,
                     grade: c.grade || null, chips: !!c.chips, costKey: c.costKey || null,
                     showWhen: c.showWhen || null, options: options
                 };
@@ -1023,6 +1048,15 @@
      */
     var APPLY_DEBOUNCE = 700;
 
+    // What is actually about to happen, rather than a bare "applying...": the stream is torn down
+    // and restarted at this position, which is a second of black the viewer should expect.
+    var APPLY_LABEL = 'restarting the stream here…';
+
+    // Said in the panel when the re-negotiation never landed. The selection is not lost: it rides
+    // on the next PlaybackInfo, which is what "next negotiates" means.
+    var APPLY_FAILED_TEXT = 'That change did not land: the stream was not renegotiated.'
+        + ' It applies when playback next negotiates.';
+
     function panelEl() {
         return document.getElementById(PANEL_ID);
     }
@@ -1030,7 +1064,7 @@
     function repaintPanel() {
         try {
             var p = panelEl();
-            if (p) { renderPanel(p, state.caps || { full: false }); }
+            if (p) { renderPanel(p, state.caps || { full: false, failed: true }); }
         } catch (err) { /* the panel is never worth breaking playback for */ }
     }
 
@@ -1108,15 +1142,19 @@
         var timer = setInterval(function () {
             try {
                 tries++;
-                var done = (state.playSessionId && state.playSessionId !== previousId) || tries > 48;
-                if (done) {
+                var landed = !!(state.playSessionId && state.playSessionId !== previousId);
+                if (landed || tries > 48) {
                     clearInterval(timer);
                     state.applying = null;
+                    // A timeout is a FAILURE, not a finish. Clearing the label without recording
+                    // it left a change that never reached the server looking like one that did.
+                    state.applyFailed = !landed;
                     repaintPanel();
                 }
             } catch (err) {
                 clearInterval(timer);
                 state.applying = null;
+                state.applyFailed = true;
             }
         }, 250);
     }
@@ -1125,6 +1163,7 @@
         state.applyTimer = null;
         if (!playerPresent()) {
             state.applying = null;
+            state.applyFailed = true;
             repaintPanel();
             return;
         }
@@ -1138,11 +1177,12 @@
                 // saved setting with nothing. Not worth it: say so and leave playback alone.
                 log('no current bitrate to hand back; the change applies on the next playback');
                 state.applying = null;
+                state.applyFailed = true;
                 repaintPanel();
                 return;
             }
 
-            state.applying = 'applying\u2026';
+            state.applying = APPLY_LABEL;
             repaintPanel();
             pm.setMaxStreamingBitrate({ enableAutomaticBitrateDetection: false, maxBitrate: current });
             log('asked the player to renegotiate at the current position');
@@ -1150,6 +1190,7 @@
         } catch (err) {
             log('could not renegotiate; the change applies on the next playback', err);
             state.applying = null;
+            state.applyFailed = true;
             repaintPanel();
         }
     }
@@ -1167,7 +1208,9 @@
                 return;
             }
 
-            state.applying = 'applying\u2026';
+            // A fresh attempt, so the last failure is no longer what is being reported.
+            state.applyFailed = false;
+            state.applying = APPLY_LABEL;
             state.applyTimer = setTimeout(doApply, APPLY_DEBOUNCE);
         } catch (err) {
             log('could not schedule the change', err);
@@ -1364,8 +1407,9 @@
     /* ------------------------------------------------------------------------- the flat panel */
 
     /*
-     * ONE SURFACE. Quality first, then every axis, then what the server actually did - all of it
-     * visible at once, over the video, with no nested sheets. The controls are chosen from the
+     * ONE SURFACE. Quality first, then the three axes worth interrupting a film for, then one
+     * Advanced disclosure holding the rest, then what the server actually did. No nested sheets,
+     * and the record of what ran is never inside the disclosure. The controls are chosen from the
      * DATA, not written per axis:
      *
      *   a control with a `grade` run   -> segmented chips over the graded rungs, plus a compact
@@ -1376,6 +1420,11 @@
      * So a new level is a new entry in an options array, and a new axis is a new entry in CONTROLS
      * plus one line in LIVE_ROWS. Neither needs a line of rendering code.
      */
+    // Everything the panel's tab order and its focus-across-a-repaint have to account for. A
+    // <summary> is focusable and carries the disclosures, so leaving it out of this list would put
+    // the Advanced section outside the trap and out of a remote's reach.
+    var FOCUSABLE = 'button,select,input,summary';
+
     var PANEL_ID = 'gpuUpscalePanel';
     var STYLE_ID = 'gpuUpscalePanelStyle';
     var CSS = [
@@ -1404,6 +1453,16 @@
         'border-radius:.3em;padding:.12em .3em;font-size:.95em;font-family:inherit;max-width:100%;}',
         '.gpuup-slider{width:100%;margin:.3em 0 .1em;}',
         '.gpuup-note{opacity:.6;font-size:.9em;margin-top:.1em;}',
+        '.gpuup-more{margin:.6em 0 .2em;border-top:1px solid rgba(255,255,255,.12);padding-top:.4em;}',
+        '.gpuup-more>summary{cursor:pointer;list-style:none;padding:.15em 0;opacity:.85;',
+        'font-size:.95em;letter-spacing:.03em;}',
+        '.gpuup-more>summary::-webkit-details-marker{display:none;}',
+        '.gpuup-more>summary:focus-visible{outline:2px solid #00a4dc;}',
+        '.gpuup-more>summary::before{content:"\\25b8 ";opacity:.7;}',
+        '.gpuup-more[open]>summary::before{content:"\\25be ";}',
+        '.gpuup-changed{color:#00a4dc;opacity:.95;}',
+        '.gpuup-sub{margin:.35em 0 .35em .2em;padding-left:.5em;',
+        'border-left:1px solid rgba(255,255,255,.12);}',
         '.gpuup-live div{display:flex;gap:.5em;margin:.15em 0;}',
         '.gpuup-live b{flex:0 0 7.5em;font-weight:400;opacity:.65;}',
         '.gpuup-live span{flex:1 1 auto;}'
@@ -1439,6 +1498,64 @@
         (document.head || document.documentElement).appendChild(s);
     }
 
+    /*
+     * WHICH DISCLOSURES THIS VIEWER LEAVES OPEN. Kept apart from the preferences so that a corrupt
+     * or absent entry costs a closed section and nothing else, and wrapped in try/catch like every
+     * other storage read here: a browser that refuses localStorage still gets a working panel.
+     */
+    var OPEN_STORE = 'gpuUpscaleOpen';
+
+    function openState() {
+        try {
+            var raw = window.localStorage && window.localStorage.getItem(OPEN_STORE);
+            var parsed = raw ? JSON.parse(raw) : null;
+            return (parsed && typeof parsed === 'object') ? parsed : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function isOpen(id) {
+        return !!openState()[id];
+    }
+
+    function setOpen(id, on) {
+        try {
+            var map = openState();
+            map[id] = !!on;
+            window.localStorage.setItem(OPEN_STORE, JSON.stringify(map));
+        } catch (e) { /* the section simply opens closed next time */ }
+    }
+
+    /*
+     * A native <details>, so the keyboard, the screen reader and the remote all behave without a
+     * line of code here: it is a real disclosure widget rather than a div pretending to be one.
+     * Its open state is remembered per viewer, and the summary carries a count of what is set
+     * inside it - a control hidden at a non-default value must still announce itself.
+     */
+    function disclosure(id, title, changed) {
+        var d = el('details', 'gpuup-more');
+        d.open = isOpen(id);
+        var sum = el('summary', null, title);
+        if (changed > 0) {
+            sum.appendChild(document.createTextNode(' '));
+            sum.appendChild(el('span', 'gpuup-changed', '(' + changed + ' changed)'));
+        }
+
+        d.appendChild(sum);
+        d.addEventListener('toggle', function () { setOpen(id, d.open); });
+        return d;
+    }
+
+    /* How many of these controls are away from their own neutral value. */
+    function changedCount(controls) {
+        var shown = shownPrefs();
+        return controls.filter(function (c) {
+            var v = shown[c.key];
+            return v != null && v !== c.fallback;
+        }).length;
+    }
+
     /* One axis row: chips, a picker, or both. onPick receives the chosen level id. */
     function controlRow(c, onPick) {
         var cur = shownPrefs()[c.key] || c.fallback;
@@ -1456,16 +1573,28 @@
         var box = el('div', 'gpuup-chips');
         row.appendChild(box);
 
+        if (chipIds.length) {
+            // Without this a screen reader hears one unlabelled button per level and no axis at
+            // all, and the pick is carried only by a CSS class, which it cannot see. The group
+            // takes the control's OWN label, so a new axis is announced with no code here.
+            box.setAttribute('role', 'radiogroup');
+            box.setAttribute('aria-label', c.label);
+        }
+
         chipIds.forEach(function (id) {
             var o = c.options.filter(function (x) { return x.id === id; })[0];
             var b = el('button', 'gpuup-chip' + (id === cur ? ' on' : ''), shortName(o.name));
             b.title = o.name;
+            b.type = 'button';
+            b.setAttribute('role', 'radio');
+            b.setAttribute('aria-checked', id === cur ? 'true' : 'false');
             b.onclick = function () { onPick(id); };
             box.appendChild(b);
         });
 
         if (rest.length) {
             var sel = el('select', 'gpuup-sel');
+            sel.setAttribute('aria-label', c.label);
             if (chipIds.length) {
                 // A placeholder so the picker never looks like it owns a value the chips hold.
                 var ph = el('option', null, rest.length === 1 ? 'more...' : 'more levels...');
@@ -1509,10 +1638,15 @@
         ];
         var manual = state.stage !== 'unset' && state.stage !== 'off';
         var box = el('div', 'gpuup-chips');
+        box.setAttribute('role', 'radiogroup');
+        box.setAttribute('aria-label', 'Quality');
         modes.forEach(function (m) {
             var on = m.id === 'manual' ? manual : state.stage === m.id;
             var b = el('button', 'gpuup-chip' + (on ? ' on' : ''), m.name);
             b.title = m.title;
+            b.type = 'button';
+            b.setAttribute('role', 'radio');
+            b.setAttribute('aria-checked', on ? 'true' : 'false');
             b.onclick = function () {
                 if (m.id === 'manual') {
                     if (!manual) {
@@ -1602,16 +1736,34 @@
         return wrap;
     }
 
+    /*
+     * ONE SOURCE OF TRUTH FOR "WHAT RAN". Both the panel's live block and the row added to
+     * Jellyfin's own Playback Info come through here, so a row added to LIVE_ROWS appears in both
+     * and neither can drift into claiming something the other does not.
+     *
+     * `make` builds one row out of a label and a value, because the two hosts want different
+     * markup; the lines themselves are never rebuilt.
+     */
+    function liveRows(make, skip) {
+        return liveLines()
+            .filter(function (pair) { return !skip || skip.indexOf(pair[0]) < 0; })
+            .map(function (pair) { return make(pair[0], pair[1]); });
+    }
+
     function liveSection() {
         var wrap = el('div');
         wrap.appendChild(el('h3', null, 'What the server is doing'));
         var box = el('div', 'gpuup-live');
-        liveLines().forEach(function (pair) {
+        // This block is the confirmation of what actually ran, and it changes on its own as the
+        // session record follows playback. Polite, never assertive: it must not cut across the
+        // control the viewer is on.
+        box.setAttribute('aria-live', 'polite');
+        liveRows(function (label, value) {
             var d = el('div');
-            d.appendChild(el('b', null, pair[0]));
-            d.appendChild(el('span', null, pair[1]));
-            box.appendChild(d);
-        });
+            d.appendChild(el('b', null, label));
+            d.appendChild(el('span', null, value));
+            return d;
+        }).forEach(function (d) { box.appendChild(d); });
         wrap.appendChild(box);
         return wrap;
     }
@@ -1868,6 +2020,10 @@
         head.appendChild(x);
         body.appendChild(head);
 
+        if (state.applyFailed) {
+            body.appendChild(el('div', 'gpuup-note', APPLY_FAILED_TEXT));
+        }
+
         function rerender() {
             renderPanel(panel, caps);
         }
@@ -1899,32 +2055,78 @@
             }
         });
 
-        // Grouped by intent, in the order the groups first appear in CONTROLS: another thing a new
-        // axis gets for free by naming a group in its own data.
-        var groups = [];
-        controls.forEach(function (c) {
-            if (groups.indexOf(c.group) < 0) { groups.push(c.group); }
-        });
-
-        groups.forEach(function (g) {
-            body.appendChild(el('h3', null, g));
-            controls.filter(function (c) { return c.group === g; }).forEach(function (c) {
-                body.appendChild(controlRow(c, function (id) {
-                    state.prefs[c.key] = String(id);
-                    // A technical value now owns the settings, so the header says Custom instead of
-                    // naming a stage these values no longer match.
-                    state.stage = 'custom';
-                    savePrefs();
-                    log('axis', c.key, id);
-                    requestRestream();
-                    rerender();
-                }));
+        function pick(c) {
+            return controlRow(c, function (id) {
+                state.prefs[c.key] = String(id);
+                // A technical value now owns the settings, so the header says Custom instead of
+                // naming a stage these values no longer match.
+                state.stage = 'custom';
+                savePrefs();
+                log('axis', c.key, id);
+                requestRestream();
+                rerender();
             });
-        });
+        }
+
+        // TIERED FROM THE DATA, not from a list of axis names here. A control carrying `basic`
+        // is always visible, in that number's order; everything else is behind one disclosure,
+        // and a cluster naming an `expert` group is one row inside it that opens its own inputs.
+        // A new axis is still one entry in CONTROLS: with no tier field it lands in Advanced.
+        var basics = controls.filter(function (c) { return c.basic; })
+            .sort(function (a, b) { return a.basic - b.basic; });
+        var rest = controls.filter(function (c) { return !c.basic; });
+
+        basics.forEach(function (c) { body.appendChild(pick(c)); });
+
+        if (rest.length) {
+            var adv = disclosure('advanced', 'Advanced', changedCount(rest));
+            // Grouped by intent inside the disclosure, in the order the groups first appear in
+            // CONTROLS: another thing a new axis gets for free by naming a group in its own data.
+            var groups = [];
+            rest.forEach(function (c) {
+                if (groups.indexOf(c.group) < 0) { groups.push(c.group); }
+            });
+
+            groups.forEach(function (g) {
+                var inGroup = rest.filter(function (c) { return c.group === g && !c.expert; });
+                if (!inGroup.length) {
+                    return;
+                }
+
+                adv.appendChild(el('h3', null, g));
+                inGroup.forEach(function (c) { adv.appendChild(pick(c)); });
+            });
+
+            // The expert clusters last, each one row until it is opened. The head control's own
+            // label names the cluster, so nothing here knows what a game upscaler is.
+            var clusters = [];
+            rest.forEach(function (c) {
+                if (c.expert && clusters.indexOf(c.expert) < 0) { clusters.push(c.expert); }
+            });
+
+            clusters.forEach(function (name) {
+                var members = rest.filter(function (c) { return c.expert === name; });
+                var head = members.filter(function (c) { return c.expertHead; })[0] || members[0];
+                var sub = disclosure('expert-' + name, head.label, changedCount(members));
+                var inner = el('div', 'gpuup-sub');
+                members.forEach(function (c) { inner.appendChild(pick(c)); });
+                sub.appendChild(inner);
+                adv.appendChild(sub);
+            });
+
+            body.appendChild(adv);
+        }
 
         if (!caps.full) {
-            body.appendChild(el('div', 'gpuup-note',
-                'This server understands the upscale target only, so the other axes are not offered.'));
+            // TWO DIFFERENT THINGS, AND ONLY ONE OF THEM IS ABOUT THIS SERVER'S CAPABILITIES.
+            // A server that answered "no such endpoint" really is the older generation. A probe
+            // that got no answer at all - which is what happens while Jellyfin restarts - says
+            // nothing about what this server can do, and claiming it did was a lie.
+            body.appendChild(el('div', 'gpuup-note', caps.targetOnly
+                ? 'This server understands the upscale target only, so the other axes are not offered.'
+                : 'The server has not answered the capability probe, which is what happens while it'
+                  + ' is restarting, so only the upscale target is offered until it does. Close this'
+                  + ' and open it again to ask.'));
         }
 
         body.appendChild(liveSection());
@@ -1934,7 +2136,7 @@
         // control's position is carried across the swap.
         var focusIndex = -1;
         try {
-            var before = panel.querySelectorAll('button,select,input');
+            var before = panel.querySelectorAll(FOCUSABLE);
             for (var fi = 0; fi < before.length; fi++) {
                 if (before[fi] === document.activeElement) { focusIndex = fi; break; }
             }
@@ -1947,7 +2149,7 @@
 
         if (focusIndex >= 0) {
             try {
-                var after = panel.querySelectorAll('button,select,input');
+                var after = panel.querySelectorAll(FOCUSABLE);
                 if (after[focusIndex]) { after[focusIndex].focus(); }
             } catch (e) { /* ignore */ }
         }
@@ -1973,6 +2175,13 @@
             if (state.onPanelResize) {
                 window.removeEventListener('resize', state.onPanelResize);
                 state.onPanelResize = null;
+            }
+
+            var opener = state.panelOpener;
+            state.panelOpener = null;
+            if (opener && typeof opener.focus === 'function'
+                && document.contains && document.contains(opener)) {
+                opener.focus();
             }
 
             state.drag = null;
@@ -2073,8 +2282,12 @@
                 function () { return caps; });
         }).then(function (caps) {
             try {
-                caps = caps || { full: false };
+                caps = caps || { full: false, failed: true };
                 closePanel();
+                // After closePanel, which restores and clears it: whatever opened this gets the
+                // focus back when it closes, so a keyboard or a remote is not dropped at the top
+                // of the page.
+                state.panelOpener = document.activeElement;
                 ensureStyle();
                 var panel = el('div');
                 panel.id = PANEL_ID;
@@ -2083,9 +2296,43 @@
                 (document.body || document.documentElement).appendChild(panel);
                 renderPanel(panel, caps);
 
+                // A dialog nobody is focused inside is a dialog a screen reader never enters.
+                try {
+                    var firstControl = panel.querySelector(FOCUSABLE);
+                    if (firstControl) { firstControl.focus(); }
+                } catch (e) { /* focus is never worth breaking the panel for */ }
+
+                // The panel opens over the video and calls itself a dialog, so Tab must not walk out
+                // of it into the page behind, which is still there and still focusable. Nothing is
+                // made focusable that was not already: the same list the render uses to carry focus
+                // across a repaint is the one the tab order wraps around.
                 state.panelKeyHandler = function (ev) {
                     if (ev.key === 'Escape' || ev.keyCode === 27) {
                         closePanel();
+                        return;
+                    }
+
+                    if (ev.key !== 'Tab' && ev.keyCode !== 9) {
+                        return;
+                    }
+
+                    var p = panelEl();
+                    var items = p ? p.querySelectorAll(FOCUSABLE) : null;
+                    if (!items || !items.length) {
+                        return;
+                    }
+
+                    var first = items[0];
+                    var last = items[items.length - 1];
+                    if (!p.contains(document.activeElement)) {
+                        ev.preventDefault();
+                        first.focus();
+                    } else if (ev.shiftKey && document.activeElement === first) {
+                        ev.preventDefault();
+                        last.focus();
+                    } else if (!ev.shiftKey && document.activeElement === last) {
+                        ev.preventDefault();
+                        first.focus();
                     }
                 };
                 document.addEventListener('keydown', state.panelKeyHandler, true);
@@ -2116,9 +2363,9 @@
     }
 
     /*
-     * Adds a row to the playback info dialog. Done by watching the DOM for the dialog rather than
-     * hooking the module that builds it: the row is appended to whatever list the dialog already
-     * renders, and if the shape is not recognised nothing is added and the dialog renders normally.
+     * Adds the record of what ran to the playback info dialog. Done by watching the DOM for the
+     * dialog rather than hooking the module that builds it: the rows are appended to the list the
+     * dialog already renders, and a shape that is not recognised is left alone entirely.
      */
     function watchPlaybackInfoDialog() {
         try {
@@ -2141,15 +2388,74 @@
         }
     }
 
+    /*
+     * FINDING THE PLAYBACK INFO DIALOG BY ITS SHAPE.
+     *
+     * Matching its textContent against /Playback Info|Play method|Player:/ matched ANY dialog
+     * quoting those words - an error message naming the play method, a subtitle sheet listing a
+     * player - and this script then appended a media filename and a filter chain to it. So the
+     * dialog is recognised the way the action sheet already is: by structure.
+     *
+     * Jellyfin's Playback Info is a list of LABEL/VALUE ROWS. A candidate row is an element with
+     * exactly two element children whose first child reads as one of the field names that dialog
+     * is made of; two or more of those in one container is the dialog and nothing else is. Their
+     * shared parent is the host, and their own class names are borrowed for the rows added below,
+     * so the addition looks like the dialog rather than like a patch on it.
+     *
+     * Recognising nothing means annotating nothing. A missing row is a smaller failure than a row
+     * about the wrong thing in the wrong dialog.
+     */
+    var STATS_FIELDS = [
+        'play method', 'player', 'protocol', 'stream type', 'player dimensions',
+        'video codec', 'audio codec', 'video bitrate', 'audio bitrate', 'transcoding',
+        'transcode reason', 'transcode reasons', 'container', 'size', 'bitrate'
+    ];
+
+    function statsFieldName(row) {
+        var first = row.children[0];
+        var text = first ? String(first.textContent || '') : '';
+        return text.replace(/[:\s]+$/, '').trim().toLowerCase();
+    }
+
+    function playbackInfoHost(dialog) {
+        var rows = Array.prototype.filter.call(
+            dialog.querySelectorAll('div,li,tr,p'),
+            function (r) {
+                return r.children.length === 2 && STATS_FIELDS.indexOf(statsFieldName(r)) >= 0;
+            });
+
+        if (rows.length < 2) {
+            return null;
+        }
+
+        // The container the rows themselves live in, not the dialog shell: appending beside them
+        // is what puts the addition in the same column and the same rhythm as the rest.
+        var parent = rows[0].parentNode;
+        var together = rows.filter(function (r) { return r.parentNode === parent; });
+        if (together.length < 2 || !parent) {
+            return null;
+        }
+
+        var sample = together[0];
+        return {
+            host: parent,
+            rowClass: sample.className || '',
+            labelClass: (sample.children[0] && sample.children[0].className) || '',
+            valueClass: (sample.children[1] && sample.children[1].className) || '',
+            labelTag: (sample.children[0].tagName || 'div').toLowerCase(),
+            valueTag: (sample.children[1].tagName || 'div').toLowerCase(),
+            rowTag: (sample.tagName || 'div').toLowerCase()
+        };
+    }
+
     function maybeAnnotate(dialog) {
         try {
             if (!dialog || dialog.__gpuUpscaleAnnotated) {
                 return;
             }
 
-            var text = dialog.textContent || '';
-            // The playback info dialog is the one listing the player and the play method.
-            if (!/Playback Info|Play method|Player:/i.test(text)) {
+            var shape = playbackInfoHost(dialog);
+            if (!shape) {
                 return;
             }
 
@@ -2160,13 +2466,25 @@
                         return;
                     }
 
-                    var row = document.createElement('div');
-                    row.className = 'gpuUpscaleStatsRow';
-                    row.style.padding = '0.35em 0';
-                    row.textContent = 'Enhance: ' + (s.Summary || 'No enhancement');
-                    var host = dialog.querySelector('.dialogContent, .formDialogContent, .actionSheetContent') || dialog;
-                    host.appendChild(row);
-                    log('annotated playback info with', s.Summary);
+                    // The same rows the panel shows, from the SESSION RECORD: the sizes, the
+                    // passes that ran, the ones asked for that did not, the bypass and why, the
+                    // kernel, the encoder and its reason, and the server's own summary. Nothing
+                    // here reads what the panel asked for.
+                    //
+                    // The stale-selection line is the one row that is about the panel rather than
+                    // about the stream, and it says "the selections above", which is meaningless
+                    // in a dialog that has none. It stays in the panel.
+                    var rows = liveRows(function (label, value) {
+                        var row = el(shape.rowTag, shape.rowClass);
+                        // textContent throughout: the record carries a media filename, and this
+                        // is a dialog built by somebody else.
+                        row.appendChild(el(shape.labelTag, shape.labelClass, 'Enhance - ' + label));
+                        row.appendChild(el(shape.valueTag, shape.valueClass, value));
+                        return row;
+                    }, ['Not this selection']);
+
+                    rows.forEach(function (row) { shape.host.appendChild(row); });
+                    log('annotated playback info with', rows.length, 'rows');
                 } catch (err) {
                     log('annotate failed', err);
                 }

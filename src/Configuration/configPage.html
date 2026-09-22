@@ -385,10 +385,25 @@
                         <span>Deband</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        libplacebo debanding at threshold 3 with synthetic grain forced to 0 (libplacebo
-                        defaults grain to 6, which dithers fake grain over the picture and is wrong for this
-                        content). Measured within run-to-run variance of free. Low-bitrate camera h264 bands
-                        visibly in dark gradients, which is what this removes.
+                        libplacebo debanding, with the strength and the grain set below. Measured within
+                        run-to-run variance of free. Low-bitrate camera h264 bands visibly in dark
+                        gradients, which is what this removes.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="DebandThreshold" label="Deband threshold" min="0" max="255" step="1" required />
+                    <div class="fieldDescription">
+                        How hard debanding cuts. Higher smooths more banding, and more real gradient
+                        with it. Default: 3.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="DebandGrain" label="Deband grain" min="0" max="255" step="1" required />
+                    <div class="fieldDescription">
+                        Grain added back after debanding. 0 on purpose: libplacebo's own default of 6
+                        dithers synthetic grain over the picture, which is wrong for this content.
                     </div>
                 </div>
 
@@ -427,6 +442,14 @@
                 <div class="inputContainer">
                     <input is="emby-input" type="number" id="MaxSourceHeight" label="Maximum source height (px)" min="240" max="4320" required />
                     <div class="fieldDescription">Never upscale sources taller than this.</div>
+                </div>
+
+                <div class="fieldDescription">
+                    <b>What those five values do together</b>, worked out from what is in the boxes above
+                    right now rather than from an example typed here, so it cannot drift from what is saved.
+                    This is the dashboard default path: a session that asks for a size of its own is judged
+                    against that size instead of the target height.
+                    <div id="thresholdExample"></div>
                 </div>
 
                 <div class="inputContainer">
@@ -497,6 +520,65 @@
                     </div>
                 </div>
 
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">File locations</h2>
+                    <p class="fieldDescription">
+                        Where this plugin looks for the files it needs. The defaults suit a standard
+                        install, so leave them alone unless you have put something somewhere else.
+                    </p>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="ShaderDirectory" label="Shader directory" />
+                    <div class="fieldDescription">
+                        Where the shader files live. Default:
+                        <code>/usr/share/jellyfin-shaders</code>. Point this at a directory without the
+                        shaders in it and the levels that need them stop being offered, silently: there
+                        is no error, the options simply disappear from this page and from the player.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="ShaderCacheDirectory" label="Shader cache directory" />
+                    <div class="fieldDescription">
+                        Where composed shaders are cached. Default:
+                        <code>/var/cache/jellyfin/gpu-upscale-shaders</code>. It must be writable by the
+                        user the Jellyfin service runs as.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="NeuralModelDirectory" label="Neural model directory" />
+                    <div class="fieldDescription">
+                        Where the Real-ESRGAN ONNX weights live. Default:
+                        <code>/usr/lib/jellyfin-ffmpeg-oidn/models</code>. The weights are not shipped
+                        with this plugin, and a neural level whose file is missing is not offered at
+                        all. See <code>NEURAL.md</code> for how to export them from the official
+                        Real-ESRGAN checkpoints.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="DlssRuntimeDirectory" label="DLSS runtime directory" />
+                    <div class="fieldDescription">
+                        Where the NVIDIA DLSS runtime lives. Default:
+                        <code>/usr/lib/jellyfin-ffmpeg-oidn/dlss</code>. It is proprietary and nothing
+                        from NVIDIA ships with this plugin, so until you put it here by hand the
+                        <code>dlss</code> and <code>dlaa</code> levels are not offered. See
+                        <code>DLSS.md</code> for which file is needed and where to get it.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="DepthModelPath" label="Depth model path" />
+                    <div class="fieldDescription">
+                        The monocular depth ONNX model the game upscalers are fed instead of a real depth
+                        buffer. Default:
+                        <code>/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx</code>.
+                        Not shipped either; without it those levels fall back to a flat plane.
+                    </div>
+                </div>
+
                 <div>
                     <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                         <span>Save</span>
@@ -508,7 +590,7 @@
                 <h2 class="sectionTitle">Recent sessions</h2>
                 <p class="fieldDescription">What the server actually did, as it went into the ffmpeg command.</p>
                 <table style="width:100%;text-align:left">
-                    <thead><tr><th>Time (UTC)</th><th>Source</th><th>Result</th><th>Encoder</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Time (UTC)</th><th>Source</th><th>Source size</th><th>Output size</th><th>Ratio</th><th>Viewer</th><th>Result</th><th>Encoder</th><th>Why that encoder</th><th>Super-resolution</th><th>Status</th></tr></thead>
                     <tbody id="activityBody"></tbody>
                 </table>
             </div>
@@ -521,6 +603,7 @@
             // Same mapping the server applies in ShaderLibrary, so the page shows the level that
             // a legacy persisted name actually resolves to rather than an empty select.
             var SR_ALIASES = { light: 'fsrcnnx', standard: 'fsrcnnx', max: 'fsrcnnx-max' };
+            var exampleWired = false;
             // Source is a media filename picked by whoever named the library file, so it must
             // be escaped before it goes into innerHTML, same as any other field built from it.
             function escapeHtml(value) {
@@ -531,6 +614,25 @@
                     .replace(/>/g, '&gt;')
                     .replace(/"/g, '&quot;')
                     .replace(/'/g, '&#39;');
+            }
+            // The session list in StatusJson is the SessionRecord itself, so these carry the
+            // property names the server declares: SourceWidth, SourceHeight, OutputWidth,
+            // OutputHeight, SrBypassed and UserId are all on it. A record written before the
+            // source size was known holds 0, which is shown as a dash rather than as "0x0".
+            function sizeText(w, h) {
+                if (!w || !h) return '-';
+                return w + 'x' + h;
+            }
+            // The ratio an admin judges the thresholds by: output height over source height,
+            // the same number the bypass is decided on.
+            function ratioText(a) {
+                if (!a.SourceHeight || !a.OutputHeight) return '-';
+                return (a.OutputHeight / a.SourceHeight).toFixed(2) + 'x';
+            }
+            // The viewer is a GUID, because that is all the transcode path can see. Empty when
+            // the request carried nothing to identify one.
+            function viewerText(a) {
+                return a.UserId ? a.UserId : '-';
             }
             // The kernel select is built from the server's own list rather than typed, because a
             // misspelt kernel is not a worse picture: libplacebo refuses it and the transcode fails.
@@ -559,6 +661,50 @@
                 });
             }
 
+            // The five thresholds only mean something together, so the page works an example out of
+            // them the same way the server does in Decide: clamp the target to the maximum target
+            // height, refuse a source taller than the maximum source height, refuse a target that is
+            // within the minimum scale factor of the source, and then bypass the network below the
+            // super-resolution ratio. It reads the fields, not the saved config, so it also shows
+            // what an unsaved edit would do.
+            var EXAMPLE_HEIGHTS = [480, 720, 1080];
+            function thresholdSentence(sourceHeight, target, minScale, srMin, maxSource) {
+                if (sourceHeight > maxSource) {
+                    return sourceHeight + 'p source: not upscaled, because it is taller than the ' +
+                        'maximum source height of ' + maxSource + 'p.';
+                }
+                if (target <= sourceHeight * minScale) {
+                    return sourceHeight + 'p source: not upscaled, because ' + target + 'p is only ' +
+                        (target / sourceHeight).toFixed(2) + 'x the source and the minimum scale factor is ' +
+                        minScale.toFixed(2) + 'x.';
+                }
+                var ratio = target / sourceHeight;
+                if (srMin > 1 && ratio < srMin) {
+                    return sourceHeight + 'p source to ' + target + 'p: plain scaling, since ' +
+                        ratio.toFixed(2) + 'x is below the ' + srMin.toFixed(2) +
+                        'x super-resolution threshold.';
+                }
+                return sourceHeight + 'p source to ' + target + 'p: upscaled at ' + ratio.toFixed(2) +
+                    'x, with the super-resolution shader.';
+            }
+            function updateThresholdExample(page) {
+                var box = page.querySelector('#thresholdExample');
+                if (!box) return;
+                var target = parseInt(page.querySelector('#TargetHeight').value, 10);
+                var maxTarget = parseInt(page.querySelector('#MaxTargetHeight').value, 10);
+                var minScale = parseFloat(page.querySelector('#MinScaleFactor').value);
+                var srMin = parseFloat(page.querySelector('#SrMinScaleFactor').value);
+                var maxSource = parseInt(page.querySelector('#MaxSourceHeight').value, 10);
+                if (isNaN(target) || isNaN(maxTarget) || isNaN(minScale) || isNaN(srMin) || isNaN(maxSource)) {
+                    box.textContent = 'Fill in all five values above to see the worked example.';
+                    return;
+                }
+                var effective = Math.min(target, maxTarget);
+                box.innerHTML = EXAMPLE_HEIGHTS.map(function (h) {
+                    return escapeHtml(thresholdSentence(h, effective, minScale, srMin, maxSource));
+                }).join('<br />');
+            }
+
             function loadStatus(page) {
                 ApiClient.ajax({
                     type: 'GET',
@@ -568,12 +714,20 @@
                     page.querySelector('#patchStatus').textContent =
                         'Filter injection: ' + s.PatchStatus + '. FFmpeg shim: ' + s.ShimSync + '.';
                     var rows = (s.Sessions || []).map(function (a) {
+                        // EncoderReason is a column of its own rather than a title attribute:
+                        // a tooltip is invisible to touch and to the keyboard, so the reason a
+                        // configured encoder was refused was unreadable for most admins.
                         return '<tr><td>' + escapeHtml(a.Timestamp) + '</td><td>' + escapeHtml(a.Source) + '</td><td>' +
-                            escapeHtml(a.Summary) + '</td><td title="' + escapeHtml(a.EncoderReason) + '">' +
-                            escapeHtml(a.Encoder) + '</td><td>' + escapeHtml(a.Status) + '</td></tr>';
+                            escapeHtml(sizeText(a.SourceWidth, a.SourceHeight)) + '</td><td>' +
+                            escapeHtml(sizeText(a.OutputWidth, a.OutputHeight)) + '</td><td>' +
+                            escapeHtml(ratioText(a)) + '</td><td>' + escapeHtml(viewerText(a)) + '</td><td>' +
+                            escapeHtml(a.Summary) + '</td><td>' + escapeHtml(a.Encoder) + '</td><td>' +
+                            escapeHtml(a.EncoderReason) + '</td><td>' +
+                            escapeHtml(a.SrBypassed ? 'bypassed' : 'not bypassed') + '</td><td>' +
+                            escapeHtml(a.Status) + '</td></tr>';
                     }).join('');
                     page.querySelector('#activityBody').innerHTML = rows ||
-                        '<tr><td colspan="5">No sessions since the server started.</td></tr>';
+                        '<tr><td colspan="11">No sessions since the server started.</td></tr>';
                 }, function () {
                     page.querySelector('#patchStatus').textContent = 'Status unavailable.';
                 });
@@ -607,6 +761,10 @@
                     page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
                     page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
                     page.querySelector('#Deband').checked = config.Deband !== false;
+                    page.querySelector('#DebandThreshold').value =
+                        config.DebandThreshold == null ? 3 : config.DebandThreshold;
+                    page.querySelector('#DebandGrain').value =
+                        config.DebandGrain == null ? 0 : config.DebandGrain;
                     loadUpscalers(page, config.Upscaler || 'ewa_lanczos');
                     page.querySelector('#MinScaleFactor').value = config.MinScaleFactor;
                     page.querySelector('#SrMinScaleFactor').value =
@@ -617,8 +775,30 @@
                     page.querySelector('#ForceTranscode').checked = config.ForceTranscode;
                     page.querySelector('#ForceTranscodeForDirectPlay').checked = config.ForceTranscodeForDirectPlay === true;
                     page.querySelector('#Encoder').value = config.Encoder;
+                    page.querySelector('#ShaderDirectory').value =
+                        config.ShaderDirectory || '/usr/share/jellyfin-shaders';
+                    page.querySelector('#ShaderCacheDirectory').value =
+                        config.ShaderCacheDirectory || '/var/cache/jellyfin/gpu-upscale-shaders';
+                    page.querySelector('#NeuralModelDirectory').value =
+                        config.NeuralModelDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/models';
+                    page.querySelector('#DlssRuntimeDirectory').value =
+                        config.DlssRuntimeDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/dlss';
+                    page.querySelector('#DepthModelPath').value =
+                        config.DepthModelPath || '/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx';
+                    updateThresholdExample(page);
                     Dashboard.hideLoadingMsg();
                 });
+                // pageshow fires again on every return to the page, so the listeners are attached
+                // once rather than stacked up.
+                if (!exampleWired) {
+                    exampleWired = true;
+                    ['#TargetHeight', '#MaxTargetHeight', '#MinScaleFactor', '#SrMinScaleFactor', '#MaxSourceHeight']
+                        .forEach(function (id) {
+                            page.querySelector(id).addEventListener('input', function () {
+                                updateThresholdExample(page);
+                            });
+                        });
+                }
                 loadStatus(page);
             });
 
@@ -650,6 +830,8 @@
                     config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
                     config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
                     config.Deband = page.querySelector('#Deband').checked;
+                    config.DebandThreshold = parseInt(page.querySelector('#DebandThreshold').value, 10);
+                    config.DebandGrain = parseInt(page.querySelector('#DebandGrain').value, 10);
                     // The select is filled asynchronously, so a save during that window reads empty.
                     // Keep the stored kernel rather than writing a blank one over it.
                     var kernelPicked = page.querySelector('#Upscaler').value;
@@ -662,6 +844,11 @@
                     config.ForceTranscode = page.querySelector('#ForceTranscode').checked;
                     config.ForceTranscodeForDirectPlay = page.querySelector('#ForceTranscodeForDirectPlay').checked;
                     config.Encoder = page.querySelector('#Encoder').value;
+                    config.ShaderDirectory = page.querySelector('#ShaderDirectory').value;
+                    config.ShaderCacheDirectory = page.querySelector('#ShaderCacheDirectory').value;
+                    config.NeuralModelDirectory = page.querySelector('#NeuralModelDirectory').value;
+                    config.DlssRuntimeDirectory = page.querySelector('#DlssRuntimeDirectory').value;
+                    config.DepthModelPath = page.querySelector('#DepthModelPath').value;
                     ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
                         Dashboard.processPluginConfigurationUpdateResult(result);
                         loadStatus(page);

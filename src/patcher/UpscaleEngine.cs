@@ -225,6 +225,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             public string NeuralLevel { get; set; } = "off";
 
+            /// <summary>
+            /// The neural level the session or the dashboard asked for, before the ratio decided
+            /// which weight of that family actually runs. NeuralLevel carries what ran, so without
+            /// this a substituted weight would be indistinguishable from the one chosen.
+            /// </summary>
+            public string NeuralRequested { get; set; } = "off";
+
             public string GameLevel { get; set; } = "off";
 
             /// <summary>The ffmpeg filter node for the neural super-resolution level, or null.</summary>
@@ -422,7 +429,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ChromaApplied = plan.Act && plan.ChromaApplied,
                 SrRequested = plan.SrRequested ?? "off",
                 // Unconditional, unlike NeuralLevel below: what was asked for, whether or not it ran.
-                NeuralRequested = plan.NeuralLevel ?? "off",
+                NeuralRequested = plan.NeuralRequested ?? "off",
                 SrBypassed = plan.Act && plan.SrBypassed,
                 SrOwnsSharpening = plan.Act && plan.SrOwnsSharpening,
                 Upscaler = plan.Act ? plan.Upscaler : null,
@@ -476,7 +483,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         private static string NeuralName(string level)
         {
-            string path = ShaderLibrary.NeuralModelPath(level);
+            string path = ShaderLibrary.NeuralModelPath(level, Settings);
             if (string.IsNullOrWhiteSpace(path))
             {
                 return "none";
@@ -566,6 +573,20 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (r.NeuralApplied)
             {
                 parts.Add("Neural SR " + r.NeuralLevel + " (" + NeuralName(r.NeuralLevel) + ")");
+
+                // Say which weight ran when it is not the one named, for the same reason SrBypassed
+                // is said out loud: the viewer picked a level and is entitled to know what ran.
+                if (!string.IsNullOrEmpty(r.NeuralRequested)
+                    && !string.Equals(r.NeuralRequested, r.NeuralLevel, StringComparison.OrdinalIgnoreCase))
+                {
+                    parts.Add(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "{0} run in place of {1} at {2:0.00}x (the larger weight's extra pixels would "
+                            + "have been scaled straight back off)",
+                        r.NeuralLevel,
+                        r.NeuralRequested,
+                        r.SourceHeight > 0 ? (double)r.OutputHeight / r.SourceHeight : 0));
+                }
             }
 
             if (r.GameApplied)
@@ -913,7 +934,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     neuralLevel = ShaderLibrary.IsNeuralLevel(neuralDefault) ? neuralDefault : "off";
                 }
 
-                plan.NeuralFilter = ShaderLibrary.NeuralFilter(neuralLevel, out string neuralUsed);
+                plan.NeuralRequested = ShaderLibrary.IsNeuralLevel(neuralLevel)
+                    ? neuralLevel.Trim().ToLowerInvariant()
+                    : "off";
+
+                // The heights go in because the weight that runs depends on the ratio: a x4 network
+                // at a 2x target spends four times the pixels and libplacebo discards half of them.
+                plan.NeuralFilter = ShaderLibrary.NeuralFilter(
+                    neuralLevel, plan.SourceHeight, plan.Height, out string neuralUsed, cfg);
                 plan.NeuralLevel = neuralUsed;
                 plan.NeuralApplied = plan.NeuralFilter != null;
 
@@ -1573,9 +1601,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             // Debanding. grain=0 is not a detail: libplacebo defaults it to 6, which dithers
             // synthetic grain over the picture. That is wrong for this content, which is already
             // noisy - the point of debanding here is the flat dark gradients, not texture.
+            //
+            // Both numbers are clamped to libplacebo's documented 0-1000 range for these two
+            // AVOptions rather than passed through: a value outside it is rejected when the filter
+            // is opened, which fails the whole transcode instead of producing a worse picture.
             if (plan.DebandApplied)
             {
-                sb.Append(":deband=1:deband_threshold=3:deband_grain=0");
+                sb.AppendFormat(
+                    CultureInfo.InvariantCulture,
+                    ":deband=1:deband_threshold={0}:deband_grain={1}",
+                    Math.Max(0, Math.Min(1000, cfg?.DebandThreshold ?? 3)),
+                    Math.Max(0, Math.Min(1000, cfg?.DebandGrain ?? 0)));
             }
 
             if (!string.IsNullOrEmpty(plan.ShaderPath) && File.Exists(plan.ShaderPath))

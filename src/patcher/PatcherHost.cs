@@ -55,10 +55,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// rather than baked into the script so that the one place it is written is the same place
         /// the level is defined.
         /// </summary>
-        private static Dictionary<string, string> GameLabels()
+        private static Dictionary<string, string> GameLabels(UpscaleSettings cfg)
         {
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string level in ShaderLibrary.AvailableGameLevels())
+            foreach (string level in ShaderLibrary.AvailableGameLevels(cfg))
             {
                 map[level] = ShaderLibrary.GameLabel(level);
             }
@@ -94,7 +94,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // and Chroma are gated below: Decide would force the level back to off anyway.
                 ["Neural"] = cfg?.NeuralAllowed == false
                     ? new List<string> { "off" }
-                    : ShaderLibrary.AvailableNeuralLevels(),
+                    : ShaderLibrary.AvailableNeuralLevels(cfg),
 
                 // Game temporal upscalers: another axis of its own, and another that can be
                 // short. dlss and dlaa need an NVIDIA DLSS runtime that is not shipped with
@@ -102,8 +102,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 // Gated by its master switch too, for the same reason.
                 ["Game"] = cfg?.GameAllowed == false
                     ? new List<string> { "off" }
-                    : ShaderLibrary.AvailableGameLevels(),
-                ["GameLabels"] = GameLabels(),
+                    : ShaderLibrary.AvailableGameLevels(cfg),
+                ["GameLabels"] = GameLabels(cfg),
 
                 // The three synthesised-input options of those upscalers, their allowed values and
                 // their wording, plus the levels they act on. Served rather than baked into the
@@ -115,7 +115,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["GameJitterLabels"] = OptionLabels("jitter", ShaderLibrary.GameJitterValues),
                 ["GameDepthLabels"] = OptionLabels("depth", ShaderLibrary.GameDepthValues),
                 ["GameReactiveLabels"] = OptionLabels("reactive", ShaderLibrary.GameReactiveValues),
-                ["GameOptionLevels"] = ShaderLibrary.GameOptionLevels(),
+                // Every one of these reads the configured directories, not the built-in defaults:
+                // the probe builds the panel, so a probe answering from different paths than the
+                // transcode reads would offer levels whose weights are not where the filter looks.
+                ["GameOptionLevels"] = ShaderLibrary.GameOptionLevels(cfg),
 
                 // Two axes of their own, not extra rungs of the SR list: the refinement pass
                 // hooks POSTKERNEL and the chroma pass hooks CHROMA, so each composes with
@@ -246,7 +249,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["SrOwnsSharpening"] = record.SrOwnsSharpening,
                 ["Upscaler"] = record.Upscaler,
                 ["DeblurLevel"] = record.DeblurLevel ?? "off",
-                ["Levels"] = Levels(),
+                // Levels are deliberately NOT here. The panel polls this record every three
+                // seconds while it is open, and the level lists change only on a config change or
+                // an install, so re-serialising the whole set into every response was several
+                // kilobytes a poll, per open panel, to say the same thing. The no-record branch
+                // above still serves them, and that is the branch the probe takes.
                 ["Encoder"] = record.Encoder,
                 ["EncoderReason"] = record.EncoderReason,
                 ["Status"] = record.Status,

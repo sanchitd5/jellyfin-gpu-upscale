@@ -57,10 +57,22 @@ SLOT_DIR = "/run/jellyfin-upscale"
 
 DEFAULTS = {
     "enabled": True,
-    "shader": "/usr/share/jellyfin-shaders/FSRCNNX_x2_16-0-4-1.glsl",
+    # The 8-weight FSRCNNX, same default the plugin carries: the 16-weight measured no better
+    # on real footage at roughly double the GPU cost.
+    "shader": "/usr/share/jellyfin-shaders/FSRCNNX_x2_8-0-4-1.glsl",
+    # RCAS-2.0, the plugin's gentlest sharpening rung. RCAS beat the older CAS on fidelity and
+    # on detail at both ratios measured, and it hooks LUMA, so it sharpens at the network's
+    # output size rather than the final one and costs about nothing.
+    "sharpener": "/usr/share/jellyfin-shaders/RCAS-2.0.glsl",
+    "shader_cache_dir": "/var/cache/jellyfin/gpu-upscale-shaders",
     "upscaler": "ewa_lanczos",
     "encoder": "hevc_nvenc",
     "min_scale_factor": 1.15,     # skip near-identity upscales
+    # Below this ratio the fixed-2x network is skipped and the chain is plain scaling plus the
+    # sharpener. Measured: libplacebo shrinks a 2x network's output back, and at 1.5x what
+    # survives lands inside measurement noise of plain scaling, where the sharpener alone
+    # reaches ground-truth detail for about a hundredth of the throughput.
+    "sr_min_scale_factor": 1.60,
     "max_target_height": 2160,
     "max_source_height": 1440,    # never upscale sources above this
     "max_concurrent": 2,          # beyond this, fall through to stock ffmpeg
@@ -322,11 +334,62 @@ def filter_name(node):
     return FILTER_LABEL_RE.sub("", node.strip().strip(",;").strip()).strip()
 
 
-def build_chain(cfg, tw, th):
+def compose_shader(cfg, files):
+    """The single file libplacebo's custom_shader_path takes, for these shader files.
+
+    Composed the way the plugin composes it: an mpv user shader may carry several //!HOOK
+    blocks, so concatenating the files runs every pass inside one libplacebo pass, and the
+    hook point rather than the file order decides what runs first - FSRCNNX and RCAS both
+    hook LUMA, so RCAS sharpens the enlarged plane. Cached under a name that identifies the
+    combination and rewritten when a source shader is newer than it.
+    """
+    if len(files) == 1:
+        return files[0]
+    try:
+        cache = cfg["shader_cache_dir"]
+        os.makedirs(cache, exist_ok=True)
+        composed = os.path.join(
+            cache,
+            "+".join(os.path.splitext(os.path.basename(f))[0] for f in files) + ".glsl")
+        try:
+            stamp = os.path.getmtime(composed)
+            if all(os.path.getmtime(f) < stamp for f in files):
+                return composed
+        except OSError:
+            pass
+        body = []
+        for path in files:
+            with open(path) as fh:
+                body.append(fh.read())
+        tmp = "%s.%d.tmp" % (composed, os.getpid())
+        with open(tmp, "w") as fh:
+            fh.write("\n\n".join(body))
+        # Concurrent sessions read this path, so it has to appear whole or not at all.
+        os.replace(tmp, composed)
+        return composed
+    except Exception:
+        # An unwritable cache costs the sharpener, not the session.
+        return files[0]
+
+
+def build_chain(cfg, tw, th, ratio):
+    """The filter chain for this upscale, with whichever shader passes are installed.
+
+    The network is a fixed-2x one and libplacebo shrinks its output back down, so below
+    sr_min_scale_factor it is skipped and the chain is plain scaling plus the sharpener -
+    the same bypass the plugin applies, for the same measured reason. A shader file that is
+    not on this server is left out rather than failing the session.
+    """
+    files = []
     shader = cfg["shader"]
+    if shader and ratio >= float(cfg["sr_min_scale_factor"]) and os.path.exists(shader):
+        files.append(shader)
+    sharpener = cfg.get("sharpener")
+    if sharpener and os.path.exists(sharpener):
+        files.append(sharpener)
     placebo = "libplacebo=w=%d:h=%d:upscaler=%s" % (tw, th, cfg["upscaler"])
-    if shader and os.path.exists(shader):
-        placebo += ":custom_shader_path=%s" % shader
+    if files:
+        placebo += ":custom_shader_path=%s" % compose_shader(cfg, files)
     return "format=yuv420p,hwupload,%s,hwdownload,format=yuv420p" % placebo
 
 
@@ -529,7 +592,7 @@ def main():
     # reaches the top-level handler and execs stock ffmpeg, and the slot file would then
     # count live for the whole playback with nothing left to remove it.
     try:
-        new_args = rewrite_args(cfg, args, build_chain(cfg, scaled_w, th))
+        new_args = rewrite_args(cfg, args, build_chain(cfg, scaled_w, th, th / float(sh)))
         if cfg.get("log_args"):
             log(cfg, "rewritten: %s" % " ".join(new_args))
         log(cfg, "upscale %dx%d -> %dx%d %s" % (sw, sh, scaled_w, th, src))

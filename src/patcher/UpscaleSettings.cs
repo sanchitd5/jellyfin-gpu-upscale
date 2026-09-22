@@ -169,10 +169,40 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public bool Deband { get; set; } = true;
 
+        /// <summary>
+        /// How hard the deband pass cuts, in libplacebo's threshold units. Higher removes more
+        /// banding and costs real gradient detail with it; the pass itself costs the same either way.
+        /// </summary>
+        public int DebandThreshold { get; set; } = 3;
+
+        /// <summary>
+        /// Grain added back after debanding. 0 on purpose: libplacebo's own default of 6 adds
+        /// synthetic grain, which is wrong for this content.
+        /// </summary>
+        public int DebandGrain { get; set; }
+
         /// <summary>Where the shader files live.</summary>
         public string ShaderDirectory { get; set; } = "/usr/share/jellyfin-shaders";
 
         /// <summary>Where composed shader files (super-resolution + sharpening) are cached.</summary>
         public string ShaderCacheDirectory { get; set; } = "/var/cache/jellyfin/gpu-upscale-shaders";
+
+        /// <summary>
+        /// Where the Real-ESRGAN ONNX weights live. They belong to the patched binary, not to the
+        /// shader directory, and they are not shipped: a level whose file is absent is not offered.
+        /// </summary>
+        public string NeuralModelDirectory { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/models";
+
+        /// <summary>
+        /// Where the NVIDIA DLSS runtime has to be installed. Nothing from NVIDIA ships with this
+        /// plugin, so until the operator fetches it the dlss and dlaa levels are not offered.
+        /// </summary>
+        public string DlssRuntimeDirectory { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/dlss";
+
+        /// <summary>
+        /// The monocular depth ONNX model the game upscalers are fed in place of a depth buffer.
+        /// Not shipped either; without it those levels have only a flat plane to work from.
+        /// </summary>
+        public string DepthModelPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx";
     }
 }

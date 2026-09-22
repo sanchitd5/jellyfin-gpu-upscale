@@ -88,6 +88,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// <summary>libplacebo debanding, with synthetic grain forced off.</summary>
         public bool Deband { get; set; } = true;
 
+        /// <summary>How hard debanding cuts. Higher smooths more banding and more real gradient with it.</summary>
+        public int DebandThreshold { get; set; } = 3;
+
+        /// <summary>
+        /// Grain added back after debanding. 0 on purpose: libplacebo's own default of 6 adds
+        /// synthetic grain, which is wrong for this content.
+        /// </summary>
+        public int DebandGrain { get; set; }
+
         /// <summary>libplacebo upscaler kernel used underneath the shaders.</summary>
         public string Upscaler { get; set; } = "ewa_lanczos";
 
@@ -131,5 +140,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
 
         /// <summary>Where composed (super-resolution + unblur) shader files are cached.</summary>
         public string ShaderCacheDirectory { get; set; } = "/var/cache/jellyfin/gpu-upscale-shaders";
+
+        /// <summary>
+        /// Where the Real-ESRGAN ONNX weights live. They are not shipped with this plugin; a
+        /// neural level whose file is missing is not offered at all.
+        /// </summary>
+        public string NeuralModelDirectory { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/models";
+
+        /// <summary>
+        /// Where the NVIDIA DLSS runtime lives. Nothing from NVIDIA ships with this plugin, so
+        /// until the operator puts it here the dlss and dlaa levels are not offered.
+        /// </summary>
+        public string DlssRuntimeDirectory { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/dlss";
+
+        /// <summary>
+        /// The monocular depth ONNX model the game upscalers are fed instead of a depth buffer.
+        /// Not shipped either; without it those levels fall back to a flat plane.
+        /// </summary>
+        public string DepthModelPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx";
     }
 }

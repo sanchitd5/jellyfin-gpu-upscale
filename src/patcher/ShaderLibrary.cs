@@ -355,11 +355,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private static readonly string[] _denoiseMenu = { "off", "light", "strong", "max", "oidn", "optix", "optix-temporal" };
 
         /// <summary>
-        /// Where the ONNX super-resolution weights live. Beside the patched binary rather than in
-        /// the shader directory, because they are not shaders and they belong to that build: a
-        /// server without the patched ffmpeg has no use for them.
+        /// Where the ONNX super-resolution weights live when the dashboard says nothing. Beside the
+        /// patched binary rather than in the shader directory, because they are not shaders and they
+        /// belong to that build: a server without the patched ffmpeg has no use for them.
         /// </summary>
         public const string NeuralModelDirectory = "/usr/lib/jellyfin-ffmpeg-oidn/models";
+
+        /// <summary>The configured weights directory, or the built-in one when the setting is blank.</summary>
+        private static string NeuralModelDirectoryFor(UpscaleSettings cfg) =>
+            string.IsNullOrWhiteSpace(cfg?.NeuralModelDirectory)
+                ? NeuralModelDirectory
+                : cfg.NeuralModelDirectory.Trim();
 
         /// <summary>
         /// NEURAL SUPER-RESOLUTION: a CPU-side network pass that enlarges the frame BEFORE
@@ -411,18 +417,45 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private static readonly string[] _neuralMenu =
             { "off", "realesr-anime-x2", "realesr-anime-x4", "realesr-general-x4" };
 
+        /// <summary>
+        /// The factor each weight was trained at. libplacebo scales whatever the network produces
+        /// to the size the session asked for, so a x4 weight at a 2x target computes four times the
+        /// pixels and half of them are thrown away. At 15 and 10 fps that discarded half is most of
+        /// what the feature costs, which is why NeuralFilter consults this instead of running
+        /// whatever the level name says.
+        /// </summary>
+        private static readonly Dictionary<string, int> _neuralFactors =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["realesr-anime-x2"] = 2,
+            ["realesr-anime-x4"] = 4,
+            ["realesr-general-x4"] = 4,
+        };
+
 
         /// <summary>
-        /// Where a DLSS runtime has to be installed for the dlss/dlaa levels to be offered.
-        /// NOTHING from NVIDIA is shipped with this plugin: the file is
+        /// Where a DLSS runtime has to be installed for the dlss/dlaa levels to be offered, when the
+        /// dashboard says nothing. NOTHING from NVIDIA is shipped with this plugin: the file is
         /// libnvidia-ngx-dlss.so.&lt;version&gt; out of github.com/NVIDIA/DLSS, under NVIDIA's
         /// proprietary licence, and the operator must fetch it themselves. See DLSS.md.
         /// </summary>
         public const string DlssRuntimeDirectory = "/usr/lib/jellyfin-ffmpeg-oidn/dlss";
 
+        /// <summary>The configured DLSS runtime directory, or the built-in one when the setting is blank.</summary>
+        private static string DlssRuntimeDirectoryFor(UpscaleSettings cfg) =>
+            string.IsNullOrWhiteSpace(cfg?.DlssRuntimeDirectory)
+                ? DlssRuntimeDirectory
+                : cfg.DlssRuntimeDirectory.Trim();
+
         /// <summary>Monocular depth weights for the game upscalers. Not shipped; see FSR2.md.</summary>
         public const string DepthModelPath =
             "/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx";
+
+        /// <summary>The configured depth weights, or the built-in path when the setting is blank.</summary>
+        private static string DepthModelPathFor(UpscaleSettings cfg) =>
+            string.IsNullOrWhiteSpace(cfg?.DepthModelPath)
+                ? DepthModelPath
+                : cfg.DepthModelPath.Trim();
 
         /// <summary>
         /// GAME TEMPORAL UPSCALERS - READ THIS BEFORE OFFERING ONE TO ANYBODY.
@@ -628,7 +661,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public static bool IsDenoiseLevel(string level) => level != null && _denoiseFilters.ContainsKey(level.Trim());
 
         /// <summary>The full path to a neural level's weights, or null when there is no such level.</summary>
-        public static string NeuralModelPath(string level)
+        public static string NeuralModelPath(string level, UpscaleSettings cfg = null)
         {
             if (string.IsNullOrWhiteSpace(level)
                 || !_neuralModels.TryGetValue(level.Trim(), out string file)
@@ -637,7 +670,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 return null;
             }
 
-            return Path.Combine(NeuralModelDirectory, file);
+            return Path.Combine(NeuralModelDirectoryFor(cfg), file);
         }
 
         public static bool IsNeuralLevel(string level) => level != null && _neuralModels.ContainsKey(level.Trim());
@@ -652,12 +685,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 || string.Equals(level.Trim(), "dlss", StringComparison.OrdinalIgnoreCase));
 
         /// <summary>Is a DLSS runtime present? It is not shipped, so dlss/dlaa may not be offerable.</summary>
-        public static bool DlssRuntimePresent()
+        public static bool DlssRuntimePresent(UpscaleSettings cfg = null)
         {
             try
             {
-                return Directory.Exists(DlssRuntimeDirectory)
-                    && Directory.GetFiles(DlssRuntimeDirectory, "libnvidia-ngx-dlss.so*").Length > 0;
+                string dir = DlssRuntimeDirectoryFor(cfg);
+                return Directory.Exists(dir)
+                    && Directory.GetFiles(dir, "libnvidia-ngx-dlss.so*").Length > 0;
             }
             catch (Exception)
             {
@@ -670,10 +704,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// is not shipped with the plugin, so on a server where nobody installed one they are not
         /// listed - the same rule the neural weights follow.
         /// </summary>
-        public static List<string> AvailableGameLevels()
+        public static List<string> AvailableGameLevels(UpscaleSettings cfg = null)
         {
             var list = new List<string>();
-            bool dlss = DlssRuntimePresent();
+            bool dlss = DlssRuntimePresent(cfg);
             foreach (string level in _gameMenu)
             {
                 if ((string.Equals(level, "dlss", StringComparison.Ordinal)
@@ -717,10 +751,10 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// but "off" is listed. Served through the probe so the panel shows the rows only where
         /// they act, instead of deciding that here.
         /// </summary>
-        public static List<string> GameOptionLevels()
+        public static List<string> GameOptionLevels(UpscaleSettings cfg = null)
         {
             var list = new List<string>();
-            foreach (string level in AvailableGameLevels())
+            foreach (string level in AvailableGameLevels(cfg))
             {
                 if (!string.Equals(level, "off", StringComparison.Ordinal))
                 {
@@ -813,7 +847,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             string canonical = level.Trim().ToLowerInvariant();
             bool isDlss = canonical == "dlss" || canonical == "dlaa";
-            if (isDlss && !DlssRuntimePresent())
+            if (isDlss && !DlssRuntimePresent(cfg))
             {
                 return null;
             }
@@ -821,7 +855,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             bool depthModel = false;
             try
             {
-                depthModel = File.Exists(DepthModelPath);
+                depthModel = File.Exists(DepthModelPathFor(cfg));
             }
             catch (Exception)
             {
@@ -871,12 +905,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             depthUsed = depth;
             if (depth != "flat")
             {
-                sb.Append(":dmodel=").Append(DepthModelPath);
+                sb.Append(":dmodel=").Append(DepthModelPathFor(cfg));
             }
 
             if (isDlss)
             {
-                sb.Append(":sdk=").Append(DlssRuntimeDirectory);
+                sb.Append(":sdk=").Append(DlssRuntimeDirectoryFor(cfg));
             }
 
             sb.Append(",format=yuv420p");
@@ -908,12 +942,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// plugin, so on a server where nobody exported them this list is just "off" and the
         /// control disappears rather than offering something that would fail.
         /// </summary>
-        public static List<string> AvailableNeuralLevels()
+        public static List<string> AvailableNeuralLevels(UpscaleSettings cfg = null)
         {
             var list = new List<string>();
             foreach (string level in _neuralMenu)
             {
-                string path = NeuralModelPath(level);
+                string path = NeuralModelPath(level, cfg);
                 if (path == null)
                 {
                     list.Add(level);        // "off"
@@ -936,34 +970,103 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return list;
         }
 
+        /// <summary>Are this level's weights actually on disk? An unreadable directory means no.</summary>
+        private static bool NeuralWeightsPresent(string path)
+        {
+            try
+            {
+                return path != null && File.Exists(path);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The weight of the SAME family whose factor is the smallest one that still covers this
+        /// session's ratio, or the level as asked when nothing better is installed.
+        ///
+        /// SMALLEST ONE THAT STILL COVERS IT, not nearest: a weight below the ratio would hand
+        /// libplacebo fewer pixels than the target needs and make it enlarge the network's output,
+        /// which is a quality trade and not what this is for. This only ever removes work that was
+        /// going to be discarded - a x4 weight at 2x produces 2160p for a 1080p target.
+        ///
+        /// FAMILY IS NOT CROSSED. The anime and general weights are differently trained networks,
+        /// not rungs of one ladder, so realesr-general-x4 stays itself at every ratio even though
+        /// it is the most expensive level here: swapping it for anime weights would change what the
+        /// viewer sees, which is exactly the kind of substitution this plugin must not make.
+        /// </summary>
+        private static string NeuralForRatio(string canonical, double ratio, UpscaleSettings cfg)
+        {
+            if (ratio <= 0 || !_neuralFactors.TryGetValue(canonical, out int asked))
+            {
+                return canonical;
+            }
+
+            int dash = canonical.LastIndexOf("-x", StringComparison.Ordinal);
+            if (dash <= 0)
+            {
+                return canonical;
+            }
+
+            string family = canonical.Substring(0, dash);
+            string best = canonical;
+            int bestFactor = asked;
+            foreach (var pair in _neuralFactors)
+            {
+                // A factor within 1% of the ratio counts as covering it: the target height is
+                // rounded to an even number, so an exact 2x session can arrive as 2.0004x.
+                if (pair.Value >= bestFactor
+                    || pair.Value * 1.01 < ratio
+                    || !pair.Key.StartsWith(family + "-x", StringComparison.OrdinalIgnoreCase)
+                    || !NeuralWeightsPresent(NeuralModelPath(pair.Key, cfg)))
+                {
+                    continue;
+                }
+
+                best = pair.Key.ToLowerInvariant();
+                bestFactor = pair.Value;
+            }
+
+            return best;
+        }
+
         /// <summary>
         /// The ffmpeg filter node for a neural level, or null for none. Always CPU-side: the
         /// "ort" filter takes planar float RGB, so it carries its own format conversions and
         /// therefore never has "_vulkan" in it, which is what puts it before hwupload under the
         /// same routing invariant the denoise levels obey.
+        ///
+        /// The session's source and output heights decide which weight of the asked-for family
+        /// actually runs; see NeuralForRatio. levelUsed reports the weight that ran, so a
+        /// substitution reaches the session record and the panel rather than happening silently.
         /// </summary>
-        public static string NeuralFilter(string level, out string levelUsed)
+        public static string NeuralFilter(
+            string level, int sourceHeight, int outputHeight, out string levelUsed, UpscaleSettings cfg = null)
         {
             levelUsed = "off";
-            string path = NeuralModelPath(level);
-            if (path == null)
+            if (NeuralModelPath(level, cfg) == null)
             {
                 return null;
             }
 
-            try
+            string canonical = level.Trim().ToLowerInvariant();
+            if (!NeuralWeightsPresent(NeuralModelPath(canonical, cfg)))
             {
-                if (!File.Exists(path))
-                {
-                    return null;
-                }
-            }
-            catch (Exception)
-            {
+                // A level nobody exported the weights for is still no level at all. Checked before
+                // the substitution so that a missing x4 does not quietly become a running x2.
                 return null;
             }
 
-            levelUsed = level.Trim().ToLowerInvariant();
+            double ratio = sourceHeight > 0 && outputHeight > 0
+                ? (double)outputHeight / sourceHeight
+                : 0;
+
+            string chosen = NeuralForRatio(canonical, ratio, cfg);
+            string path = NeuralModelPath(chosen, cfg);
+
+            levelUsed = chosen;
             return "format=gbrpf32le,ort=model=" + path + ",format=yuv420p";
         }
 
