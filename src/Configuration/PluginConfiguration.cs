@@ -39,6 +39,20 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         public bool DenoiseAllowed { get; set; } = true;
 
         /// <summary>
+        /// Deblocking used when a session does not name one: off, light, strong, fspp, pp7.
+        /// Not a denoiser: it removes the source's OWN compression artefacts, DCT block edges and
+        /// mosquito ringing, at source resolution before any super-resolution pass, because every
+        /// network here was trained on clean downsampled images and rebuilds a block edge as if it
+        /// were real detail. light and strong are libavfilter deblock and treat blocking only;
+        /// fspp and pp7 are libpostproc and deringe as well, for more cost. Off by default because
+        /// no strength has been measured on this content yet.
+        /// </summary>
+        public string DeblockLevel { get; set; } = "off";
+
+        /// <summary>Master switch for deblocking. When false, no session can turn it on.</summary>
+        public bool DeblockAllowed { get; set; } = true;
+
+        /// <summary>
         /// Neural super-resolution used when a session does not name one: off, realesr-anime-x2,
         /// realesr-anime-x4, realesr-general-x4. Advanced and off by default - every one of them
         /// is far below realtime on this hardware.

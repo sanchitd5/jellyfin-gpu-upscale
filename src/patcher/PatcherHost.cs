@@ -87,6 +87,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["Deblur"] = ShaderLibrary.AvailableDeblurLevels(cfg),
                 ["Denoise"] = ShaderLibrary.AvailableDenoiseLevels(),
 
+                // Compression cleanup, ahead of any enlargement, and gated by its master switch for
+                // the same reason Neural, Game, Refine and Chroma are: Decide would force a level
+                // back to off, so offering one would be a control that does nothing.
+                ["Deblock"] = cfg?.DeblockAllowed == false
+                    ? new List<string> { "off" }
+                    : ShaderLibrary.AvailableDeblockLevels(),
+
                 // Neural super-resolution: an axis of its own, and one that can be EMPTY. The
                 // weights are not shipped, so on a server where they were never exported this
                 // list is just "off" and the menu renders no choice rather than one that fails.
@@ -192,6 +199,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ["DeblurApplied"] = false,
                     ["DenoiseApplied"] = false,
                     ["DenoiseLevel"] = "off",
+                    ["DeblockLevel"] = "off",
+                    ["DeblockApplied"] = false,
+                    ["DeblockRequested"] = "off",
                     ["NeuralLevel"] = "off",
                     ["NeuralApplied"] = false,
                     ["NeuralRequested"] = "off",
@@ -221,6 +231,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["DeblurApplied"] = record.DeblurApplied,
                 ["DenoiseApplied"] = record.DenoiseApplied,
                 ["DenoiseLevel"] = record.DenoiseLevel ?? "off",
+                ["DeblockLevel"] = record.DeblockLevel ?? "off",
+                ["DeblockApplied"] = record.DeblockApplied,
+                ["DeblockRequested"] = record.DeblockRequested ?? "off",
                 ["NeuralLevel"] = record.NeuralLevel ?? "off",
                 // Applied and requested both, so the panel can say "asked for, did not run" instead
                 // of showing a dropped network exactly like one nobody selected.

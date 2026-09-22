@@ -381,6 +381,45 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="DeblockAllowed" />
+                        <span>Allow deblock</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn deblock on.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="DeblockLevel" label="Deblock (default)">
+                        <option value="off">Off</option>
+                        <option value="light">Light - deblock, gentle</option>
+                        <option value="strong">Strong - deblock, harder</option>
+                        <option value="fspp">fspp - libpostproc, also removes ringing</option>
+                        <option value="pp7">pp7 - libpostproc, strongest and most expensive</option>
+                    </select>
+                    <div class="fieldDescription">
+                        <strong>Not the same job as denoise above.</strong> Denoise removes noise in the
+                        picture. Deblock removes the SOURCE's own compression damage: the DCT block edges
+                        a low-bitrate encode leaves behind, and the mosquito ringing around hard edges.
+                        It runs at source resolution, before any super-resolution pass.
+                        <br /><br />
+                        It matters because every network here was trained on clean downsampled images. A
+                        block edge is not something those networks were ever shown, so they treat it as
+                        real detail and reconstruct it - the artefact comes out of the upscale larger and
+                        sharper than it went in.
+                        <br /><br />
+                        <code>light</code> and <code>strong</code> are libavfilter's <code>deblock</code>
+                        filter and address blocking only. <code>fspp</code> and <code>pp7</code> come from
+                        libpostproc and also remove ringing, at more CPU cost. All four are single-threaded
+                        CPU passes at source resolution, so they cost more on a large source than on a
+                        small one.
+                        <br /><br />
+                        Off by default, because no strength has been measured on this content yet.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
                         <input is="emby-checkbox" type="checkbox" id="Deband" />
                         <span>Deband</span>
                     </label>
@@ -760,6 +799,8 @@
                     page.querySelector('#GameAllowed').checked = config.GameAllowed !== false;
                     page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
                     page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
+                    page.querySelector('#DeblockLevel').value = config.DeblockLevel || 'off';
+                    page.querySelector('#DeblockAllowed').checked = config.DeblockAllowed !== false;
                     page.querySelector('#Deband').checked = config.Deband !== false;
                     page.querySelector('#DebandThreshold').value =
                         config.DebandThreshold == null ? 3 : config.DebandThreshold;
@@ -829,6 +870,8 @@
                     config.GameAllowed = page.querySelector('#GameAllowed').checked;
                     config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
                     config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
+                    config.DeblockLevel = page.querySelector('#DeblockLevel').value;
+                    config.DeblockAllowed = page.querySelector('#DeblockAllowed').checked;
                     config.Deband = page.querySelector('#Deband').checked;
                     config.DebandThreshold = parseInt(page.querySelector('#DebandThreshold').value, 10);
                     config.DebandGrain = parseInt(page.querySelector('#DebandGrain').value, 10);

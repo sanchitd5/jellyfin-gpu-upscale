@@ -116,6 +116,24 @@
             ]
         },
         {
+            // COMPRESSION CLEANUP, and it runs BEFORE anything is enlarged: blocking and ringing
+            // left by the encoder are damage in the source, so removing them first stops every
+            // later pass from sharpening and enlarging the damage along with the picture. A
+            // restoration pass rather than a picture control, which is why it lives in Advanced:
+            // nobody reaches for it mid-film the way they reach for size or denoise.
+            key: 'deblock', label: 'Clean up compression', fallback: 'off', group: 'Noise',
+            probeKey: 'Deblock', grade: ['off', 'light', 'strong'],
+            options: [
+                { id: 'off', name: 'Off' },
+                { id: 'light', name: 'Light' },
+                { id: 'strong', name: 'Strong' },
+                // The two that also take ringing off edges, not only blocking. Both cost more GPU
+                // than light and strong, so they are not rungs and each says so in its own name.
+                { id: 'fspp', name: 'FSPP (also removes ringing - slower)' },
+                { id: 'pp7', name: 'PP7 (also removes ringing - slowest)' }
+            ]
+        },
+        {
             // NEURAL SUPER-RESOLUTION - a different mechanism from the Detail row below, not a
             // better grade of it. Detail is a libplacebo shader inside the scaling pass; these are
             // ONNX networks run by ONNX Runtime on CUDA, ahead of it, out of the same patched
@@ -268,7 +286,7 @@
     var GAME_OPTION_KEYS = ['jitter', 'depth', 'reactive'];
 
     var DEFAULT_PREFS = {
-        upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
+        upscale: 'off', deblur: 'off', denoise: 'off', deblock: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
         deband: 'default', kernel: 'default', refine: 'default', chroma: 'default',
         jitter: 'default', depth: 'default', reactive: 'default'
     };
@@ -391,7 +409,7 @@
         // it is), 'custom' (the Advanced controls own it), or a stage recipe object.
         stage: 'unset',
         prefs: {
-            upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
+            upscale: 'off', deblur: 'off', denoise: 'off', deblock: 'off', neural: 'off', game: 'off', sr: 'fsrcnnx',
             deband: 'default', kernel: 'default', refine: 'default', chroma: 'default',
             jitter: 'default', depth: 'default', reactive: 'default'
         }
@@ -448,6 +466,7 @@
                 upscale: state.prefs.upscale,
                 deblur: state.prefs.deblur,
                 denoise: state.prefs.denoise,
+                deblock: state.prefs.deblock,
                 neural: state.prefs.neural,
                 game: state.prefs.game,
                 sr: state.prefs.sr,
@@ -635,7 +654,10 @@
         }
 
         if (state.stage === 'off') {
-            return { upscale: 'off', deblur: 'off', denoise: 'off', neural: 'off', game: 'off', sr: 'off' };
+            return {
+                upscale: 'off', deblur: 'off', denoise: 'off', deblock: 'off', neural: 'off',
+                game: 'off', sr: 'off'
+            };
         }
 
         if (state.stage === 'custom') {
@@ -1245,6 +1267,7 @@
         { label: 'Detail (SR)', level: 'SrLevel', requested: 'SrRequested' },
         { label: 'Unblur', level: 'DeblurLevel', applied: 'DeblurApplied' },
         { label: 'Denoise', level: 'DenoiseLevel', applied: 'DenoiseApplied' },
+        { label: 'Compression cleanup', level: 'DeblockLevel', applied: 'DeblockApplied', requested: 'DeblockRequested' },
         { label: 'Neural SR', level: 'NeuralLevel', applied: 'NeuralApplied', requested: 'NeuralRequested' },
         { label: 'Game upscaler', level: 'GameLevel', applied: 'GameApplied' },
         // What the server actually ran those three with - read from the record, never from what
@@ -2649,6 +2672,10 @@
             // is in force - unless the viewer said Off, where `effective()` has already made them
             // off and this sends that. (Before this build the neural axis was never written onto
             // the URL at all, so choosing a level there did nothing.)
+            // Compression cleanup rides alongside the ladder for the same reason: no generated
+            // stage sets it, so it is sent from the preference whichever stage is in force, and
+            // Off is sent as off because `effective()` has already made it so.
+            params.deblock = e.deblock != null ? e.deblock : (state.prefs.deblock || 'off');
             params.neural = e.neural != null ? e.neural : (state.prefs.neural || 'off');
             params.game = e.game != null ? e.game : (state.prefs.game || 'off');
 

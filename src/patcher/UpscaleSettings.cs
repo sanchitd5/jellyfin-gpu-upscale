@@ -109,6 +109,25 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public bool DenoiseAllowed { get; set; } = true;
 
         /// <summary>
+        /// Deblocking applied by default: off, light, strong (libavfilter deblock), fspp, pp7
+        /// (libpostproc). NOT another denoiser. Denoise removes noise the camera put there;
+        /// this removes what the encoder put there, the DCT block edges and the mosquito ringing
+        /// of the source's own compression, and it runs at source resolution ahead of any
+        /// super-resolution pass. Every network in this plugin was trained on clean downsampled
+        /// images, so an unhandled block edge is reconstructed as though it were real detail and
+        /// the artefact is sharpened along with the picture.
+        ///
+        /// light and strong address blocking only. fspp and pp7 also deringe, and cost more for it.
+        ///
+        /// Off by default because none of these strengths has been measured on this content yet,
+        /// which is this project's rule for anything unmeasured.
+        /// </summary>
+        public string DeblockLevel { get; set; } = "off";
+
+        /// <summary>Master switch for deblocking. When false no session can turn it on.</summary>
+        public bool DeblockAllowed { get; set; } = true;
+
+        /// <summary>
         /// Neural super-resolution applied by default: off, realesr-anime-x2, realesr-anime-x4,
         /// realesr-general-x4. A separate axis from SrLevel - it is an ONNX network run ahead of
         /// the scaling pass, not a libplacebo shader inside it, and the two compose.
