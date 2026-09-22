@@ -534,3 +534,120 @@ shaders on Vulkan. Five custom ffmpeg filters. Thirteen composable per-session a
 switchable. A capability probe that strips what the binary lacks. Honest negative reporting per
 session. Ground-truth-referenced measurement rather than model reputation: their own model
 evaluation doc says VMAF scoring on real clips is still pending.
+
+---
+
+# Planned: the media enhancement programme
+
+Agreed order. Item 1 shipped; the rest are planned, not built. Each says what gets copied rather
+than written, under which licence, and what has to be decided before code.
+
+The licence rule that governs all of it is in AGENTS.md: this project is GPLv2-or-later, so MIT and
+BSD-3 copy straight in with their headers, Apache-2.0 works but ships the result as GPLv3, and AGPL
+and non-commercial licences are out whatever their quality.
+
+## 1. Deblock and dering — DONE
+
+Shipped. libavfilter `deblock` at two strengths, plus `fspp` and `pp7` from libpostproc which also
+remove ringing. Runs at source resolution before any enlargement, because a network trained on clean
+downsampled images treats a block edge as real detail. Availability probed against the running
+binary, unknown counting as missing. Default off until measured. Nothing to copy: ffmpeg had it.
+
+## 2. Batch pipeline — the unlock
+
+Upscale overnight, direct-play forever. Recorded video is static, so the expensive models do not
+belong on the playback path at all. It is also what makes `vf_ort` and `vf_optix` usable: NEURAL.md
+measures them at 24, 15 and 10 fps, hopeless live and fine at 3 AM.
+
+VENDOR, MIT, from Kuschel-code/JellyfinUpscalerPlugin at commit
+6cd2aa390c7f0abde796106ed95ed02b978ec4be:
+- `Services/FrameStreamCoordinator.cs` entire. 110 lines, zero Jellyfin types, pure BCL. It encodes
+  a correctness argument that would be got wrong from memory: frame N is proven complete only when
+  frame N+1 appears, only a CLEAN extractor exit promotes the final frame, and a failure still hands
+  out every proven frame before reporting. Keep its XML doc verbatim, because the doc is the spec.
+- Its `MaxFrameNumber` helper, which is the half of the invariant living outside the class: a
+  high-water number rather than a file count, so a consumer deleting what it consumed is safe.
+- The producer/watcher/consumer skeleton as a documented reference, retyped against our own types.
+- One free lesson: `CultureInfo.InvariantCulture` on every number reaching a filtergraph string.
+  Their `fps=23,976` under a German locale killed every job with "No such filter: '976'". Our chain
+  has the same landmine.
+
+WRITE OURSELVES, because their assumptions do not hold here:
+- The scheduled task. Theirs carries six constructor dependencies we do not have, and it judges
+  eligibility itself with a private resolution check. AGENTS.md invariant 8 says eligibility lives
+  in one place, `UpscaleEngine.WouldEnhanceSource`. A batch task with its own threshold IS a second
+  eligibility site.
+- All ffmpeg command building. We patch `EncodingHelper` and run a shim that asks the patched binary
+  which filters it carries. A vendored executor with a bare ffmpeg path would route batch work to
+  the STOCK binary and silently produce unenhanced output, which invariant 10 says nothing will tell
+  you about.
+- The library refresh. Theirs has none: it writes `name_upscaled.ext` into the library and never
+  triggers a scan, so the library is stale and the next natural scan produces a duplicate item
+  rather than an alternate version.
+- Colour handling. Their round trip is 8-bit PNG with `yuv420p` forced on reconstruct, one audio
+  track, subtitles and chapters dropped. That would eat the colour-range work above.
+
+DECIDE FIRST:
+- How eligibility crosses the load-context boundary. `WouldEnhanceSource` lives in the patcher
+  assembly and invariant 1 forbids the plugin referencing patcher types, so it is either a primitive
+  JSON call like `PatcherLoader.StatusJson()` or one source file compiled into both. Not a fork.
+- Where output goes, and whether it is a duplicate item or an alternate version.
+- Whether we need the PNG round trip at all, given our inference already runs inside the filter
+  graph.
+
+VERIFIED PRESENT in our 12.1 assemblies: `IScheduledTask`, `IConfigurableScheduledTask`,
+`TaskTriggerInfo`, `TaskTriggerInfoType`, `IPluginServiceRegistrator`, `VirtualFolderInfo`,
+`InternalItemsQuery`, `ValidateMediaLibrary`, `QueueLibraryScan`, `GetMediaStreams`. Still to check
+by compiler rather than by `strings`: the member shapes, and which namespace carries `MediaType`
+now that both `Jellyfin.Data.Enums` and `Jellyfin.Database.Implementations.Enums` exist.
+
+We have no `IPluginServiceRegistrator` today, so registering a scheduled task is a new file.
+
+## 3. Interpolation, batch and opt-in
+
+RIFE, MIT, via rife-ncnn-vulkan rather than written from scratch.
+
+Batch only, opt-in per library, never a default, and NEVER on animation: animation is drawn on twos
+and threes, and interpolating it destroys the cadence the animators chose. Our library is heavy with
+it. On live action it produces the soap-opera effect, which people either want or hate with no
+middle ground, so it is a preference and must be presented as one.
+
+Realtime is not on the table: it costs more than the upscale and competes with NVENC on the same
+card for something that is not reconstruction.
+
+## 4. Camera-style presets, dashboard only
+
+`eq`, `curves`, `vignette`, `colortemperature`, already in ffmpeg, effectively free.
+
+Dashboard only and off by default, because this is grading rather than reconstruction: it changes
+colour away from what the source intended, which cuts against everything else here. Offered because
+it is nearly free and somebody may want it, not because it improves the picture.
+
+## 5. Face restoration, batch and live-action
+
+GFPGAN, Apache-2.0, so the combined work ships as GPLv3. NOT CodeFormer, whose S-Lab licence is
+research and non-commercial only: it is the better-looking restorer and it cannot go in a GPL
+project at any quality.
+
+Batch only: restoring each frame independently flickers and drifts identity across a shot. Live
+action only, since the weights are trained on real faces and do nothing for animation. Worth it for
+genuinely poor sources and nothing else.
+
+## 6. Region-selective upscaling, last
+
+Spend the expensive network only where it matters. The appealing idea and the hardest to fit: our
+chain is libplacebo shaders over the whole frame, with no seam for "spend here, not there", and
+unstable masks pulse visibly between frames.
+
+Only meaningful once the batch pipeline exists, where detection cost stops mattering and masks can
+be smoothed across time. Not a realtime feature for us.
+
+Detector must NOT be Ultralytics YOLO: AGPL-3.0 would place its obligations on the whole server.
+Their tiny-YOLOv3 route, or another permissively licensed detector.
+
+## What this programme does not include
+
+Poster and image upscaling, frame interpolation as a realtime path, object masking outside batch,
+and the client-side browser tiers. The client tiers are worth revisiting separately: they are the
+answer to every honest negative this plugin gives a viewer, they cost the GPU nothing, and the
+WebGL and Anime4K implementations are MIT and ready to copy.
