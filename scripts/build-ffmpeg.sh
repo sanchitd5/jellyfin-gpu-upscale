@@ -253,16 +253,31 @@ cp -r Vulkan-Headers/include/vk_video /usr/local/include/ 2>/dev/null || true
 #
 # It comes BEFORE libplacebo on purpose: libplacebo is configured with -Dshaderc=enabled and links
 # whichever it finds, so building it first would leave libplacebo on the old one.
+#
+# Both this and libplacebo below are skipped when a stamp file says the same tag is already
+# installed at /usr/local. Neither depends on which WITH_* flags are set, so every WITH_VSR
+# iteration was rebuilding them from source unconditionally - minutes of wasted C++ compilation per
+# run during exactly the kind of rapid rebuild-and-test loop this filter needed. Bump the tag (or
+# delete the stamp) to force a rebuild.
+STAMP_DIR="/usr/local/share/jellyfin-gpu-upscale-build-stamps"
+mkdir -p "$STAMP_DIR"
+
 say "shaderc ${SHADERC_TAG} (from source: the distro build cannot compile FFmpeg 8's Vulkan shaders)"
-git clone -q --depth 1 -b "$SHADERC_TAG" https://github.com/google/shaderc.git
-# Fetches the glslang and SPIRV-Tools revisions this tag was tested against, which is the whole
-# reason to use upstream's own script rather than distro packages of each.
-( cd shaderc && ./utils/git-sync-deps >/dev/null )
-cmake -S shaderc -B shaderc/build -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=/usr/local \
-    -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON -DSHADERC_SKIP_COPYRIGHT_CHECK=ON >/dev/null
-cmake --build shaderc/build --target install -j"$(nproc)" >/dev/null
-ldconfig
+if [[ "$(cat "$STAMP_DIR/shaderc.tag" 2>/dev/null)" == "$SHADERC_TAG" ]] \
+        && pkg-config --exists shaderc 2>/dev/null; then
+    say "shaderc ${SHADERC_TAG} already installed at /usr/local, skipping rebuild"
+else
+    git clone -q --depth 1 -b "$SHADERC_TAG" https://github.com/google/shaderc.git
+    # Fetches the glslang and SPIRV-Tools revisions this tag was tested against, which is the whole
+    # reason to use upstream's own script rather than distro packages of each.
+    ( cd shaderc && ./utils/git-sync-deps >/dev/null )
+    cmake -S shaderc -B shaderc/build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DSHADERC_SKIP_TESTS=ON -DSHADERC_SKIP_EXAMPLES=ON -DSHADERC_SKIP_COPYRIGHT_CHECK=ON >/dev/null
+    cmake --build shaderc/build --target install -j"$(nproc)" >/dev/null
+    ldconfig
+    echo "$SHADERC_TAG" > "$STAMP_DIR/shaderc.tag"
+fi
 
 # Prove it before anything links against it: a version that still predates the extension would
 # otherwise surface twenty minutes later as the same runtime failure this build exists to remove.
@@ -272,11 +287,17 @@ say "shaderc in use: ${shaderc_ver}"
 # --- libplacebo -----------------------------------------------------------------------------------
 # FFmpeg 8.x needs PL_ALPHA_NONE, absent from libplacebo 6.x (which is what distros ship).
 say "libplacebo ${LIBPLACEBO_TAG} (static)"
-git clone --recursive --depth 1 -b "$LIBPLACEBO_TAG" \
-    https://code.videolan.org/videolan/libplacebo.git >/dev/null 2>&1
-meson setup libplacebo/build libplacebo --prefix=/usr/local --libdir=lib/x86_64-linux-gnu \
-    --default-library=static -Dvulkan=enabled -Dshaderc=enabled -Ddemos=false >/dev/null
-ninja -C libplacebo/build install >/dev/null
+if [[ "$(cat "$STAMP_DIR/libplacebo.tag" 2>/dev/null)" == "$LIBPLACEBO_TAG" ]] \
+        && [[ -f /usr/local/lib/x86_64-linux-gnu/libplacebo.a ]]; then
+    say "libplacebo ${LIBPLACEBO_TAG} already installed at /usr/local, skipping rebuild"
+else
+    git clone --recursive --depth 1 -b "$LIBPLACEBO_TAG" \
+        https://code.videolan.org/videolan/libplacebo.git >/dev/null 2>&1
+    meson setup libplacebo/build libplacebo --prefix=/usr/local --libdir=lib/x86_64-linux-gnu \
+        --default-library=static -Dvulkan=enabled -Dshaderc=enabled -Ddemos=false >/dev/null
+    ninja -C libplacebo/build install >/dev/null
+    echo "$LIBPLACEBO_TAG" > "$STAMP_DIR/libplacebo.tag"
+fi
 
 # --- nv-codec-headers -----------------------------------------------------------------------------
 say "nv-codec-headers ${NVCODEC_TAG} (must match the installed driver)"
