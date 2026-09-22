@@ -3230,6 +3230,10 @@
         }
     }
 
+    // Case-insensitive, and shared by both hooks: a match that depends on the endpoint's exact
+    // spelling fails silently and completely, which is the worst shape a failure can take here.
+    var IS_PLAYBACK_INFO = /\/playbackinfo(\?|$|\/)/i;
+
     function hookFetch() {
         if (!window.fetch) {
             return;
@@ -3245,7 +3249,7 @@
             }
 
             var args = arguments;
-            if (url && url.indexOf('/PlaybackInfo') !== -1 && anyEnhancement()) {
+            if (url && IS_PLAYBACK_INFO.test(url) && anyEnhancement()) {
                 try {
                     var newUrl = forceTranscodeUrl(url);
                     if (typeof input === 'string') {
@@ -3284,7 +3288,7 @@
             }
 
             var promise = originalFetch.apply(this, args);
-            if (!url || url.indexOf('/PlaybackInfo') === -1) {
+            if (!url || !IS_PLAYBACK_INFO.test(url)) {
                 return promise;
             }
 
@@ -3331,7 +3335,10 @@
         proto.open = function (method, url) {
             try {
                 this.__gpuUpscaleUrl = url;
-                if (url && url.indexOf('/PlaybackInfo') !== -1 && anyEnhancement()) {
+                // Case-insensitive: the endpoint is spelled PlaybackInfo today, and a match that
+                // depends on that spelling fails silently and completely, which is the worst shape
+                // a failure can take here.
+                if (url && IS_PLAYBACK_INFO.test(url) && anyEnhancement()) {
                     var forced = forceTranscodeUrl(url);
                     if (forced !== url) {
                         this.__gpuUpscaleUrl = forced;
@@ -3349,7 +3356,7 @@
 
             try {
                 var url = this.__gpuUpscaleUrl;
-                if (url && url.indexOf('/PlaybackInfo') !== -1) {
+                if (url && IS_PLAYBACK_INFO.test(url)) {
                     // Request side: make sure a TranscodingUrl will exist to mark.
                     var rewrittenBody = forceTranscodeBody(body);
                     if (rewrittenBody) {
