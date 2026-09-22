@@ -545,6 +545,30 @@
         return (FPS[1080].off / fps) * (DENOISE_COST[denoise] || 1) * (NEURAL_COST[neural] || 1);
     }
 
+    /*
+     * Deblock costs, ESTIMATED not measured, and the comment says so because this project does not
+     * pretend a guess is a measurement. deblock is a cheap 8-pixel-grid pass; fspp and pp7 are
+     * libpostproc, single-threaded on the CPU at source resolution, and they are the two that turn
+     * a working chain into a slideshow. Replace with real numbers when somebody benchmarks them.
+     */
+    var DEBLOCK_COST = { off: 1, light: 1.15, strong: 1.3, fspp: 2.4, pp7: 2.2 };
+
+    /*
+     * What the CURRENT selection is likely to cost, as opposed to what a ladder stage costs. The
+     * stages are costed and ordered; a Custom pick is not, so nothing stopped a viewer stacking
+     * fspp, OptiX and DLSS into 0.22x realtime and watching it buffer with no explanation.
+     */
+    function selectionCost() {
+        try {
+            var p = shownPrefs();
+            var base = stageCost(parseInt(p.upscale, 10) || state.sourceHeight || 1080,
+                !isOff(p.sr), p.denoise, p.neural);
+            return base * (DEBLOCK_COST[p.deblock] || 1) * (GAME_COST[p.game] || 1);
+        } catch (err) {
+            return 0;
+        }
+    }
+
     function costHint(cost) {
         // Three bands rather than a bare number, because what the viewer needs to know is how many
         // of these the server can run at once, not a ratio.
@@ -2117,6 +2141,20 @@
         var rest = controls.filter(function (c) { return !tier(c); });
 
         basics.forEach(function (c) { body.appendChild(pick(c)); });
+
+        // A chain that cannot keep up does not fail, it buffers, and nothing in the panel said so
+        // until now: a viewer stacking compression cleanup, OptiX and DLSS got 0.22x realtime and
+        // an unexplained stutter. The number is an estimate from the cost tables, not a
+        // measurement of this server, and the wording says which it is.
+        var cost = selectionCost();
+        if (cost >= 4) {
+            body.appendChild(el('div', 'gpuup-note',
+                'This combination is estimated at roughly ' + Math.round(cost)
+                + ' times the cheapest upscale. That is very likely below realtime here, which shows'
+                + ' up as buffering and dropped frames rather than as an error. The estimate comes'
+                + ' from measured costs per pass, not from this stream: check what the server'
+                + ' reports below once it has negotiated.'));
+        }
 
         if (rest.length) {
             var adv = disclosure('advanced', 'Advanced', changedCount(rest));

@@ -684,7 +684,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     r.SourceHeight,
                     r.OutputWidth,
                     r.OutputHeight,
-                    string.Equals(r.SrLevel, "off", StringComparison.OrdinalIgnoreCase) ? "plain scaling" : r.SrLevel));
+                    // A game upscaler hands libplacebo a picture already at the target size, so the
+                    // scale is a no-op and the SR level was forced off to avoid enlarging twice.
+                    // Reporting that as "plain scaling" names the pass that did nothing and hides
+                    // the one that did the work.
+                    !string.Equals(r.SrLevel, "off", StringComparison.OrdinalIgnoreCase) ? r.SrLevel
+                        : r.GameApplied && !string.IsNullOrEmpty(r.GameLevel)
+                            && !string.Equals(r.GameLevel, "off", StringComparison.OrdinalIgnoreCase)
+                            ? r.GameLevel + ", which produced the output size itself"
+                            : "plain scaling"));
             }
 
             if (r.DeblurApplied)
