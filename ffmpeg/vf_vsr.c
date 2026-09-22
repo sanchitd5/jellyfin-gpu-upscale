@@ -213,10 +213,19 @@ static av_cold int config_output(AVFilterLink *outlink)
     s->out_w = outlink->w;
     s->out_h = outlink->h;
 
+    /* NVVFX_GPU is not a valid parameter selector for this effect - confirmed directly
+     * (NvVFX_SetU32 returns NVCV_ERR_PARAMETER, -5). NVIDIA's own `nvidia-vfx` PyPI
+     * package never sets it either; it selects a device by binding the CUDA context
+     * before creating the effect, which this filter does not yet do (see device=
+     * below). Only device 0 is exercised on this project's single-GPU box. */
+    if (s->device_index != 0)
+        av_log(ctx, AV_LOG_WARNING,
+               "vsr: device=%d requested but only device 0 is currently wired up "
+               "(NVVFX_GPU is not a valid parameter for this effect)\n", s->device_index);
+
     CHECK_NVCV(ctx, NvVFX_CreateEffect(NVVFX_FX_VIDEO_SUPER_RES, &s->effect));
     CHECK_NVCV(ctx, NvVFX_CudaStreamCreate(&s->stream));
     CHECK_NVCV(ctx, NvVFX_SetCudaStream(s->effect, NVVFX_CUDA_STREAM, s->stream));
-    CHECK_NVCV(ctx, NvVFX_SetU32(s->effect, NVVFX_GPU, (unsigned)s->device_index));
     /* models= is optional, not required: NVIDIA's own `nvidia-vfx` PyPI package
      * (nvvfx._lib_loader, confirmed working against libnvidia-ngx-vsr.so.1.8.2)
      * never calls NVVFX_MODEL_DIRECTORY at all - that library version bundles
