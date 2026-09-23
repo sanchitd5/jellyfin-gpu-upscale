@@ -33,8 +33,10 @@
  * Nothing here needs the OptiX SDK's libraries or the CUDA toolkit at run time:
  *  - OptiX is implemented *in the display driver*.  optix_stubs.h dlopen()s
  *    libnvoptix.so.1 and pulls the function table out of it.
- *  - The CUDA driver API is loaded the way FFmpeg's own CUDA code loads it,
- *    through nv-codec-headers' dynlink loader against libcuda.so.1.
+ *  - The CUDA driver API comes from FFmpeg's own hwcontext_cuda: this filter
+ *    takes AV_PIX_FMT_CUDA frames and reuses the CUDA context and stream that
+ *    hwaccel decode already created, the same way vf_dlpp_rtcuda.c and
+ *    vf_vsr_rtcuda.c do.  It never retains a CUDA context of its own.
  *  - The motion field comes from NVOFA, the fixed-function optical flow engine
  *    present on Turing and later, reached by dlopen()ing
  *    libnvidia-opticalflow.so.1.  It is hardware, it runs beside the SMs
@@ -45,19 +47,31 @@
  * Why NVOFA and not something better: a *denoiser* needs only approximate
  * reprojection.  Where it is wrong the model falls back towards the spatial
  * result rather than smearing, so flow quality buys diminishing returns very
- * quickly.  NVOFA is free (it is idle silicon otherwise), needs no kernel of
- * our own - which matters, because this build has no nvcc - and produces a
- * 4x4-granularity field that is upsampled here on the CPU.
+ * quickly.  NVOFA is free (it is idle silicon otherwise) and produces a
+ * 4x4-granularity field that is upsampled here on the GPU.
  *
- * Frames arrive as planar float RGB (gbrpf32le), exactly as for vf_oidn, are
- * packed into the interleaved float3 layout OptiX wants, uploaded, denoised,
- * downloaded and unpacked.  Pack, unpack, luma extraction and flow expansion
- * are slice threaded.
+ * GPU-resident conversion (roadmap/gpu-only-filters.md, "optix" row): this
+ * filter used to declare AV_PIX_FMT_GBRPF32LE and do its own cuMemcpyHtoD /
+ * cuMemcpyDtoH round trip every frame, on top of whatever hwdownload /
+ * hwupload ffmpeg had to insert around it.  It was pure CUDA already, so
+ * instead it now takes AV_PIX_FMT_CUDA frames directly: a small hand-written
+ * PTX module (gu_optix_nv12_rgbf32.ptx, embedded via
+ * gu_optix_nv12_rgbf32_ptx.h -- CT114 has no nvcc/clang for device code, same
+ * convention as gu_dlpp_nv12_rgba.ptx / gu_vsr_nv12_rgba.ptx) converts
+ * NV12 <-> the interleaved float3 RGB buffer OptiX wants, and two more small
+ * kernels in the same module smooth the NVOFA luma input and expand its
+ * S10.5 flow grid, both device-to-device.  Nothing above this filter has to
+ * hwdownload/hwupload around it any more, and nothing inside it touches
+ * host memory on the per-frame path.
  */
 
-#include <float.h>
+#include <string.h>
 #include <stdint.h>
 
+#include "libavutil/hwcontext.h"
+#include "libavutil/hwcontext_cuda_internal.h"
+#include "libavutil/cuda_check.h"
+#include "libavutil/internal.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
@@ -77,8 +91,9 @@
 typedef struct NV_OF_ROI_RECT NV_OF_ROI_RECT;
 #include <nvOpticalFlowCuda.h>
 
-#include <ffnvcodec/dynlink_loader.h>
 #include <dlfcn.h>
+
+#include "gu_optix_nv12_rgbf32_ptx.h"
 
 enum OptixFilterMode {
     OPTIX_MODE_LDR = 0,
@@ -95,7 +110,6 @@ enum OptixFlowSource {
  * granularity the engine offers that is also its most accurate per unit time; a
  * denoiser cannot use more. */
 #define OPTIX_FLOW_GRID 4
-#define OPTIX_FLOW_Q    32.0f   /* 1 << 5, the S10.5 fractional scale */
 
 typedef struct OptixContext {
     const AVClass *class;
@@ -103,14 +117,14 @@ typedef struct OptixContext {
     int   mode;
     int   flow_source;
     float blend;
-    int   device_index;
 
     int w, h;
 
-    CudaFunctions *cu;
-    CUdevice   cu_device;
-    CUcontext  cu_ctx;
-    CUstream   stream;
+    AVCUDADeviceContext *hwctx;
+    AVBufferRef *out_frames;
+
+    CUmodule   mod;
+    CUfunction k_nv12_to_rgbf32, k_rgbf32_to_nv12, k_smooth_luma, k_expand_flow;
 
     OptixDeviceContext optix_ctx;
     OptixDenoiser      denoiser;
@@ -129,11 +143,6 @@ typedef struct OptixContext {
     int         out_slot;
     int         have_previous;
 
-    float *host_rgb;         /* interleaved RGB, both directions */
-    float *host_flow;        /* per-pixel float2, temporal only */
-    uint8_t *host_luma;      /* temporal only */
-    uint8_t *host_luma_s;    /* the same, smoothed, which is what NVOFA is actually given */
-    int16_t *host_grid;      /* raw NVOFA grid, temporal only */
     int grid_w, grid_h;
 
     /* NVOFA */
@@ -147,154 +156,35 @@ typedef struct OptixContext {
     int nvof_ready;
 } OptixContext;
 
-typedef struct ThreadData {
-    AVFrame *in, *out;
-} ThreadData;
-
-static const enum AVPixelFormat pixel_fmts[] = {
-    AV_PIX_FMT_GBRPF32LE,
-    AV_PIX_FMT_NONE
-};
-
-#define CHECK_CU(ctx, expr)                                                       \
-    do {                                                                          \
-        CUresult _cu_ret = (expr);                                                \
-        if (_cu_ret != CUDA_SUCCESS) {                                            \
-            const char *_cu_name = NULL;                                          \
-            OptixContext *_s = (ctx)->priv;                                       \
-            if (_s->cu && _s->cu->cuGetErrorName)                                 \
-                _s->cu->cuGetErrorName(_cu_ret, &_cu_name);                       \
-            av_log(ctx, AV_LOG_ERROR, "CUDA %s failed: %s\n", #expr,              \
-                   _cu_name ? _cu_name : "unknown");                              \
-            return AVERROR_EXTERNAL;                                              \
-        }                                                                         \
+/* Statement form: checks and returns on failure. Everywhere this filter needs
+ * to unwind through a goto instead (to pop the pushed CUDA context first),
+ * it uses CHECK_CU_EXPR below instead. */
+#define CHECK_CU(x)                                                             \
+    do {                                                                        \
+        int _cu_ret = FF_CUDA_CHECK_DL(ctx, s->hwctx->internal->cuda_dl, (x));  \
+        if (_cu_ret < 0)                                                        \
+            return _cu_ret;                                                     \
     } while (0)
 
-#define CHECK_OPTIX(ctx, expr)                                                    \
-    do {                                                                          \
-        OptixResult _ox_ret = (expr);                                             \
-        if (_ox_ret != OPTIX_SUCCESS) {                                           \
-            av_log(ctx, AV_LOG_ERROR, "OptiX %s failed: %s\n", #expr,             \
-                   optixGetErrorString(_ox_ret));                                 \
-            return AVERROR_EXTERNAL;                                              \
-        }                                                                         \
+/* Expression form, for call sites that need to goto a cleanup label instead
+ * of returning directly (filter_frame, compute_flow_dev: both have a pushed
+ * CUDA context to pop first). */
+#define CHECK_CU_EXPR(x) FF_CUDA_CHECK_DL(ctx, s->hwctx->internal->cuda_dl, (x))
+
+#define CHECK_OPTIX(expr)                                                        \
+    do {                                                                        \
+        OptixResult _ox_ret = (expr);                                           \
+        if (_ox_ret != OPTIX_SUCCESS) {                                         \
+            av_log(ctx, AV_LOG_ERROR, "OptiX %s failed: %s\n", #expr,           \
+                   optixGetErrorString(_ox_ret));                               \
+            return AVERROR_EXTERNAL;                                            \
+        }                                                                       \
     } while (0)
 
 static void optix_log_cb(unsigned int level, const char *tag, const char *message, void *cbdata)
 {
     av_log((AVFilterContext *)cbdata, level <= 2 ? AV_LOG_ERROR : AV_LOG_VERBOSE,
            "OptiX [%s] %s\n", tag ? tag : "?", message ? message : "");
-}
-
-/* gbrpf32le: plane 0 = G, plane 1 = B, plane 2 = R */
-static int pack_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
-{
-    OptixContext *s = ctx->priv;
-    ThreadData *td = arg;
-    const int h0 = (s->h * jobnr) / nb_jobs;
-    const int h1 = (s->h * (jobnr + 1)) / nb_jobs;
-    const int temporal = s->mode == OPTIX_MODE_TEMPORAL && s->host_luma;
-
-    for (int y = h0; y < h1; y++) {
-        const float *g = (const float *)(td->in->data[0] + y * td->in->linesize[0]);
-        const float *b = (const float *)(td->in->data[1] + y * td->in->linesize[1]);
-        const float *r = (const float *)(td->in->data[2] + y * td->in->linesize[2]);
-        float *dst = s->host_rgb + (size_t)y * s->w * 3;
-        uint8_t *luma = temporal ? s->host_luma + (size_t)y * s->w : NULL;
-
-        for (int x = 0; x < s->w; x++) {
-            dst[3 * x + 0] = r[x];
-            dst[3 * x + 1] = g[x];
-            dst[3 * x + 2] = b[x];
-            if (luma) {
-                /* NVOFA wants 8-bit luma; Rec.601 weights are what it was trained
-                 * against and the exact primaries do not matter to a flow engine. */
-                float yv = 0.299f * r[x] + 0.587f * g[x] + 0.114f * b[x];
-                luma[x] = yv <= 0.f ? 0 : yv >= 1.f ? 255 : (uint8_t)(yv * 255.f + 0.5f);
-            }
-        }
-    }
-    return 0;
-}
-
-/* A 3x3 box over the luma before it reaches NVOFA.
- *
- * Not cosmetic.  NVOFA block-matches, and per-pixel noise is exactly the thing that
- * makes block matching return a wrong-but-confident vector.  Measured: on a grainy
- * source the raw-luma field left the temporal model worse than assuming no motion at
- * all, which is what a bad field looks like from the outside.  The smoothing costs one
- * cheap pass over an 8-bit plane and does not touch the picture - only the flow input. */
-static int smooth_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
-{
-    OptixContext *s = ctx->priv;
-    const int h0 = (s->h * jobnr) / nb_jobs;
-    const int h1 = (s->h * (jobnr + 1)) / nb_jobs;
-
-    for (int y = h0; y < h1; y++) {
-        const uint8_t *r0 = s->host_luma + (size_t)FFMAX(y - 1, 0) * s->w;
-        const uint8_t *r1 = s->host_luma + (size_t)y * s->w;
-        const uint8_t *r2 = s->host_luma + (size_t)FFMIN(y + 1, s->h - 1) * s->w;
-        uint8_t *dst = s->host_luma_s + (size_t)y * s->w;
-
-        for (int x = 0; x < s->w; x++) {
-            const int xm = FFMAX(x - 1, 0), xp = FFMIN(x + 1, s->w - 1);
-            dst[x] = (r0[xm] + r0[x] + r0[xp] +
-                      r1[xm] + r1[x] + r1[xp] +
-                      r2[xm] + r2[x] + r2[xp] + 4) / 9;
-        }
-    }
-    return 0;
-}
-
-static int unpack_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
-{
-    OptixContext *s = ctx->priv;
-    ThreadData *td = arg;
-    const int h0 = (s->h * jobnr) / nb_jobs;
-    const int h1 = (s->h * (jobnr + 1)) / nb_jobs;
-
-    for (int y = h0; y < h1; y++) {
-        float *g = (float *)(td->out->data[0] + y * td->out->linesize[0]);
-        float *b = (float *)(td->out->data[1] + y * td->out->linesize[1]);
-        float *r = (float *)(td->out->data[2] + y * td->out->linesize[2]);
-        const float *src = s->host_rgb + (size_t)y * s->w * 3;
-
-        for (int x = 0; x < s->w; x++) {
-            r[x] = src[3 * x + 0];
-            g[x] = src[3 * x + 1];
-            b[x] = src[3 * x + 2];
-        }
-    }
-    return 0;
-}
-
-/* Expand the NVOFA grid into the dense float2 field OptiX wants.
- *
- * Two conversions happen here.  Scale: S10.5 fixed point to pixels.  Sign: NVOFA
- * is run with inputFrame = current and referenceFrame = previous, so its vector
- * at (x,y) points back to where that pixel was; OptiX defines flow as the
- * movement from the previous frame to the current one, i.e. the negation.
- * Getting this backwards does not fail, it doubles the apparent motion - which
- * is exactly the kind of bug a flicker measurement catches and an eyeball does
- * not, so it is measured rather than assumed. */
-static int flow_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
-{
-    OptixContext *s = ctx->priv;
-    const int h0 = (s->h * jobnr) / nb_jobs;
-    const int h1 = (s->h * (jobnr + 1)) / nb_jobs;
-
-    for (int y = h0; y < h1; y++) {
-        const int gy = FFMIN(y / OPTIX_FLOW_GRID, s->grid_h - 1);
-        const int16_t *row = s->host_grid + (size_t)gy * s->grid_w * 2;
-        float *dst = s->host_flow + (size_t)y * s->w * 2;
-
-        for (int x = 0; x < s->w; x++) {
-            const int gx = FFMIN(x / OPTIX_FLOW_GRID, s->grid_w - 1);
-            dst[2 * x + 0] = -row[2 * gx + 0] / OPTIX_FLOW_Q;
-            dst[2 * x + 1] = -row[2 * gx + 1] / OPTIX_FLOW_Q;
-        }
-    }
-    return 0;
 }
 
 static av_cold int nvof_init(AVFilterContext *ctx)
@@ -321,7 +211,7 @@ static av_cold int nvof_init(AVFilterContext *ctx)
         av_log(ctx, AV_LOG_WARNING, "NVOFA instance failed (%d)\n", st);
         return AVERROR(ENOSYS);
     }
-    if ((st = s->nvof.nvCreateOpticalFlowCuda(s->cu_ctx, &s->nvof_session)) != NV_OF_SUCCESS) {
+    if ((st = s->nvof.nvCreateOpticalFlowCuda(s->hwctx->cuda_ctx, &s->nvof_session)) != NV_OF_SUCCESS) {
         av_log(ctx, AV_LOG_WARNING, "NVOFA session failed (%d)\n", st);
         return AVERROR(ENOSYS);
     }
@@ -367,9 +257,11 @@ static av_cold int nvof_init(AVFilterContext *ctx)
         return AVERROR(ENOSYS);
     }
 
-    /* These two pitches drive every cuMemcpy2D in and out of NVOFA.  On failure the
-     * stride struct is untouched, so an unchecked call leaves them holding stack
-     * garbage and the copies scribble at that stride.  Degrade to zero flow instead. */
+    /* These two pitches drive every device-side access of NVOFA's own buffers
+     * (the luma smoothing kernel writes at nvof_in_pitch, the flow-expansion
+     * kernel reads at nvof_out_pitch).  On failure the stride struct is
+     * untouched, so an unchecked call leaves them holding stack garbage.
+     * Degrade to zero flow instead. */
     if ((st = s->nvof.nvOFGPUBufferGetStrideInfo(s->nvof_frame[0], &stride)) != NV_OF_SUCCESS) {
         av_log(ctx, AV_LOG_WARNING, "NVOFA input stride failed (%d)\n", st);
         return AVERROR(ENOSYS);
@@ -381,13 +273,6 @@ static av_cold int nvof_init(AVFilterContext *ctx)
     }
     s->nvof_out_pitch = stride.strideInfo[0].strideXInBytes;
 
-    s->host_luma   = av_malloc_array((size_t)s->w, s->h);
-    s->host_luma_s = av_malloc_array((size_t)s->w, s->h);
-    s->host_grid = av_malloc_array((size_t)s->grid_w * s->grid_h, 2 * sizeof(int16_t));
-    s->host_flow = av_malloc_array((size_t)s->w * s->h, 2 * sizeof(float));
-    if (!s->host_luma || !s->host_luma_s || !s->host_grid || !s->host_flow)
-        return AVERROR(ENOMEM);
-
     s->nvof_ready = 1;
     av_log(ctx, AV_LOG_VERBOSE, "NVOFA flow %dx%d on a %dx%d grid\n",
            s->w, s->h, s->grid_w, s->grid_h);
@@ -395,30 +280,32 @@ static av_cold int nvof_init(AVFilterContext *ctx)
 }
 
 /* Everything below here needs the CUDA context current.  It is a separate
- * function so that the push and the pop are a matched pair: CHECK_CU and
- * CHECK_OPTIX return straight out of whatever function they sit in, so any
- * failure between the two would otherwise leave this thread's context stack
- * unbalanced - which then breaks uninit()'s own push/pop and anything else
- * using CUDA on the thread. */
-static int config_input_pushed(AVFilterLink *inlink)
+ * function so that the push and the pop in config_props are a matched pair:
+ * CHECK_CU/CHECK_OPTIX return straight out of whatever function they sit in,
+ * so any failure between the two would otherwise leave this thread's context
+ * stack unbalanced - which then breaks uninit()'s own push/pop. */
+static int config_props_pushed(AVFilterContext *ctx)
 {
-    AVFilterContext *ctx = inlink->dst;
     OptixContext *s = ctx->priv;
     OptixDeviceContextOptions ctx_options;
     OptixDenoiserOptions dn_options;
     OptixDenoiserModelKind kind;
-    const size_t npix = (size_t)inlink->w * inlink->h;
+    const size_t npix = (size_t)s->w * s->h;
     const size_t rgb_bytes = npix * 3 * sizeof(float);
     int ret;
 
-    CHECK_CU(ctx, s->cu->cuStreamCreate(&s->stream, 0));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleLoadData(&s->mod, gu_optix_nv12_rgbf32_ptx));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_nv12_to_rgbf32, s->mod, "nv12_to_rgbf32"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_rgbf32_to_nv12, s->mod, "rgbf32_to_nv12"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_smooth_luma, s->mod, "smooth_luma_dev"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_expand_flow, s->mod, "expand_flow_dev"));
 
-    CHECK_OPTIX(ctx, optixInit());
+    CHECK_OPTIX(optixInit());
     memset(&ctx_options, 0, sizeof(ctx_options));
     ctx_options.logCallbackFunction = optix_log_cb;
     ctx_options.logCallbackData     = ctx;
     ctx_options.logCallbackLevel    = 3;
-    CHECK_OPTIX(ctx, optixDeviceContextCreate(s->cu_ctx, &ctx_options, &s->optix_ctx));
+    CHECK_OPTIX(optixDeviceContextCreate(s->hwctx->cuda_ctx, &ctx_options, &s->optix_ctx));
 
     switch (s->mode) {
     case OPTIX_MODE_HDR:      kind = OPTIX_DENOISER_MODEL_KIND_HDR;      break;
@@ -428,39 +315,35 @@ static int config_input_pushed(AVFilterLink *inlink)
 
     memset(&dn_options, 0, sizeof(dn_options));
     dn_options.denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY;
-    CHECK_OPTIX(ctx, optixDenoiserCreate(s->optix_ctx, kind, &dn_options, &s->denoiser));
-    CHECK_OPTIX(ctx, optixDenoiserComputeMemoryResources(s->denoiser, s->w, s->h, &s->sizes));
+    CHECK_OPTIX(optixDenoiserCreate(s->optix_ctx, kind, &dn_options, &s->denoiser));
+    CHECK_OPTIX(optixDenoiserComputeMemoryResources(s->denoiser, s->w, s->h, &s->sizes));
 
-    CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_state, s->sizes.stateSizeInBytes));
-    CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_scratch, s->sizes.withoutOverlapScratchSizeInBytes));
-    CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_in, rgb_bytes));
-    CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_out[0], rgb_bytes));
-    CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_out[1], rgb_bytes));
-    CHECK_CU(ctx, s->cu->cuMemsetD8Async(s->d_out[0], 0, rgb_bytes, s->stream));
-    CHECK_CU(ctx, s->cu->cuMemsetD8Async(s->d_out[1], 0, rgb_bytes, s->stream));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_state, s->sizes.stateSizeInBytes));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_scratch, s->sizes.withoutOverlapScratchSizeInBytes));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_in, rgb_bytes));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_out[0], rgb_bytes));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_out[1], rgb_bytes));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuMemsetD8Async(s->d_out[0], 0, rgb_bytes, s->hwctx->stream));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuMemsetD8Async(s->d_out[1], 0, rgb_bytes, s->hwctx->stream));
 
-    CHECK_OPTIX(ctx, optixDenoiserSetup(s->denoiser, s->stream, s->w, s->h,
-                                        s->d_state, s->sizes.stateSizeInBytes,
-                                        s->d_scratch, s->sizes.withoutOverlapScratchSizeInBytes));
-
-    s->host_rgb = av_malloc_array(npix * 3, sizeof(float));
-    if (!s->host_rgb)
-        return AVERROR(ENOMEM);
+    CHECK_OPTIX(optixDenoiserSetup(s->denoiser, s->hwctx->stream, s->w, s->h,
+                                   s->d_state, s->sizes.stateSizeInBytes,
+                                   s->d_scratch, s->sizes.withoutOverlapScratchSizeInBytes));
 
     /* The HDR model judges its input against an average intensity it does not carry
      * itself.  Left null, it denoises as if the frame were already normalised and the
      * output comes back off-scale, which looks like a broken filter rather than a
      * missing parameter.  A zero size means this build of the driver wants none. */
     if (s->mode == OPTIX_MODE_HDR) {
-        CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_intensity, sizeof(float)));
+        CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_intensity, sizeof(float)));
         if (s->sizes.computeIntensitySizeInBytes)
-            CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_intensity_scratch,
-                                            s->sizes.computeIntensitySizeInBytes));
+            CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_intensity_scratch,
+                                                              s->sizes.computeIntensitySizeInBytes));
     }
 
     if (s->mode == OPTIX_MODE_TEMPORAL) {
-        CHECK_CU(ctx, s->cu->cuMemAlloc(&s->d_flow, npix * 2 * sizeof(float)));
-        CHECK_CU(ctx, s->cu->cuMemsetD8Async(s->d_flow, 0, npix * 2 * sizeof(float), s->stream));
+        CHECK_CU(s->hwctx->internal->cuda_dl->cuMemAlloc(&s->d_flow, npix * 2 * sizeof(float)));
+        CHECK_CU(s->hwctx->internal->cuda_dl->cuMemsetD8Async(s->d_flow, 0, npix * 2 * sizeof(float), s->hwctx->stream));
         if (s->flow_source == OPTIX_FLOW_NVOF && (ret = nvof_init(ctx)) < 0) {
             /* A flow field of zeros is still a legal temporal denoise: it just
              * assumes nothing moved, which is right for the still parts of the
@@ -475,38 +358,57 @@ static int config_input_pushed(AVFilterLink *inlink)
     return 0;
 }
 
-static int config_input(AVFilterLink *inlink)
+static int config_props(AVFilterLink *outlink)
 {
-    AVFilterContext *ctx = inlink->dst;
+    AVFilterContext *ctx = outlink->src;
     OptixContext *s = ctx->priv;
-    CUcontext popped;
+    AVFilterLink *inlink = ctx->inputs[0];
+    FilterLink *inl = ff_filter_link(inlink), *outl = ff_filter_link(outlink);
+    AVHWFramesContext *in_fc, *out_fc;
+    CUcontext dummy;
     int ret;
 
+    if (!inl->hw_frames_ctx) {
+        av_log(ctx, AV_LOG_ERROR, "needs CUDA frames (-hwaccel cuda -hwaccel_output_format cuda)\n");
+        return AVERROR(EINVAL);
+    }
+    in_fc = (AVHWFramesContext *)inl->hw_frames_ctx->data;
+    if (in_fc->sw_format != AV_PIX_FMT_NV12 || (inlink->w | inlink->h) & 1) {
+        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12, got %s\n",
+               av_get_pix_fmt_name(in_fc->sw_format));
+        return AVERROR(ENOSYS);
+    }
+    s->hwctx = in_fc->device_ctx->hwctx;
     s->w = inlink->w;
     s->h = inlink->h;
 
-    if (cuda_load_functions(&s->cu, ctx) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "could not load the CUDA driver library\n");
-        return AVERROR_EXTERNAL;
-    }
-    CHECK_CU(ctx, s->cu->cuInit(0));
-    CHECK_CU(ctx, s->cu->cuDeviceGet(&s->cu_device, s->device_index));
-    /* The primary context is shared with anything else on this device in this
-     * process, which is what we want: nothing else here uses CUDA, and a private
-     * context would only add another set of allocations. */
-    CHECK_CU(ctx, s->cu->cuDevicePrimaryCtxRetain(&s->cu_ctx, s->cu_device));
-    CHECK_CU(ctx, s->cu->cuCtxPushCurrent(s->cu_ctx));
+    /* Denoise only: output is the same size and format as the input. */
+    s->out_frames = av_hwframe_ctx_alloc(in_fc->device_ref);
+    if (!s->out_frames) return AVERROR(ENOMEM);
+    out_fc = (AVHWFramesContext *)s->out_frames->data;
+    out_fc->format = AV_PIX_FMT_CUDA;
+    out_fc->sw_format = AV_PIX_FMT_NV12;
+    out_fc->width = s->w;
+    out_fc->height = s->h;
+    if ((ret = av_hwframe_ctx_init(s->out_frames)) < 0) return ret;
+    outl->hw_frames_ctx = av_buffer_ref(s->out_frames);
+    if (!outl->hw_frames_ctx) return AVERROR(ENOMEM);
+    outlink->w = s->w;
+    outlink->h = s->h;
 
-    ret = config_input_pushed(inlink);
+    if ((ret = CHECK_CU_EXPR(s->hwctx->internal->cuda_dl->cuCtxPushCurrent(s->hwctx->cuda_ctx))) < 0)
+        return ret;
+
+    ret = config_props_pushed(ctx);
 
     /* Unconditional: the stack has to come back balanced whether the setup
      * above succeeded or failed.  uninit() releases whatever was allocated. */
-    s->cu->cuCtxPopCurrent(&popped);
+    s->hwctx->internal->cuda_dl->cuCtxPopCurrent(&dummy);
     if (ret < 0)
         return ret;
 
     av_log(ctx, AV_LOG_VERBOSE,
-           "OptiX denoiser %dx%d mode=%s flow=%s state=%zuMiB scratch=%zuMiB\n",
+           "OptiX denoiser %dx%d mode=%s flow=%s state=%zuMiB scratch=%zuMiB, GPU-resident (CUDA frames)\n",
            s->w, s->h,
            s->mode == OPTIX_MODE_TEMPORAL ? "temporal" : s->mode == OPTIX_MODE_HDR ? "hdr" : "ldr",
            s->mode != OPTIX_MODE_TEMPORAL ? "n/a" : s->nvof_ready ? "nvofa" : "zero",
@@ -515,81 +417,53 @@ static int config_input(AVFilterLink *inlink)
     return 0;
 }
 
-static int upload_luma(AVFilterContext *ctx, NvOFGPUBufferHandle dst)
+/* Run NVOFA between the frame just smoothed into nvof_frame[slot] and the one
+ * before it, then expand its grid straight into s->d_flow.  Everything here
+ * stays on the device: no host buffer, no cuMemcpy2D in either direction.
+ * Returns 0 when s->d_flow holds real motion. */
+static int compute_flow_dev(AVFilterContext *ctx, AVFrame *in)
 {
     OptixContext *s = ctx->priv;
-    CUDA_MEMCPY2D m;
-
-    memset(&m, 0, sizeof(m));
-    m.srcMemoryType = CU_MEMORYTYPE_HOST;
-    m.srcHost       = s->host_luma_s;
-    m.srcPitch      = s->w;
-    m.dstMemoryType = CU_MEMORYTYPE_DEVICE;
-    m.dstDevice     = s->nvof.nvOFGPUBufferGetCUdeviceptr(dst);
-    m.dstPitch      = s->nvof_in_pitch;
-    m.WidthInBytes  = s->w;
-    m.Height        = s->h;
-    CHECK_CU(ctx, s->cu->cuMemcpy2D(&m));
-    return 0;
-}
-
-static int download_flow_grid(AVFilterContext *ctx)
-{
-    OptixContext *s = ctx->priv;
-    CUDA_MEMCPY2D m;
-
-    memset(&m, 0, sizeof(m));
-    m.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-    m.srcDevice     = s->nvof.nvOFGPUBufferGetCUdeviceptr(s->nvof_out);
-    m.srcPitch      = s->nvof_out_pitch;
-    m.dstMemoryType = CU_MEMORYTYPE_HOST;
-    m.dstHost       = s->host_grid;
-    m.dstPitch      = s->grid_w * 2 * sizeof(int16_t);
-    m.WidthInBytes  = s->grid_w * 2 * sizeof(int16_t);
-    m.Height        = s->grid_h;
-    CHECK_CU(ctx, s->cu->cuMemcpy2D(&m));
-    return 0;
-}
-
-/* Run NVOFA between the frame just packed into host_luma and the one before it,
- * then hand OptiX a dense field.  Returns 0 when s->d_flow holds real motion. */
-static int compute_flow(AVFilterContext *ctx, int nb_jobs)
-{
-    OptixContext *s = ctx->priv;
-    NV_OF_EXECUTE_INPUT_PARAMS in;
-    NV_OF_EXECUTE_OUTPUT_PARAMS out;
+    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
+    CUstream st_ = s->hwctx->stream;
+    NV_OF_EXECUTE_INPUT_PARAMS in_p;
+    NV_OF_EXECUTE_OUTPUT_PARAMS out_p;
     NV_OF_STATUS st;
-    int ret;
+    CUdeviceptr dst = s->nvof.nvOFGPUBufferGetCUdeviceptr(s->nvof_frame[s->nvof_slot]);
+    CUdeviceptr y = (CUdeviceptr)in->data[0];
+    unsigned yp = in->linesize[0], dp = s->nvof_in_pitch, w = s->w, h = s->h;
+    void *smooth_args[] = { &y, &yp, &dst, &dp, &w, &h };
 
-    ff_filter_execute(ctx, smooth_slice, NULL, NULL, nb_jobs);
-
-    if ((ret = upload_luma(ctx, s->nvof_frame[s->nvof_slot])) < 0)
-        return ret;
+    CHECK_CU(cu->cuLaunchKernel(s->k_smooth_luma, (w + 15) / 16, (h + 15) / 16, 1,
+                                16, 16, 1, 0, st_, smooth_args, NULL));
 
     if (!s->have_previous) {
         s->nvof_slot ^= 1;
         return AVERROR(EAGAIN);      /* nothing to compare against yet */
     }
 
-    memset(&in, 0, sizeof(in));
-    memset(&out, 0, sizeof(out));
-    in.inputFrame          = s->nvof_frame[s->nvof_slot];
-    in.referenceFrame      = s->nvof_frame[s->nvof_slot ^ 1];
+    memset(&in_p, 0, sizeof(in_p));
+    memset(&out_p, 0, sizeof(out_p));
+    in_p.inputFrame          = s->nvof_frame[s->nvof_slot];
+    in_p.referenceFrame      = s->nvof_frame[s->nvof_slot ^ 1];
     /* Successive frames of one video is exactly the case temporal hints are for. */
-    in.disableTemporalHints = 0;
-    out.outputBuffer       = s->nvof_out;
+    in_p.disableTemporalHints = 0;
+    out_p.outputBuffer       = s->nvof_out;
 
-    if ((st = s->nvof.nvOFExecute(s->nvof_session, &in, &out)) != NV_OF_SUCCESS) {
+    if ((st = s->nvof.nvOFExecute(s->nvof_session, &in_p, &out_p)) != NV_OF_SUCCESS) {
         av_log(ctx, AV_LOG_WARNING, "NVOFA execute failed (%d), assuming no motion\n", st);
         s->nvof_slot ^= 1;
         return AVERROR_EXTERNAL;
     }
-    if ((ret = download_flow_grid(ctx)) < 0)
-        return ret;
 
-    ff_filter_execute(ctx, flow_slice, NULL, NULL, nb_jobs);
-    CHECK_CU(ctx, s->cu->cuMemcpyHtoD(s->d_flow, s->host_flow,
-                                      (size_t)s->w * s->h * 2 * sizeof(float)));
+    {
+        CUdeviceptr grid = s->nvof.nvOFGPUBufferGetCUdeviceptr(s->nvof_out);
+        unsigned gp = s->nvof_out_pitch, gw = s->grid_w, gh = s->grid_h;
+        void *flow_args[] = { &grid, &gp, &gw, &gh, &s->d_flow, &w, &h };
+        CHECK_CU(cu->cuLaunchKernel(s->k_expand_flow, (w + 15) / 16, (h + 15) / 16, 1,
+                                    16, 16, 1, 0, st_, flow_args, NULL));
+    }
+
     s->nvof_slot ^= 1;
     return 0;
 }
@@ -599,56 +473,47 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
     OptixContext *s = ctx->priv;
-    const int nb_jobs = FFMIN(s->h, ff_filter_get_nb_threads(ctx));
-    const size_t rgb_bytes = (size_t)s->w * s->h * 3 * sizeof(float);
-    const unsigned row_stride = s->w * 3 * sizeof(float);
+    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
+    CUstream st_ = s->hwctx->stream;
     OptixDenoiserGuideLayer guide;
     OptixDenoiserLayer layer;
     OptixDenoiserParams params;
     OptixImage2D image;
-    ThreadData td;
     AVFrame *out;
+    CUcontext dummy;
     int temporal = s->mode == OPTIX_MODE_TEMPORAL;
     int have_flow = 0;
     int ret;
 
-    if (av_frame_is_writable(in)) {
-        out = in;
-    } else {
-        out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-        if (!out) {
-            av_frame_free(&in);
-            return AVERROR(ENOMEM);
-        }
-        av_frame_copy_props(out, in);
-    }
+    out = av_frame_alloc();
+    if (!out) { ret = AVERROR(ENOMEM); goto fail; }
+    if ((ret = av_hwframe_get_buffer(s->out_frames, out, 0)) < 0) goto fail;
+    if ((ret = av_frame_copy_props(out, in)) < 0) goto fail;
+    out->width = s->w;
+    out->height = s->h;
 
-    td.in  = in;
-    td.out = out;
-
-    if ((ret = ff_filter_execute(ctx, pack_slice, &td, NULL, nb_jobs)) < 0)
+    if ((ret = CHECK_CU_EXPR(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx))) < 0)
         goto fail;
 
-    if ((ret = s->cu->cuCtxPushCurrent(s->cu_ctx)) != CUDA_SUCCESS) {
-        av_log(ctx, AV_LOG_ERROR, "cuCtxPushCurrent failed (%d)\n", ret);
-        ret = AVERROR_EXTERNAL;
-        goto fail;
+    {
+        CUdeviceptr y = (CUdeviceptr)in->data[0], uv = (CUdeviceptr)in->data[1];
+        unsigned yp = in->linesize[0], uvp = in->linesize[1];
+        unsigned dp = s->w * 3 * sizeof(float), w = s->w, h = s->h;
+        void *args[] = { &y, &yp, &uv, &uvp, &s->d_in, &dp, &w, &h };
+        if ((ret = CHECK_CU_EXPR(cu->cuLaunchKernel(s->k_nv12_to_rgbf32, (w + 15) / 16, (h + 15) / 16, 1,
+                                                     16, 16, 1, 0, st_, args, NULL))) < 0)
+            goto fail_ctx;
     }
 
     if (temporal && s->nvof_ready)
-        have_flow = compute_flow(ctx, nb_jobs) == 0;
-
-    if (s->cu->cuMemcpyHtoD(s->d_in, s->host_rgb, rgb_bytes) != CUDA_SUCCESS) {
-        ret = AVERROR_EXTERNAL;
-        goto fail_ctx;
-    }
+        have_flow = compute_flow_dev(ctx, in) == 0;
 
     image.data               = s->d_in;
-    image.width              = s->w;
-    image.height             = s->h;
-    image.rowStrideInBytes   = row_stride;
-    image.pixelStrideInBytes = 3 * sizeof(float);
-    image.format             = OPTIX_PIXEL_FORMAT_FLOAT3;
+    image.width               = s->w;
+    image.height              = s->h;
+    image.rowStrideInBytes    = s->w * 3 * sizeof(float);
+    image.pixelStrideInBytes  = 3 * sizeof(float);
+    image.format              = OPTIX_PIXEL_FORMAT_FLOAT3;
 
     memset(&guide, 0, sizeof(guide));
     memset(&layer, 0, sizeof(layer));
@@ -682,7 +547,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
      * stream, so the ordering is the stream's rather than ours.  The header requires
      * hdrIntensity stay null for every other model. */
     if (s->mode == OPTIX_MODE_HDR && s->d_intensity) {
-        if (optixDenoiserComputeIntensity(s->denoiser, s->stream, &image, s->d_intensity,
+        if (optixDenoiserComputeIntensity(s->denoiser, st_, &image, s->d_intensity,
                                           s->d_intensity_scratch,
                                           s->sizes.computeIntensitySizeInBytes) != OPTIX_SUCCESS) {
             av_log(ctx, AV_LOG_ERROR, "optixDenoiserComputeIntensity failed\n");
@@ -692,7 +557,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         params.hdrIntensity = s->d_intensity;
     }
 
-    if (optixDenoiserInvoke(s->denoiser, s->stream, &params,
+    if (optixDenoiserInvoke(s->denoiser, st_, &params,
                             s->d_state, s->sizes.stateSizeInBytes,
                             &guide, &layer, 1, 0, 0,
                             s->d_scratch, s->sizes.withoutOverlapScratchSizeInBytes) != OPTIX_SUCCESS) {
@@ -701,30 +566,29 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         goto fail_ctx;
     }
 
-    if (s->cu->cuStreamSynchronize(s->stream) != CUDA_SUCCESS ||
-        s->cu->cuMemcpyDtoH(s->host_rgb, s->d_out[s->out_slot], rgb_bytes) != CUDA_SUCCESS) {
-        ret = AVERROR_EXTERNAL;
-        goto fail_ctx;
+    {
+        CUdeviceptr y = (CUdeviceptr)out->data[0], uv = (CUdeviceptr)out->data[1];
+        unsigned yp = out->linesize[0], uvp = out->linesize[1];
+        unsigned dp = s->w * 3 * sizeof(float), w = s->w, h = s->h;
+        void *args[] = { &s->d_out[s->out_slot], &dp, &y, &yp, &uv, &uvp, &w, &h };
+        if ((ret = CHECK_CU_EXPR(cu->cuLaunchKernel(s->k_rgbf32_to_nv12, (w / 2 + 15) / 16, (h / 2 + 15) / 16, 1,
+                                                     16, 16, 1, 0, st_, args, NULL))) < 0)
+            goto fail_ctx;
     }
 
-    s->cu->cuCtxPopCurrent(&s->cu_ctx);
+    cu->cuCtxPopCurrent(&dummy);
 
     if (temporal)
         s->out_slot ^= 1;
     s->have_previous = 1;
 
-    if ((ret = ff_filter_execute(ctx, unpack_slice, &td, NULL, nb_jobs)) < 0)
-        goto fail;
-
-    if (out != in)
-        av_frame_free(&in);
+    av_frame_free(&in);
     return ff_filter_frame(outlink, out);
 
 fail_ctx:
-    s->cu->cuCtxPopCurrent(&s->cu_ctx);
+    cu->cuCtxPopCurrent(&dummy);
 fail:
-    if (out != in)
-        av_frame_free(&out);
+    av_frame_free(&out);
     av_frame_free(&in);
     return ret;
 }
@@ -732,13 +596,12 @@ fail:
 static av_cold void uninit(AVFilterContext *ctx)
 {
     OptixContext *s = ctx->priv;
+    CudaFunctions *cu = s->hwctx ? s->hwctx->internal->cuda_dl : NULL;
+    CUcontext dummy;
     int pushed = 0;
 
-    // Only pop what was actually pushed. cu_ctx is non-NULL as soon as the primary context is
-    // retained, which happens before the push, so an unchecked push here would let a failed
-    // config_input reach the pop below and take the calling thread's own context off the stack.
-    if (s->cu && s->cu_ctx)
-        pushed = s->cu->cuCtxPushCurrent(s->cu_ctx) == CUDA_SUCCESS;
+    if (cu && s->hwctx->cuda_ctx)
+        pushed = cu->cuCtxPushCurrent(s->hwctx->cuda_ctx) == CUDA_SUCCESS;
 
     if (s->nvof_session) {
         for (int i = 0; i < 2; i++)
@@ -756,29 +619,21 @@ static av_cold void uninit(AVFilterContext *ctx)
     if (s->optix_ctx)
         optixDeviceContextDestroy(s->optix_ctx);
 
-    if (s->cu) {
-        if (s->d_state)   s->cu->cuMemFree(s->d_state);
-        if (s->d_scratch) s->cu->cuMemFree(s->d_scratch);
-        if (s->d_in)      s->cu->cuMemFree(s->d_in);
-        if (s->d_out[0])  s->cu->cuMemFree(s->d_out[0]);
-        if (s->d_out[1])  s->cu->cuMemFree(s->d_out[1]);
-        if (s->d_flow)    s->cu->cuMemFree(s->d_flow);
-        if (s->d_intensity) s->cu->cuMemFree(s->d_intensity);
-        if (s->d_intensity_scratch) s->cu->cuMemFree(s->d_intensity_scratch);
-        if (s->stream)    s->cu->cuStreamDestroy(s->stream);
-        if (s->cu_ctx) {
-            if (pushed)
-                s->cu->cuCtxPopCurrent(&s->cu_ctx);
-            s->cu->cuDevicePrimaryCtxRelease(s->cu_device);
-        }
-        cuda_free_functions(&s->cu);
+    if (cu) {
+        if (s->d_state)   cu->cuMemFree(s->d_state);
+        if (s->d_scratch) cu->cuMemFree(s->d_scratch);
+        if (s->d_in)      cu->cuMemFree(s->d_in);
+        if (s->d_out[0])  cu->cuMemFree(s->d_out[0]);
+        if (s->d_out[1])  cu->cuMemFree(s->d_out[1]);
+        if (s->d_flow)    cu->cuMemFree(s->d_flow);
+        if (s->d_intensity) cu->cuMemFree(s->d_intensity);
+        if (s->d_intensity_scratch) cu->cuMemFree(s->d_intensity_scratch);
+        if (s->mod)       cu->cuModuleUnload(s->mod);
+        if (pushed)
+            cu->cuCtxPopCurrent(&dummy);
     }
 
-    av_freep(&s->host_rgb);
-    av_freep(&s->host_flow);
-    av_freep(&s->host_luma);
-    av_freep(&s->host_luma_s);
-    av_freep(&s->host_grid);
+    av_buffer_unref(&s->out_frames);
 }
 
 #define OFFSET(x) offsetof(OptixContext, x)
@@ -796,8 +651,6 @@ static const AVOption optix_options[] = {
         { "none", "assume a static scene",      0, AV_OPT_TYPE_CONST, { .i64 = OPTIX_FLOW_NONE }, 0, 0, VF, .unit = "flow" },
     { "blend", "0 is fully denoised, 1 is the untouched input", OFFSET(blend), AV_OPT_TYPE_FLOAT,
       { .dbl = 0 }, 0, 1, VF },
-    { "device", "CUDA device index", OFFSET(device_index), AV_OPT_TYPE_INT,
-      { .i64 = 0 }, 0, 64, VF },
     { NULL }
 };
 
@@ -808,18 +661,26 @@ static const AVFilterPad optix_inputs[] = {
         .name         = "default",
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
-        .config_props = config_input,
+    },
+};
+
+static const AVFilterPad optix_outputs[] = {
+    {
+        .name         = "default",
+        .type         = AVMEDIA_TYPE_VIDEO,
+        .config_props = config_props,
     },
 };
 
 const FFFilter ff_vf_optix = {
     .p.name        = "optix",
-    .p.description = NULL_IF_CONFIG_SMALL("Denoise frames with the NVIDIA OptiX AI denoiser."),
+    .p.description = NULL_IF_CONFIG_SMALL("Denoise frames with the NVIDIA OptiX AI denoiser, GPU-resident."),
     .p.priv_class  = &optix_class,
-    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS,
+    .p.flags       = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
     .priv_size     = sizeof(OptixContext),
     .uninit        = uninit,
     FILTER_INPUTS(optix_inputs),
-    FILTER_OUTPUTS(ff_video_default_filterpad),
-    FILTER_PIXFMTS_ARRAY(pixel_fmts),
+    FILTER_OUTPUTS(optix_outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
+    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

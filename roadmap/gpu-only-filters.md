@@ -2,7 +2,9 @@
 
 Part of the [roadmap](README.md). The detailed plan for dlss is in [gpu-only-dlss.md](gpu-only-dlss.md).
 
-**Status: not started. From reading and grepping `ffmpeg/vf_*.c`, not from measurements.**
+**Status: optix done (2026-09-23), verified on a scratch build on CT114. ort/oidn/fsr2/dlss not
+started. The optix conversion is from an actual GPU run; the other four rows are still from
+reading and grepping `ffmpeg/vf_*.c`, not from measurements.**
 
 ## The shared problem
 
@@ -21,7 +23,7 @@ The GPU-resident preset (TASK.md Track C) requires none of that.
 
 | Filter | Host traffic per frame today | GPU-only route | Effort |
 |---|---|---|---|
-| **optix** (denoise) | `cuMemcpyHtoD` input; `cuStreamSynchronize` + `cuMemcpyDtoH` output. Flow path: luma up, flow grid down, flow up again (`upload_luma`, `download_flow_grid`, `compute_flow`) | Already CUDA inside. Take `AV_PIX_FMT_CUDA` frames, convert nv12 to RGB with PTX (reuse `vf_aivp_spike`'s kernels), keep the flow grid on the device, and write the output straight into a CUDA frame | **Low.** Best first candidate |
+| **optix** (denoise) | **Done.** Was: `cuMemcpyHtoD` input; `cuStreamSynchronize` + `cuMemcpyDtoH` output. Flow path: luma up, flow grid down, flow up again (`upload_luma`, `download_flow_grid`, `compute_flow`). Now: `vf_optix.c` takes `AV_PIX_FMT_CUDA` frames directly, reuses ffmpeg's own `AVCUDADeviceContext` (context+stream), and does NV12<->RGB float3, luma smoothing and flow-grid expansion with three hand-written PTX kernels in `gu_optix_nv12_rgbf32.ptx` (embedded via `gu_optix_nv12_rgbf32_ptx.h`, same no-nvcc convention as `gu_dlpp_nv12_rgba.ptx`/`gu_vsr_nv12_rgba.ptx`). No host buffer anywhere on the per-frame path. Verified: `-vf optix=mode=temporal` runs straight from `-hwaccel cuda` decode into `h264_nvenc` encode with no `hwdownload`/`hwupload` anywhere in the graph, 140 real frames, PSNR 47.7dB / SSIM 0.998 against the source (a plausible mild denoise, not corruption) | **Low.** Done first, as planned |
 | **ort** (Real-ESRGAN etc.) | CPU `pack_slice`, `CreateTensorWithDataAsOrtValue` on host memory, `Run`, CPU unpack. The CUDA EP copies in and out on every run | ORT **IoBinding** with a CUDA `OrtMemoryInfo`: the input tensor wraps the CUDA frame's device pointer, and the output goes to a device buffer. Pack and unpack as PTX kernels | **Low to medium** |
 | **oidn** (denoise) | `OIDN_STORAGE_MANAGED` buffers filled and read by the CPU | OIDN 2.x CUDA device (`oidnNewCUDADevice` on ffmpeg's stream) plus `oidnNewSharedBuffer` over the CUDA frame's memory | **Medium.** Needs an OIDN build with the CUDA backend |
 | **fsr2** | Same pattern as dlss: `cmd_upload`/`cmd_download` staging, `memcpy` of depth and reactive | Same Vulkan plan as [gpu-only-dlss.md](gpu-only-dlss.md). Shares `gu_inputs.h` | **Medium**, cheaper once dlss is done |

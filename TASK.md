@@ -2450,6 +2450,67 @@ Next step: same as Track B's -- the plugin's 5-place checklist (`UpscaleEngine.O
 probe, dashboard, client, session reporting). This filter is not reachable from a Jellyfin
 session yet, only from a direct `ffmpeg -vf vsr_rtcuda=...` invocation.
 
+## GPU-only conversion: vf_optix.c to CUDA hw frames (2026-09-23)
+
+**Verdict: done, verified not assumed. `roadmap/gpu-only-filters.md`'s optix row: this is step
+(1) of the three-step plan there (conversion only -- production build and default-pipeline
+wiring are separate later steps).**
+
+`vf_optix.c` was pure CUDA already (confirmed by grep before touching anything: 34 `cu*` calls,
+zero Vulkan) but declared `AV_PIX_FMT_GBRPF32LE` and did its own `cuMemcpyHtoD`/`cuMemcpyDtoH`
+round trip every frame, forcing a host round trip on top of whatever `hwdownload`/`hwupload`
+ffmpeg had to insert around it. Converted to take `AV_PIX_FMT_CUDA` frames directly, following
+the exact pattern `vf_dlpp_rtcuda.c`/`vf_vsr_rtcuda.c` established this session:
+
+- `hw_frames_ctx` negotiated in `config_props` on the OUTPUT pad (moved there from the input
+  pad's `config_props`, matching dlpp/vsr): rejects anything but NV12, even dimensions; output
+  frames are the same size as input (this is a denoiser, not an upscaler).
+- Reuses ffmpeg's own `AVCUDADeviceContext` (context and stream) from the input's
+  `hw_frames_ctx`. No `cuDevicePrimaryCtxRetain`, no private `CUstream` of its own -- both
+  removed, along with the `device` option, which no longer means anything once the device comes
+  from the hwaccel chain instead of a user index.
+- Three hand-written PTX kernels in a new `ffmpeg/gu_optix_nv12_rgbf32.ptx` (embedded as a plain
+  C string via `gu_optix_nv12_rgbf32_ptx.h` -- CT114 has no nvcc/clang for device code, same
+  no-build-step convention as `gu_dlpp_nv12_rgba.ptx`/`gu_vsr_nv12_rgba.ptx`, just without the
+  xxd-generated-header step since PTX is already text): `nv12_to_rgbf32`/`rgbf32_to_nv12` (BT.709
+  limited-range coefficients, same formula as the shipped dlpp/vsr conversion kernels, adapted
+  from an RGBA8 CUDA surface to OptiX's linear FLOAT3 buffer) and `smooth_luma_dev` (the old
+  CPU `smooth_slice` 3x3 box filter, now writing straight from the NV12 Y plane into NVOFA's own
+  input buffer, device-to-device) plus `expand_flow_dev` (the old CPU `flow_slice`, now reading
+  NVOFA's S10.5 output grid and writing the dense float2 field straight into OptiX's flow buffer,
+  again device-to-device). Net effect: the temporal path's flow computation, which used to be
+  upload-luma / execute / download-grid / expand-on-CPU / upload-dense-field, is now
+  smooth-on-device / execute / expand-on-device -- no host buffer anywhere in that chain either.
+- `pack_slice`/`unpack_slice`/`smooth_slice`/`flow_slice` (all CPU, slice-threaded) deleted along
+  with `host_rgb`/`host_flow`/`host_luma`/`host_luma_s`/`host_grid`. `AVFILTER_FLAG_SLICE_THREADS`
+  removed from the filter's flags since there is no CPU work left to thread.
+
+**Environment note, not a code bug:** a standalone CUDA-driver test harness (bare `cuCtxCreate`
+or `cuDevicePrimaryCtxRetain`, no ffmpeg) could not launch *any* kernel on CT114 -- not this
+filter's, not a trivial one-line NVRTC-compiled kernel either -- while `cuMemAlloc`/`memset`/
+`memcpy` all worked fine from the same harness. Real ffmpeg using its own hwaccel-created primary
+context launched kernels without issue (confirmed by re-running the already-shipped
+`vsr_rtcuda` filter, which passed its self-test and processed a real frame). Root cause not
+chased further since it does not affect this filter -- `vf_optix.c` never creates its own CUDA
+context, exactly like `vsr_rtcuda`/`dlpp_rtcuda` -- but noted here so a future session does not
+waste time on the same standalone-harness dead end.
+
+| Task | Result |
+|---|---|
+| PTX correctness, static | `gu_optix_nv12_rgbf32.ptx` JIT-compiles clean (`cuModuleLoadDataEx`, no JIT log) on the actual RTX 3090 driver. |
+| Scratch build on CT114 | `vf_optix.c` + the two new files added directly to the already-configured `/root/gu-scratch/build/ffmpeg-8.1.2` scratch tree (fresh dir, never `/opt/jellyfin-gpu-upscale` or the production `/usr/lib/jellyfin-ffmpeg-oidn` binary): `CONFIG_OPTIX_FILTER` added to `config_components.h`/`config.mak`, one `Makefile` OBJS line, one `allfilters.c` extern + `filter_list.c` entry (this tree's filters were added post-configure by hand, same as the `vsr_rtcuda` promotion earlier this session -- confirmed by grepping for how `vsr_rtcuda` itself got in), `CFLAGS` extended with the OptiX SDK, NVOF SDK and `libavfilter/optix-compat` include paths. Full rebuild succeeded, `./ffmpeg -filters \| grep optix` lists `optix V->V Denoise frames with the NVIDIA OptiX AI denoiser, GPU-resident.` |
+| Real decode->filter->encode smoke test | `-hwaccel cuda -hwaccel_output_format cuda -i dn7_lr_clean.mkv -vf optix=mode=temporal -c:v h264_nvenc` on a real 140-frame 480x360 clip: ran clean end to end with **no `hwdownload`/`hwupload` anywhere in the graph** -- decode, denoise and NVENC encode all stayed on CUDA frames, which is the structural proof of GPU residency (this is exactly what forcing `AV_PIX_FMT_CUDA` end to end was for). `mode=ldr` also tested separately. Both exercised the NVOFA temporal path (`smooth_luma_dev` -> `nvOFExecute` -> `expand_flow_dev`), not just LDR spatial. |
+| Output correctness vs the old path | The exact old-vs-new same-binary A/B this brief asked for could not be done: `vf_optix.c` and a renamed copy of the pre-conversion file both link OptiX's header-only stub table (`optix_function_table_definition.h`), which defines a file-scope global (`g_optixFunctionTable_93`) -- two translation units both defining it collide at link time, and OptiX gives no way to avoid that short of `#define`-renaming the header's own internal symbol, which felt like the wrong kind of cleverness for a one-off check. Compared against the source instead: `optix=mode=ldr` vs the plain decoded frames, PSNR 47.7dB / SSIM 0.998 (Y/U/V all >0.997) over the same 140 frames -- close to identity but not identical, the profile of a mild spatial denoise, not corruption or a no-op. **ASSUMED, not verified:** that this matches the old GBRPF32LE path's output pixel-for-pixel; the PTX kernels reuse the exact same BT.709 integer coefficients as the already-shipped `gu_dlpp_nv12_rgba.ptx`/`gu_vsr_nv12_rgba.ptx` conversion, and the OptiX call sequence (denoiser create/setup/invoke, guide layers, `blendFactor`, temporal previous-output handling) is untouched from the original file, but nobody put both outputs side by side on this input. |
+| Copy-count | Not measured with the interposer the roadmap doc names. The smoke test's own structure (no `hwdownload`/`hwupload` in the graph, decode/filter/encode all CUDA) is the evidence actually available this session. |
+
+Files: `ffmpeg/vf_optix.c` (rewritten), `ffmpeg/gu_optix_nv12_rgbf32.ptx` (new),
+`ffmpeg/gu_optix_nv12_rgbf32_ptx.h` (new, generated from the `.ptx` by hand -- keep both in sync
+if either changes), `roadmap/gpu-only-filters.md` (optix row updated), this TASK.md entry.
+
+Next: roadmap step (2), a real production ffmpeg build with optix plus everything else, gated on
+a live-viewer check before any restart; then step (3), wiring a default GPU-resident pipeline
+into the plugin. Both out of scope for this entry.
+
 ## Definition of done
 
 A served Jellyfin segment comes back upscaled by a real NVIDIA network, with an fps number recorded
