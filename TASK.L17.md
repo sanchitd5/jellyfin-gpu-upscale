@@ -267,6 +267,27 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    hold once the network genuinely contributes. Not urgent (no working neural fix exists yet to
    re-measure against) but worth re-proving once one does, not assumed to carry over.
 
+10. **2026-09-23 (L17 agent 16), re-swept the prioritised argbuf list under the point-5 pixel-format
+    fix: closed, no new lead.** Point 5's `0x1c` fix was found and verified only against the
+    `0x20`-format baseline; every argbuf field/pair/combo sweep from agents 9, 10 and 12 was still
+    run under the old, wrong `0x20`. Re-ran the ~20 individually-improving fields
+    (`analysis/b6/improving_fields.tsv`), the best pair (`+0x3a8=1,+0x44=1`), and agent 12's best
+    3/4-field combo (`+0xa8=-1,+0xdc=2.0f,+0x1e0=0x40,+0x3a8=1`) under `AIVP_PFIN=AIVP_PFOUT=0x1c`,
+    both test frames. Result: the ranking is unchanged and the gains are additive, not
+    interacting — `0x1c` and the argbuf fixes each add roughly their own independent margin.
+    Best combined result, combo under `0x1c`: frame 1200 RGB/Y 29.873/33.473 (bicubic
+    34.699/32.929 — RGB still ~4.8 dB short, but Y now edges past bicubic for the first time);
+    frame 3130 27.992/32.467 (bicubic 35.341/34.705 — RGB ~7.3 dB short, Y ~2.2 dB short). Not a
+    cross-frame win. Also tried asymmetric pfin/pfout (`0x1c` on one side, `0x1/0x2/0x3/0x8/0x21`
+    on the other, both directions): every combination is md5-identical to symmetric `0x1c/0x1c`,
+    confirming point 5's three-bucket finding holds at the pair level too — asymmetry inside one
+    bucket carries no information. Did not reach a fresh sweep of previously-inert fields under
+    `0x1c` (time budget); that remains open if a future agent wants it. **Closes negative: `0x1c`
+    is confirmed the better default everywhere it was checked, but no combination found here, old
+    or new, beats bicubic on both frames.** No loader code changed this session (reused agent 15's
+    `AIVP_PFIN`/`AIVP_PFOUT` knobs); outputs at `/root/rtxv-spike/analysis/b9/resweep_pf1c.json`
+    on CT114 (not version-controlled there).
+
 **Most promising concrete gap:** point 4 (preProcess never swept for a bias-injecting field) and
 point 7 (launches 3-15 never dumped/plausibility-checked) are the two live, unexplored leads —
 point 7 is the deeper one, since it questions whether "L17 ignores good input" is even the right

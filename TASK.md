@@ -1707,6 +1707,30 @@ does), not a context/thread problem at all.
        cross-frame-verified gain over our own hardcoded default - worth adopting as the new
        default and re-running the L17 argbuf sweeps under it.** See TASK.L17.md review points 5
        and 7 for the detailed reconciliation.
+     - **2026-09-23 (L17 agent 16), re-swept the prioritised argbuf field list under
+       `AIVP_PFIN=AIVP_PFOUT=0x1c`, no code changes (existing env knobs only).** Every field/pair/
+       combo carried over from agents 9/10/12 keeps the same relative ranking under `0x1c` as it
+       had under `0x20`, and every one still scores above its own `0x1c` baseline by roughly the
+       same margin `0x1c` itself added over `0x20` - the pixel-format fix and the argbuf fixes are
+       additive, not interacting. Best single field both frames: `+0x3a8=1` (1200 29.823/33.573,
+       3130 27.839/32.484). Best pair `+0x3a8=1,+0x44=1`: 1200 29.855/33.505, 3130 28.023/32.587.
+       Best combo (`+0xa8=-1,+0xdc=2.0f,+0x1e0=0x40,+0x3a8=1`, agent 12's Task-1 winner): 1200
+       29.873/33.473, 3130 27.992/32.467. Notably the combo's Y-PSNR on frame 1200 (33.473) now
+       exceeds bicubic's Y (32.929) for the first time in this project, but RGB stays ~4.8 dB short
+       on 1200 and ~7.3 dB short on 3130, and Y on 3130 (32.467) stays ~2.2 dB short of bicubic's
+       34.705 - not a cross-frame win, same overfit-to-content pattern agent 12 already flagged.
+       Asymmetric pfin/pfout (`0x1c` on one side, `0x1,0x2,0x3,0x8,0x21` on the other, both
+       directions, 10 combos): every one is byte-identical (md5) to symmetric `0x1c/0x1c` on both
+       frames. Confirms agent 15's three-bucket finding at the pair level too: `0x1c` and those
+       other values are the same bucket regardless of which side gets which value, so asymmetry
+       inside one bucket carries no new information. Did not attempt (3), a fresh sweep of
+       previously-inert fields under `0x1c`, given time budget - flagged as still open below.
+       **Verdict: `0x1c` is confirmed as a strictly-better default across the whole prioritised
+       field list, but still does not beat bicubic on both frames even combined with the best
+       known argbuf fix.** No loader code changed (reused agent 15's `AIVP_PFIN`/`AIVP_PFOUT`
+       knobs), so no commit was needed this session; only `/root/rtxv-spike/analysis/b9/
+       resweep_pf.py` and `resweep_pf1c.json` were added, both on CT114 (not a git repo, not
+       committed).
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
      one harness `cuCtxSynchronize` per frame, timed). CT114, 960x540 -> 1920x1080, surf I/O,
