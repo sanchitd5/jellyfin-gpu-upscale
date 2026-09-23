@@ -437,18 +437,18 @@ does), not a context/thread problem at all.
 
    **ROOT CAUSE FOUND (2026-09-22, session 7): every "breakpoint never fires" result in this
    entire investigation chain (this item, item 9, and the two forks after it) has the same
-   underlying bug — it is a tracing-methodology artifact, not a fact about the DLL.**
+   underlying bug - it is a tracing-methodology artifact, not a fact about the DLL.**
    `pe_map.c` `mmap`s the RWX image region, then at line 557
-   (`memcpy(im->base + vaddr, file + rawoff, rawsz)`) copies every PE section — including
-   `.text` — into that region **after** the mmap returns. Every prior session's pattern of
+   (`memcpy(im->base + vaddr, file + rawoff, rawsz)`) copies every PE section - including
+   `.text` - into that region **after** the mmap returns. Every prior session's pattern of
    "`break mmap` → `finish` → compute `$dllbase + offset` → `break *addr` → `continue`" sets the
    `int3` breakpoint byte into the mmap'd page *before* this memcpy runs, so the loader's own
    section copy silently overwrites gdb's `int3` with real DLL code before execution ever gets
    there. The breakpoint address, the `$dllbase` arithmetic, and the RVA math were all correct
-   in every prior session — the breakpoints were just getting erased between being set and being
+   in every prior session - the breakpoints were just getting erased between being set and being
    reached. Confirmed directly this session: `break *($dllbase+0x60c60)` (verified against the
    tool's own live-printed export table, `NVSDK_NGX_CUDA_CreateFeature 0x...ac60 (+0x60c60)`,
-   exact match) was set, showed as armed in `info breakpoints`, and still never fired — process
+   exact match) was set, showed as armed in `info breakpoints`, and still never fired - process
    ran straight to the `entry+0x40a` trap regardless. This explains why *every* one of the last
    four sessions' breakpoints below the point where the loader's memcpy runs consistently failed
    to fire while breakpoints on real ELF-side functions (`mmap`, `cuGetProcAddress`,
@@ -456,23 +456,23 @@ does), not a context/thread problem at all.
 
    **Correct method going forward: never breakpoint inside the mapped DLL image by
    precomputed address. Only`break` on `pe_map`'s own functions** (it has a partial symbol
-   table despite no DWARF — confirmed via `nm ./pe_map`: `find_export.isra.0`, `main` are
+   table despite no DWARF - confirmed via `nm ./pe_map`: `find_export.isra.0`, `main` are
    present, `run_ngx_isr` is not, it's static+inlined) **or on real ELF/libc/libcuda symbols**,
    then use `finish`/`x/i $pc` from there to inspect DLL code just-in-time, after all section
    copies for that call path have already completed (they have, by the time `pe_map`'s own
    dispatch code is running the export's function pointer). A `break *addr` inside the DLL image
    is only safe once proven the last relevant `memcpy` for that section has already executed in
-   the current process — not simply once `mmap` has returned.
+   the current process - not simply once `mmap` has returned.
 
    **This session did not get a clean re-confirmation of items 9/10's `int3`-trigger conclusions
-   under this corrected method** — ran out of turns debugging the breakpoint-loss bug itself
+   under this corrected method** - ran out of turns debugging the breakpoint-loss bug itself
    before completing a fresh trace with it fixed. The `entry+0x40a` trap's existence, exact PC,
    `rax=0xffffffff`, and NGX-internal-logger identity (`ngx_cuda.cpp:196`) are still solid
    (confirmed via `x/i`/`info registers` at the point gdb happens to land on it unconditionally,
    which needed no precomputed breakpoint since the process reaches it on its own). What is now
    **unconfirmed and should be redone**: item 9's and the vtable fork's specific claims about
    *which* code path leads there (the `0x180067f90`/`0x18006b7d0`/`0x18006b870` chain vs. the
-   `0x60ca5`→`0xba8d0` vtable-divert path) — both were reasoned from breakpoints that are now
+   `0x60ca5`→`0xba8d0` vtable-divert path) - both were reasoned from breakpoints that are now
    known to be unreliable by this same mechanism, so neither should be trusted without a
    `find_export`/`pe_map`-anchored re-check.
 
@@ -1577,7 +1577,7 @@ does), not a context/thread problem at all.
        `analysis/b4/` (`search.py`, `search.tsv`, `col.py`). The 114 failures break down by value
        as 0.5f 26, 1 21, -1 19, 1.0f 26, 2.0f 22, across 26 distinct fields. Re-running two of the
        failing writes (`17;1c0:4:0`, `17;3f8:4:ffffffff`) gave `cuCtxSynchronize` rc=0 and rc=716
-       respectively on CT114 — inconsistent with a fixed per-field cause, so likely state-dependent
+       respectively on CT114 - inconsistent with a fixed per-field cause, so likely state-dependent
        (order of writes, or memory left over from the previous run) rather than the field itself.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
      - **2026-09-23 (L17 agent 11), no-output runs explained, postProcess ruled out.**
