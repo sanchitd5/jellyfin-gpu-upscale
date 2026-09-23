@@ -1474,8 +1474,8 @@ does), not a context/thread problem at all.
        `AIVP_ARGSET=N:off:val` (overwrite one argbuf qword). Filling L17's feature input (`+0`),
        both conv weight/bias sets (`+0x8 +0x20 +0x250 +0x268`), both 8-byte `[1.0f,1.0f]` buffers
        (`+0x230 +0x478`) and its own output (`+0x258`) with NaN or zero leaves the frame
-       byte-identical (`b3c5094c…`). Only the source image at `+0x490` changes it. So L17's conv
-       path is not computed, not "computed and discarded". A flip scan of all 181 L17 qwords
+       byte-identical (`b3c5094c…`). Only the source image at `+0x490` changes it. (Corrected
+       later: the conv path IS computed and then discarded; see L17 agent 3.) A flip scan of all 181 L17 qwords
        finds only dims/pitch (`+0x298 +0x2a0 +0x498 +0x4a8`), tile count 30 with its /30 magic
        (`+0x198 +0x3e0 +0x3e8`) and the fp16 bicubic taps; the `4670…01` fields, the tail
        2.0f/0.5f and every zero field set to 1 do nothing. Slot 12 is not yet tested; next
@@ -1487,6 +1487,14 @@ does), not a context/thread problem at all.
        is called twice per Process with a small host descriptor and returns 0; not decoded.
        Blocked: no nvdisasm/cuobjdump on CT114 or Mac, so the in-kernel branch that skips the
        conv path cannot be read without an NVIDIA disassembler.
+     - **2026-09-23 (L17 agent 3), cause found, not fixed.** L17 `+0x498` (0x780) is not a pitch but
+       the output-column split: columns x >= value take the network path, the rest bicubic. The DLL
+       writes 1920 = output width, so no column ever uses the features. `AIVP_ARGW="17;498:4:0"`
+       (new multi-field knob) runs the network on every column: NaN features now change output and
+       `AIVP_SKIP=2-16` now differs, but the result is noisy (29.14 dB vs GT against 37.47 base,
+       HF 26.8 vs GT 2.28). Floats `+0x4b8..+0x4c4` are never read. Next: why the DLL passes the
+       full width (a per-level or per-frame "network region" setting upstream), and why the
+       network output is noise when enabled (feature scale/layout into L17).
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
