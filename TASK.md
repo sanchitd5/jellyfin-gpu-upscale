@@ -2062,6 +2062,134 @@ high-quality models were also being scored through the same wipe bug and their r
 than recorded; then consider whether the loader's default should just change to `AIVP_F10=0.0`
 everywhere so future sweeps do not need to remember to set it.
 
+## Track B: DLPP agent 5, both fixes combined on levels 3/4, validated across content (2026-09-23)
+
+**Verdict: both fixes together lift levels 3/4 far above the old wipe-bugged baseline, but land
+just under level 1 on the original two frames, and the gain is real but content-dependent (never
+negative, size varies about 3x rgb / 6x y across six frames).** Task 3's wipe sweep found a real
+subtlety: 0.0 is confirmed correct (100% enhanced), but the field is a literal hard column split,
+not a blend, and even 1% of un-enhanced columns can crater PSNR if that strip happens to be a
+region where bicubic is locally bad.
+
+| Task | Result | Key finding |
+|---|---|---|
+| 1: combine both fixes on levels 3/4 | Done | `AIVP_F38=<scale>` + `AIVP_F10=0.0`, correct native output buffer, both frames. All four runs clean (rc=0, 23/23 launches, no crash). Scores (Lanczos, per agent 4's method) land well above the wipe=1 baseline but slightly under level 1. |
+| 2: validate across content | Done | 4 new frames pulled read-only from the actual Jellyfin library (not the HotD test clip): Rick and Morty S09E04 and S09E06 (animation, two different episodes/scenes), Pocket Monsters (2023) ep053 (anime), Ready or Not Here I Come (2026) (live-action movie). All confirmed true 1920x1080 sources via ffprobe before extraction (several other candidates, e.g. Life of Pi at 1920x1036 and two HotD episodes at 1920x960/960, were rejected for not matching the gt reshape). Gain is always positive but varies about 3x rgb / 6x y across content. |
+| 3: is 0.0 optimal for wipe | Done | Swept `AIVP_F10` at 0.0, 0.01, 0.05, 0.1, 0.2 on level 1, frame 1200. |
+
+Task 1 scores (Lanczos downscale to 1920x1080, `AIVP_PSIZE=0x50 AIVP_IO=surf`, both frames):
+
+| Level | Frame | Combo (F38+F10=0) rgb/y | Old wipe=1 baseline rgb/y (frame 1200 only, agent 3/4) | Level 1 fixed rgb/y (same frame, agent 4) |
+|---|---|---|---|---|
+| 3 | 1200 | 43.569 / 45.290 | 39.164 / 37.586 | 45.236 / 47.223 |
+| 3 | 3130 | 41.133 / 42.833 | -- (not scored at 3130 before) | 42.25 / 43.84 |
+| 4 | 1200 | 43.042 / 45.222 | 37.596 / 35.918 | 45.236 / 47.223 |
+| 4 | 3130 | 40.802 / 42.733 | -- | 42.25 / 43.84 |
+
+So on both original frames, combining the fixes gives a real gain over the old wipe=1 baseline
+(+4.4/+5.4 dB rgb at 1200, level 3/4 respectively) but levels 3/4 come in about 1.1-2.2 dB *below*
+level 1, not above it -- the opposite of what "3/4 are the higher-quality models" would predict.
+The wipe fix and the native-scale fix do not amplify each other into a level-1-beating result on
+these two frames; they mostly recover the same base-quality-network signal level 1 already gets,
+with a small penalty likely from the upscale-then-downscale-for-scoring round trip at native
+2880x1620/3840x2160 (agent 3's own caveat: no true native ground truth exists).
+
+Task 2 scores (level 1 fixed vs the wipe=1/bicubic default, same frame, gain = fixed - default):
+
+| Frame | Content | Default (wipe=1) rgb/y | Fixed (wipe=0) rgb/y | Gain rgb/y |
+|---|---|---|---|---|
+| HotD 1200 | live-action TV (agent 4) | 34.70 / 32.93 | 45.24 / 47.22 | +10.54 / +14.29 |
+| HotD 3130 | live-action TV (agent 4) | 35.34 / 34.71 | 42.25 / 43.84 | +6.91 / +9.13 |
+| Rick and Morty S09E04 @10:00 | animation | 30.985 / 29.991 | 35.700 / 37.307 | +4.72 / +7.32 |
+| Rick and Morty S09E06 @15:00 | animation | 30.154 / 29.829 | 36.548 / 38.140 | +6.39 / +8.31 |
+| Pocket Monsters ep053 @11:40 | anime | 30.641 / 32.685 | 34.777 / 35.028 | +4.14 / +2.34 |
+| Ready or Not Here I Come (2026) @75:00 | live-action movie | 33.296 / 31.972 | 43.158 / 45.600 | +9.86 / +13.63 |
+
+Gain is always positive across all six frames and four distinct sources, so the wipe fix is real,
+not a HotD-specific artifact. But it is clearly content-dependent: rgb gain ranges +4.1 to +10.5 dB
+(about 2.5x), y gain ranges +2.3 to +14.3 dB (about 6x). The smallest gain is on Pocket Monsters
+(anime, y +2.34 dB only); the largest are on the two live-action sources (HotD, Ready or Not). This
+matters for shipping: expect a smaller visible improvement on flat-shaded/anime content than on
+live-action detail.
+
+Level 3-combo vs level 1 on the 4 new frames (same combo as Task 1, applied to new content):
+
+| Frame | Level 1 rgb/y | Level 3 combo rgb/y | Level 3 vs level 1 |
+|---|---|---|---|
+| RM S09E04 | 35.700 / 37.307 | 36.036 / 37.672 | +0.34 / +0.37 (ahead) |
+| RM S09E06 | 36.548 / 38.140 | 37.827 / 39.841 | +1.28 / +1.70 (ahead) |
+| Pocket Monsters | 34.777 / 35.028 | 36.128 / 36.311 | +1.35 / +1.28 (ahead) |
+| Ready or Not | 43.158 / 45.600 | 43.730 / 44.997 | +0.57 rgb (ahead), -0.60 y (behind) |
+
+So the "level 3/4 lands just under level 1" result from Task 1 does **not** generalize: on 3 of 4
+new frames level 3's combo actually edges ahead of level 1, sometimes by over a dB. The
+level-1-vs-level-3/4 ordering is itself content-dependent, not a fixed ranking -- consistent with
+Task 1's own margin being small (1-2 dB) relative to the swing seen here.
+
+Task 3 sweep (`AIVP_F10` at 0.0/0.01/0.05/0.1/0.2, level 1, frame 1200):
+
+| `AIVP_F10` | PSNR rgb/y |
+|---|---|
+| 0.0 | 45.236 / 47.223 |
+| 0.01 | 33.770 / 32.073 |
+| 0.05 | 33.825 / 32.123 |
+| 0.1 | 33.737 / 32.032 |
+| 0.2 | 35.956 / 35.357 |
+
+0.0 is confirmed the correct "fully enhanced" value; any nonzero wipe drops PSNR to roughly the
+bicubic-baseline range immediately, with no gradual blend visible in this range. Diffing the
+0.0 and 0.01 outputs pixel-by-pixel (`diff_wipe.py`) explains why: only columns 0-19 of 1920 (about
+1%) actually change, matching `round(oW*wipe)=round(1920*0.01)=19.2` columns exactly -- the field
+is a literal hard column split, exactly as the ffmpeg patch documents and as agent 4's 0.5
+sanity-check already showed, not some smoother function that only looks linear at 0.5. What is new
+here: this frame's leftmost ~20 columns happen to be a region where the un-enhanced/bicubic
+reconstruction is locally very bad relative to ground truth, so switching even that 1% strip to the
+un-enhanced side is enough to crater the whole-frame PSNR from 45 to 34 dB. That is a property of
+this metric and this frame's edge content, not a bug or a hidden blend in the wipe field itself.
+
+VERIFIED (commands + logs on CT114, `/root/rtxv-spike/analysis/dlpp5/`):
+- Combined-fix runs clean on both frames, both levels: `AIVP_PSIZE=0x50 AIVP_IO=surf AIVP_F38=<3|4>
+  AIVP_F10=0.0 AIVP_INPUT=<frame> AIVP_OUT=<out>.ppm ./pe_map ../dll/Display.Driver/nvdlppx.dll
+  --dlpp-process 960,540,<ow>,<oh>,32,32,<level>` -> `Process -> 0`, 23/23 launches, no crash, for
+  all four (level, frame) combos. Logs/ppms: `l3_combo_1200`, `l3_combo_3130`, `l4_combo_1200`,
+  `l4_combo_3130` `.log`/`.ppm`.
+- Scoring reused agent 4's exact method: jellyfin-ffmpeg8 `scale=1920:1080:flags=lanczos` then
+  `analysis/dlpp4/score_dlpp4.py` against each frame's own `gt_*.rgba` -- wrapped in
+  `analysis/dlpp5/score_dlpp5.sh` (new, does not import from b3/b4).
+- New-content sources confirmed true 1920x1080 before extraction: `ffprobe -show_entries
+  stream=width,height` on each candidate file; Life of Pi (1920x1036) and two HotD episodes
+  (1920x960) were checked and rejected for this reason, keeping the gt reshape exact.
+- Frame extraction: `jellyfin-ffmpeg8 -ss <t> -i <src> -vframes 1 -pix_fmt rgba -f rawvideo
+  gt_<label>.rgba` (full res) and the same with `-vf scale=960:540` for `in_<label>.rgba`, sizes
+  checked (8294400 / 2073600 bytes) against the existing `in_001200.rgba`/`gt_001200.rgba` pair.
+- Wipe hard-split confirmed: `python3 diff_wipe.py l1_1200_f10_0.0.ppm l1_1200_f10_0.01.ppm` ->
+  only columns 0-19 differ (>2 abs), max abs diff 172 in that strip, mean abs diff over the whole
+  frame 0.197 -- a narrow, high-error strip, not a broad or gradual change.
+- No active transcode/watcher on CT114 before or during this session:
+  `pct exec 114 -- ps aux | grep ffmpeg` showed only the idle jellyfin daemon (PID 548311), no
+  running ffmpeg process, for the whole session.
+
+ASSUMED / not reached: whether the level-3/4-vs-level-1 gap seen on the original two frames
+(level 1 ahead by 1-2 dB) or the new frames (level 3 ahead by up to 1.7 dB) is the more
+representative case -- six frames across four sources is still a small sample, and the metric
+itself (Task 3) shows PSNR can swing hugely from a small fraction of pixels, so a couple more dB
+either way on a given frame should not be read as a settled ranking between the levels; a true
+native-resolution ground truth for levels 3/4 still does not exist (same caveat as agent 3/4);
+whether `AIVP_F10` values between 0.0 and 0.01 show a narrower transition (not swept, given the
+cliff was already visible at the smallest tested nonzero value).
+
+No `rtx-video-re` loader code change (reused the existing `AIVP_F38`/`AIVP_F10`/`AIVP_PSIZE` knobs,
+same as agents 3 and 4) -- no loader commit. This TASK.md update is the commit for this session.
+
+Next step: this is close to ready to plan real ffmpeg integration -- the wipe fix is confirmed real,
+positive, and reproducible across four independent content sources, and the scale fix is confirmed
+to avoid the level 3/4 crash while giving a genuine quality gain. What is still missing before
+integration: deciding a single default for levels 3/4 (level 1 is simpler and at least as good on
+the original two frames; level 3/4 with both fixes is competitive and sometimes better on new
+content, so either could be the shipped default, not a settled choice yet) and validating on a
+larger frame sample than six before committing to exact per-level expected gains in user-facing
+copy.
+
 ## Guardrails
 
 - Never restart `jellyfin.service`. Never touch the live plugin config XML. Always `--no-activate`.
