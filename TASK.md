@@ -1812,6 +1812,52 @@ Proof (all four, per session):
 - `nvidia-smi dmon -s t` shows PCIe rx/tx near zero during the run.
 - ffmpeg process CPU and RSS stay flat during a transcode, not scaling with resolution or fps.
 
+## Track B: DLPP (`nvdlppx.dll`), agent 14 (2026-09-23)
+
+Theory tested: since AIVP's own kernel chain is named `dlpp_*`, `nvaivpx.dll` wraps DLPP's
+network as a feature. `nvdlppx.dll` is DLPP's own native host DLL, not a wrapper, so whatever
+setup AIVP's wrapper does to enable the network (never found or forced correctly across 13
+L17 agent-rounds) might be done correctly by DLPP's own code. See `.agent-briefs/dlpp-start.md`
+for the full brief.
+
+**Verdict: negative.** DLPP's own default, unforced Process call runs its full native kernel
+chain end to end and returns real output, but that output is byte-for-byte identical to the
+project's known bicubic/bypass output on both scored frames. Not the fixed-bias-pattern
+symptom AIVP showed with the network forced on; this is DLPP defaulting to bypass, the same
+way AIVP does unless forced. The theory (DLPP's own host drives its network correctly by
+default) does not hold under the param struct this session was able to characterize black-box.
+
+| Task | Result | Key finding |
+|---|---|---|
+| 1: get to CreateInstance | Done | `nvdlppx.dll` did not exist on CT114 (brief's assumption was wrong); downloaded GeForce driver 617.14, extracted it with `7z e` (no full driver install). PE32+/x86-64, 99/99 imports resolved (same import set as AIVP). Feature index 6 in `nvppex.dll`'s string table (direct byte read, not disasm) confirms it's the same PPE family as AIVP (index 12). DLPP's own IID is `90850b61-4bdb-5e80-3a56-82aa26669574` -- one field off from AIVP's `...-805e-...` -- found by brute-forcing `ppeGetExportTable` against every 4-byte-aligned window of the mapped image (6.26M candidates, 1 match, 0.35s), not disassembly. CreateInstance succeeds (`rc=0`), triggers 94 `cuModuleLoadData` calls and 525 host allocation callbacks at construction time (AIVP's own CreateInstance is comment-documented as lightweight by contrast -- DLPP appears to load/prep more at construction). |
+| 2: get to Process, defaults | Done | AIVP's 0x44-byte param struct is rejected outright (`Process` returns `0xffffffff`, zero kernel launches, in both raw-pointer and `AIVP_IO=surf` modes). Black-box size sweep (`AIVP_PSIZE` env override, no disassembly) found DLPP's own struct-size gate wants `0x50`, not `0x44`. With that and the rest of the struct left at the loader's existing defaults (w/h/ow/oh, level 0, no forced fields), `Process` returns `rc=0` and runs a richer native chain than AIVP's own: `dlpp_preProcess`, `dlpp_pixelFold`, `all_fuse_with_pooling_fp16_*`, `all_fuse_with_pooling_int8_residual_fp16_*`, `hfuse_iconv_with_pooling_interleaved_*`, `hfuse_iconv_interleaved_*`, `upsampling_with_iconv2d_int8_residual_interleaved_*`, `upsampling_with_conv2d_fp16_*`, the L17 kernel (`conv3x3_fuse_conv1x1_with_pixel_shuffle4_bilinearAndSRBlockBicubic2...`), a new kernel not in AIVP's chain (`dlpp_ResampleAndComposeFP16`), and `dlpp_postProcess`. Levels 1/2 (`+0x0c` field) produce byte-identical output to level 0; levels 3/4 segfault the loader (host-side crash, not chased further, not a hazard to anything but the throwaway loader process). |
+| 3: score default output | Done, negative | Frame 1200: RGB/Y 34.699/32.929 dB. Frame 3130: 35.341/34.705 dB. Both are **exact matches, to 3 decimals, to this project's already-recorded bicubic scores**, and frame 1200's output is byte-for-byte identical (`diff` over the full pixel buffer) to `analysis/t17/off1200_1.ppm`, the project's existing AIVP-bypass/bicubic capture. DLPP's default path is not doing bicubic-like output by coincidence; it is running the bypass path, same symptom class as AIVP without forcing, confirmed on both frames per the brief's own "fixes that look good on one frame and fail on another" caution. |
+
+VERIFIED (command + log line):
+- DLL exists, same PE format/imports: `./pe_map ../dll/Display.Driver/nvdlppx.dll -v` -> `imports: 99 resolved, 0 stubbed`.
+- Feature index 6: direct byte read of `nvppex.dll` at file offset `0xf9220`, stride `0x3c` -> `6 'nvdlppx.dll'`.
+- IID found: `./pe_map ../dll/Display.Driver/nvdlppx.dll --dlpp-scan-iid` -> `MATCH at RVA +0xde50e8: IID 61 0b 85 90 db 4b 80 5e 3a 56 82 aa 26 66 95 74`.
+- CreateInstance: `./pe_map ../dll/Display.Driver/nvdlppx.dll --dlpp` -> `CreateInstance -> 0, handle=0x...`.
+- Process struct size: `AIVP_PSIZE=0x50 ... --dlpp-process 960,540,1920,1080` -> `Process -> 0, cuCtxSynchronize rc=0` (0x44/0x40/0x48/0x38/0x30/0x08/0 all give `0xffffffff`).
+- Byte-identity to bicubic: python diff of `analysis/dlpp/dlpp_p50_1200.ppm` against `analysis/t17/off1200_1.ppm` -> `identical: True`, 0/6220800 bytes differing.
+
+ASSUMED / not reached: whether some other field in the 0x50-byte struct (beyond size/level/w/h/format,
+all the loader already knew how to set) would turn the network on without literally forcing a value
+the way `AIVP_F10` did -- the brief's Task 2 explicitly ruled out doing that kind of forcing this
+session, so the struct's other fields are still at the loader's pre-existing zero/default fill.
+Levels 3/4's segfault was not diagnosed (host-side loader crash, own process, no disassembly attempted).
+
+Commits: `rtx-video-re` `e337032` -- `--dlpp`/`--dlpp-process`/`--dlpp-scan-iid` added to
+`loader/pe_map.c`/`loader/aivp.c`, reusing the existing host-callback and `Process` plumbing.
+
+Next step: this rules out "DLPP's own host, driven the same way AIVP is driven, does the setup
+AIVP's wrapper can't." It does not rule out DLPP entirely -- the untried levers are the struct
+fields nobody has attached meaning to yet (there are ~10 zeroed dwords in the 0x50-byte struct
+past what AIVP's own struct defines), and whether construction-time (94 `cuModuleLoadData`/525
+alloc callbacks, vs. AIVP's lighter CreateInstance) carries a config the host is supposed to set
+before calling CreateInstance rather than in Process's own params. Both are struct-field sweeps
+in the same black-box style as this session's `AIVP_PSIZE` probe, not disassembly.
+
 Holds for both routes: codegen (we write the filter) and loader-in-ffmpeg (DLL host slots only
 issue launches; the interposer count must prove no frame data crosses the bus).
 
