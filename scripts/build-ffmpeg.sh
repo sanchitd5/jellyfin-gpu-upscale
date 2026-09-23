@@ -395,6 +395,11 @@ patch -p1 < "$HERE/ffmpeg/0001-add-oidn-filter-to-build.patch"
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/
+    # vf_optix.c now takes AV_PIX_FMT_CUDA frames directly and embeds a small hand-written PTX
+    # module for the on-GPU NV12<->RGB conversion (roadmap step 1, GPU-resident conversion) --
+    # this header is committed pre-generated (CT114 has no nvcc/clang for device code), unlike
+    # the DLPP/VSR PTX headers below which this script generates from their .ptx at build time.
+    cp "$HERE/ffmpeg/gu_optix_nv12_rgbf32_ptx.h" libavfilter/
     mkdir -p libavfilter/optix-compat
     cp "$HERE"/ffmpeg/optix-compat/* libavfilter/optix-compat/
     patch -p1 < "$HERE/ffmpeg/0002-add-optix-filter-to-build.patch"
