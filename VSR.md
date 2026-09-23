@@ -230,7 +230,89 @@ installed tag and skips the rebuild when it already matches.
   feature library and (once NVIDIA publishes them) the trained model files - read before shipping
   anything built against this SDK, not vendored into this GPL tree, same as the DLSS runtime blob.
 
-## Closed investigation: raw-CUDA-kernel alternative to the Maxine SDK (2026-09-22)
+## REOPENED: the raw-CUDA-kernel alternative (verdict below was wrong, 2026-09-22)
+
+**The investigation recorded below reached the verdict "structural dead end: RTX Video Super
+Resolution has no CUDA entry point on any platform." That verdict is false, and the disproof was
+already sitting in this repository when it was written.**
+
+`ffmpeg-patches/` holds a 46-patch series by Philip Langdale (the FFmpeg NVIDIA filter maintainer)
+that adds seven working RTX Video filters, three of them super-resolution over three genuinely
+different networks:
+
+| Filter | Network | Extracted from |
+|---|---|---|
+| `vsr_cuda` | NGX SDK's VSR | the NGX SDK snippet |
+| `vsr_drv_cuda` | driver RTX VSR | `nvaivpx.dll`, `ppe/features/AIVP` |
+| `dlpp_drv_cuda` | driver DLPP | `ppe/features/DLPP` |
+
+Plus `isr_cuda` (NGX Image SR), `truehdr_cuda`/`truehdr_drv_cuda` (SDR->HDR), `deepdvc_drv_cuda`
+(Dynamic Vibrance) and `smoothmotion_cuda` (frame doubling). All share one `rtx_cuda.c/h` core:
+load extracted cubins as multi-arch fatbins, upload a weights blob into one contiguous arena, and
+replay a pre-computed launch list through the CUDA driver API.
+
+### Why the investigation below missed it
+
+Not a missing lead. A category error, compounded by two search mistakes:
+
+- **It looked for a callable entry point.** On that question it is correct and remains correct:
+  there is no CUDA API you can call to ask the driver to super-resolve a frame, and Chromium's
+  D3D11 `VideoProcessorSetStreamExtension` path really is the only public invocation. But the
+  patches never call an entry point. They **extract the kernels and replay the graph themselves**.
+  The network is portable CUDA; only the *dispatch* is Windows/D3D11. Absence of an entry point
+  says nothing about presence of kernels.
+- **Wrong marker set on the Windows tree.** The scan below searched for `__nv_relfatbin` and
+  `__fatbin_reloc` - relocatable-fatbin markers, which is a narrower thing than an embedded cubin.
+  It also checked `nvvitvsr.dll`/`nvsvsr.dll`, which are genuinely UI-resource stubs. The carrier
+  is `nvaivpx.dll`, the DXVA/PPE plugin, which is not a `*vsr*`-named file and would not have been
+  reached by either filter.
+- **DLPP was dismissed on a Linux-only search.** The conclusion that "DLPP" was a substring
+  collision (`ADLPPort00`) came from grepping the Linux driver tree. `ppe/features/DLPP` is on the
+  Windows side. Patch `0006` drives it, and it exposes two high-quality models the AIVP path does
+  not reach.
+
+### Where the blocker actually is now
+
+It moves, it does not disappear. The patches are only the *code* half. Per `0001`, the *data* half
+- the `*_cuda_gen.h` describing each captured kernel graph, and the cubins and weights it names -
+is produced by an out-of-tree extractor called **`rtx-video-re`**, installed into a prefix
+advertising itself via `nvidia-video-filters.pc`. `configure` then probes each feature separately
+(`nvfdata_vsr_drv`, `nvfdata_dlpp_drv`, ...), because an install routinely holds some features and
+not others.
+
+**`rtx-video-re` is named 20+ times across the series and its location is given nowhere in it.**
+
+**Answered, 2026-09-22: it is not available, so it is being built.** Design in
+`rtx-video-re-design.md`, mined from what patches 0002-0011 say about the tool that produced them.
+
+The decisive finding there, because it inverts the obvious assumption: **the capture ran on Linux,
+not Windows.** The Windows DLLs are only the carrier. Custom PE loaders (`loader_ppe` for the
+DXVA/PPE plugins, an NGX loader for the `nvngx_*` snippets) map them on Linux, resolve their
+imports against the Linux `libcuda`, and the live CUDA Driver-API calls are intercepted and
+replayed into a generated graph. Patches `0004`, `0005` and `0009` each state this in as many
+words. No Windows machine and no D3D11 is needed; CT114's RTX 3090 is sufficient hardware.
+
+Also relevant to the "the Linux driver ships no kernels" finding below: it holds for VSR, but
+`smoothmotion_cuda`'s kernels are carved straight out of **`libnvidia-present.so`**, a Linux driver
+library already on the box (`rtxv extract smoothmotion <libnvidia-present.so>`). The scan below
+searched for `__nv_relfatbin`/`__fatbin_reloc`, which is probably why it read as empty.
+
+Until `rtxv` produces a data dir, none of the seven filters builds. `vf_ort.c` (Real-ESRGAN via
+ONNX Runtime) remains this project's working neural SR meanwhile.
+
+Second caveat, confirmed from the patches rather than assumed: the arch gate is
+`hard_min_major = 8`, and CT114's RTX 3090 (sm_86, Ampere) clears that floor but sits in the
+*unverified* band - these graphs were validated byte-exact on Ada (sm_89) and Blackwell (cc 12.x),
+and sm_86 runs the sm_80 image. It needs `experimental_arch=1` and its output is nobody's verified
+reference.
+
+Full write-up of the route, and what to do about it, in `rtx-cuda-vsr-task.md`.
+
+### The original investigation, kept for its evidence
+
+Everything below is the record as written. The individual observations are sound and worth keeping
+- particularly that the Linux driver ships no VSR kernels, and that Chromium's path is pure D3D11.
+Only the verdict drawn from them is wrong.
 
 Separately explored and now closed: whether NVIDIA's *other* "Video Super Resolution" - the
 driver-level consumer feature Chrome/Edge use to upscale video calls (historically confirmed
@@ -238,8 +320,8 @@ Windows/D3D11-only via mpv's `vf_d3d11vpp.c`) - ships extractable CUDA kernels t
 directly, bypassing the Maxine SDK's NGC/`CreateEffect` blocker entirely. `ffmpeg/rtx_cuda.h` was
 filed as scaffolding for this kind of approach (a generic shared core for driving externally-
 compiled cubins + a weights blob directly via the CUDA driver API) before this investigation
-concluded - it has **no working consumer for VSR or anything else in this repo** and should not be
-assumed functional; see its own file header for status.
+concluded. It is now **superseded**: patch `0002` in `ffmpeg-patches/` carries the real
+`rtx_cuda.c`/`rtx_cuda.h` pair, with seven filters exercising it. Take that one and delete ours.
 
 Three independent checks all reached the same answer:
 
@@ -272,10 +354,14 @@ real anywhere in the Linux driver tree - the only case-insensitive hits were `AD
 coincidence (`dLPp%`) inside the GSP firmware blob and the kernel module object file, neither of
 which is a genuine identifier.
 
-**Verdict: this is a structural dead end, not a missing-lead problem.** RTX Video Super Resolution
+~~**Verdict: this is a structural dead end, not a missing-lead problem.** RTX Video Super Resolution
 has no CUDA entry point on any platform. Continuing to look for one would be searching for
 something that provably does not exist. The Maxine SDK's `CreateEffect`/no-models blocker above
-remains the only real, and final, stopping point for `vf_vsr.c`.
+remains the only real, and final, stopping point for `vf_vsr.c`.~~
+
+**Retracted - see the section head.** The premise is right and the conclusion does not follow from
+it. There is no CUDA entry point, and the kernels are extractable anyway; `ffmpeg-patches/` drives
+them. What "provably does not exist" was the thing being searched for, not the thing needed.
 
 ## Driver/GPU requirements (confirmed, unchanged from the original research)
 
