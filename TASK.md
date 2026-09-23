@@ -1538,6 +1538,20 @@ does), not a context/thread problem at all.
        reaches the output. Scores vs 1080p GT (RGB/Y PSNR): net 1200 29.14/31.20, net 3130
        25.65/30.02, bicubic 1200 34.70/32.93. Net still loses to bicubic: the L17 noise bug.
        Script and logs: CT114 `analysis/t17/`.
+     - **2026-09-23 (L17 agent 8), L17 emulated offline, noise is its bias path, not fixed.**
+       Emulated L17 in numpy from dumps: input `d_L17_0` as fp16 HWC 272x480x16, 3x3 W1 (`+0x8`)
+       plus b1 (`+0x20`), ReLU, 1x1 W2 (`+0x250`, 48x64) plus b2 (`+0x268`), pixel shuffle
+       c,dy,dx. Against the real residual (net minus F10=1) corr is 0.93 to 0.94 at scale ~122
+       for every W1 layout tried, and emulated output scores 29.8 dB interior vs the real
+       29.1. So the offline model reproduces the damage, and the damage is the constant term
+       W2*relu(b1)+b2. With the fixed 4px tile removed, no W1 layout (4), shuffle order (2)
+       or input layout (7: HWC, pitched 30720 B, 32ch lo/hi, CHW, C8-blocked, fp32) gives corr
+       above 0.2 with the real residual or 0.17 with the GT residual. Scaling the features x4
+       to x100 never helps (best-fit gain ~0, PSNR unchanged). Ruled out: layout/permutation of
+       L17 input and weights, feature under-scale. Side note: bicubic scores 47.20 dB with a
+       16px border cropped vs 34.70 full frame, so the canonical score is border-dominated.
+       Next: find what cancels the bias term (a second bias/offset field, or an output
+       offset/scale in the argbuf), not the features. Scripts: CT114 `analysis/n18/e*.py`.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
