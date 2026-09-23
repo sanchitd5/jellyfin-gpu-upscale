@@ -1441,6 +1441,25 @@ does), not a context/thread problem at all.
        binds/enables the residual branch; the L17 argbuf field `4670000000000001` / the tail floats
        `4000000000000003 000000043f000000` (2.0f, 0.5f); s12 as a real stream/event.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
+   - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
+     rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
+     one harness `cuCtxSynchronize` per frame, timed). CT114, 960x540 -> 1920x1080, surf I/O,
+     `in_001200.rgba`, interposer in `RTXV_CAPTURE=/tmp/cap_*`:
+     - VERIFIED: full network path (flags 0) **4.88 ms/frame avg** (min 4.45, max 11.5) x200;
+       bypass (`+0x09`) 0.13 ms. Per frame: 19 launches, zero `cuMemAlloc`, zero `cuMemcpyHtoD`
+       (338/334 identical for x0 and x200), host slots 3 (+2) and 8 (+19) only. Output md5 after
+       200 frames equals single shot (`b3c5094c...` flags 0, `6d9a012a...` bypass).
+     - VERIFIED: no `CreateThread` shim; Tls/Fls/critical sections are single-thread stubs; TEB is
+       per-thread `%gs` via `ARCH_SET_GS` (glibc x86-64 uses `%fs`, no clash).
+     - VERIFIED: `nvaivpx.dll` is NOT in the Linux driver (wine dir holds only nvngx*). It exists
+       on CT114 only as the extracted Windows package copy.
+     - ASSUMED/untested: primary ctx from `AVCUDADeviceContext` (loader creates its own); a real
+       stream (launches pass NULL, i.e. legacy default stream); calling from ffmpeg's filter thread.
+     - Verdict: shortcut is the faster route to a filter (instance reuse and zero per-frame alloc
+       already hold) but does NOT remove the L17 blocker, which gates both routes equally. Costs:
+       Windows-package DLL the user must supply, hard-coded RVAs (IID `0x202cd8`, level remap,
+       slot layout) break on driver update and need a version/hash gate, and a fault inside the DLL
+       kills ffmpeg, so the filter must self-test at init and drop itself, like `vf_dlss`.
 
 ## Track C: integration, once a data dir exists
 
