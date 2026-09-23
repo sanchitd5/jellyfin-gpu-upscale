@@ -81,9 +81,21 @@ finishing before drawing conclusions from partial numbers.
    Alternate greedy seeds converge to the same or a worse local optimum, never a better one. One
    plateau, not several; not worth further multi-field search on this frame. See TASK.md
    "L17 agent 12".
-6. **Slot 12 (host callback `0x68`)** is still functionally unnamed. It fires twice per Process
-   with `a1=0`; one call passes a small host descriptor (`06 00 04 00 03 00 01 00 07 00 07 00 ...`).
-   Never conclusively shown to affect L17, but never fully decoded either.
+6. **DONE, negative result (L17 agent 13).** Slot 12 (host callback `0x68`) is now fully
+   characterized. Both call sites named (`img+0x2ac04`, `img+0x2ac41`); the second call's `a2=0x2c`
+   confirmed as a real small integer, not a misread pointer. The first call's descriptor (`a2`
+   pointer, `a3=0x7`) decoded to 80 bytes, all small u16 integers, plausibly counts/type tags, no
+   further structure identifiable without disassembling the DLL. It is read/write from the DLL's
+   side (two fields change between the callback firing and `Process` returning), but that mutation
+   happens independent of the callback's return value or of writes made into the descriptor before
+   returning: every tested return value (1, -1, 2, 3, 8, per call and combined) and every tested
+   pre-return descriptor write scored identical to base, no crash, no change. Slot 12 is ruled out as
+   a lever for L17, not by omission but by direct test in both directions. It was the last
+   unexplored host<->DLL interaction point; see TASK.md "L17 agent 13" for the full method and data.
+   Also negative: testing `+0x3a8`/`+0x44` as small integer "level" codes (3,4,8,15,16,32,64,100)
+   rather than gains, prompted by the observation that real Windows sets RTX VSR's quality from the
+   NVIDIA Control Panel. No clean ordering found; scores bounce non-monotonically and any local gain
+   (e.g. `+0x3a8=3`'s Y-PSNR) fails to transfer to frame 3130. Not a Control-Panel-style lever.
 
 ## Status: active (2026-09-23)
 

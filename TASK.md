@@ -1638,6 +1638,47 @@ does), not a context/thread problem at all.
        runlib.py`, a copy of just `sweep.py`'s `run()` function, for any future script that needs to
        call single argw runs without that side effect; agent 10's `search.py` has the same
        `import sweep` pattern and carries the same risk if imported from anywhere but its own CLI.
+     - **2026-09-23 (L17 agent 13), slot 12 (host callback 0x68) fully decoded, no score effect;
+       control-panel-level sweep on +0x3a8/+0x44 also negative.**
+       Task 1: named both call sites (`img+0x2ac04` first call, `img+0x2ac41` second, ~0x3d apart,
+       same caller). Confirmed the `a2=0x2c` claim for the second call: it really is a small
+       integer, not a misread pointer (`a1=0, a2=0x2c, a3=0`). Decoded 80 bytes of the first call's
+       descriptor (`a2` pointer, `a3=0x7`): as u16 words, `6,4,3,1,7,7,1,2, 4,0,0,0,0,0,3,0, 1,0,0,1,
+       0,0,1,1, 0,0,0,0,1,0,0,2, 0,6,0,0,0,0,0,6`. Small integers throughout, plausibly counts/type
+       tags as suspected, but no further structure identifiable without disassembling the DLL
+       (out of scope). VERIFIED via `AIVP_SLOT12_N=80` (new env knob).
+       Task 2: black-box only, no DLL disassembly or single-stepping into its code (kept inside the
+       "host-side work only" boundary). Snapshotted the descriptor at the first call and diffed it
+       against the same host memory right after `Process` returns: **it changed.** Offset `+0x4`
+       (dword) went `0x00010003` -> `0x00000001`; offset `+0x1c` (word) went `0` -> `1`. So the
+       descriptor is read/write from the DLL's side, not read-only -- but this happens regardless of
+       what the host callback returns or writes (see Task 3), so it looks like the DLL's own later
+       bookkeeping into a buffer it handed a view of, not something slot 12's return value drives.
+       VERIFIED via new post-Process diff in `aivp.c` (`slot12 descriptor post-Process: CHANGED`).
+       Task 3: tried return values 1, -1, 2, 3, 8 for each call independently and both together
+       (new `AIVP_SLOT12_RET="idx:val[,idx:val]"` knob, idx 0/1 = first/second call), and pre-return
+       descriptor writes at offsets `0x0`, `0x4`, `0x1c`, `0x20`, `0x3a8` with plausible values (0,
+       1, matching what the DLL itself later writes). **Every single one scored identical to base**
+       (29.141/31.202 RGB/Y, frame 1200) with `Process -> 0` each time: no crash, no change,
+       confirming the existing note that slot 12's return value never affects output. Slot 12 is now
+       fully characterized and ruled out as a lever for L17: not a dead value by omission, but
+       provably inert across both direction (return) and content (descriptor writes).
+       Also tested, per a live user correction that RTX VSR's quality level on real Windows comes
+       from the NVIDIA Control Panel / app rather than the calling app, and neither DLL imports
+       ADVAPI32/NvAPI (so it isn't read from the registry directly): whether `+0x3a8`/`+0x44` (the
+       only two fields that move the score at all) behave as a small integer "level" code rather
+       than a gain, at 3, 4, 8, 15, 16, 32, 64, 100, individually and together, network on, frame
+       1200. **No clean level ordering**: scores bounce non-monotonically (e.g. `+0x3a8=3` gives
+       29.457/33.116, `+0x3a8=12` gives 28.786/33.392, `+0x3a8=4` gives 28.881/30.684), consistent
+       with the fields being noisy single-value perturbations of L17's bias term rather than an
+       ordered quality slider. `+0x3a8=3`'s Y-PSNR (33.116) briefly reads above bicubic's Y
+       (32.929) on frame 1200, but cross-checked on frame 3130 it gives only 25.817/31.523 against
+       bicubic's 35.341/34.705 -- no real transfer, same overfit-to-frame-content pattern as agent
+       12's other findings. Not a Control-Panel-style lever either.
+       Loader changes (both new env knobs, the descriptor snapshot/diff, and the still-uncommitted
+       `AIVP_ARENA` change from item 3) committed this session, md5-verified Mac/CT114 before commit.
+       **Verdict: the neural path is not closer to beating bicubic. Slot 12 was the last unexplored
+       host<->DLL interaction point and is now closed out negative.** See TASK.L17.md item 6.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
      one harness `cuCtxSynchronize` per frame, timed). CT114, 960x540 -> 1920x1080, surf I/O,
