@@ -1514,6 +1514,17 @@ does), not a context/thread problem at all.
        so the network features hardly reach the result. Ruled out: config selection (hint 1),
        preProcess tunables (2), zeroed scratch (3), linear/normalized texture binding (5).
        Next: look for a gain or feature-scale field that multiplies the L17 residual.
+     - **2026-09-23 (L17 agent 5), noise characterised, not fixed.** With `AIVP_F10=0` the
+       residual (net - bicubic) is 96% a fixed 4-pixel-periodic tile pattern (x/y autocorr 0.97
+       at lag 4, range about -14..18/255), the pixel_shuffle4 grid of L17. Removing that pattern
+       leaves a residual that still does not help (best scale 0.05 to 0.13). So the noise is a
+       per-subpixel bias, not an over-gain: consistent with L17 reading features in a different
+       channel order or layout than L16 writes, or bias/weights for another config. No pointer is
+       stale: every L16/L17 argbuf pointer matches a live alloc (L17 +0x0 = L16 +0x258 output).
+       Hint 6 (arch gate): new knob `AIVP_SM=NN` in aivp.c; only 86 runs (md5 `25c94c00`,
+       unchanged), 75/80/89/90/120 make Process fail rc=5 with zero launches.
+       Next: dump L16 output as 64-ch fp16 and test channel-permutation hypotheses against the
+       4x4 phase pattern of the L17 residual.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
