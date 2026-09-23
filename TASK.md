@@ -1989,6 +1989,79 @@ Next step: capture native-resolution ground truth frames at 2880x1620 and 3840x2
 (non-approximated) scoring, and confirm whether the exact float value matters beyond "set vs
 unset" by sweeping near the integer scale.
 
+## Track B: DLPP agent 4, Lanczos rescore + base-quality wipe fix found (2026-09-23)
+
+**Verdict: Task 1 confirmed (gap holds, fairer method), Task 2 found a real fix.** Levels 1/2 have
+their own analogue of the level 3/4 bug, and it is now fixed and verified on two frames.
+
+| Task | Result | Key finding |
+|---|---|---|
+| 1: fairer ground truth / rescore | Done | Source is HotD S03E01, 1080p only (confirmed against agent 2's note) -- no true native-res ground truth exists at 2880x1620/3840x2160, so per the brief's own fallback the right method is downscaling DLPP's native output back to 1080p with Lanczos (not agent 3's box/area filter) and comparing to the existing `gt_001200.rgba`. `jellyfin-ffmpeg8` (already installed on CT114, `/usr/lib/jellyfin-ffmpeg/ffmpeg`) has a working `scale=...:flags=lanczos`; no PIL needed. Redid all four dlpp3 combos this way. |
+| 2: base-quality (1/2) missing-field check | Done, fixed | Found the field: `params+0x10`, the split-screen "wipe" the ffmpeg patch already documents (driver marshals `round(oW*wipe)` columns to the un-enhanced side). The loader hardcodes it to `1.0f` unconditionally (comment in `aivp.c` calls this "the old +0x10=1.0f scaffolding", an AIVP-era default, not a DLPP one) -- wipe=1.0 means the *entire* frame width shows the un-enhanced/bicubic side, so levels 1/2 look bicubic-identical not because the network is off, but because the comparison-wipe is silently showing 100% of the wrong side. Setting `AIVP_F10=0.0` (existing knob, no loader code change) reveals the real network output. |
+
+Revised Task 1 scores (Lanczos downscale, `gt_001200.rgba`), vs agent 3's box-filter scores:
+
+- Level 3, scale=3.0 (correct): box 39.70/38.16 dB -> Lanczos 39.164/37.586 dB rgb/y
+- Level 3, scale=2.0 (wrong): box 34.77/32.97 dB -> Lanczos 34.757/32.966 dB rgb/y
+- Level 4, scale=4.0 (correct): box 37.48/35.80 dB -> Lanczos 37.596/35.918 dB rgb/y
+- Level 4, scale=2.0 (wrong): box 34.81/33.01 dB -> Lanczos 34.778/32.981 dB rgb/y
+
+Gap holds: correct-scale beats wrong-scale by ~4.4 dB (level 3) / ~2.8 dB (level 4) rgb under the
+fairer filter, same order of magnitude as agent 3's box-filter gap (~5.0 / ~2.7 dB). Lanczos vs box
+does not change the conclusion.
+
+Task 2 scores (`AIVP_PSIZE=0x50 AIVP_IO=surf`, `score_dlpp3.py` against each frame's own gt):
+
+| Level | Frame | `AIVP_F10` (wipe) | PSNR rgb/y | vs default |
+|---|---|---|---|---|
+| 1 | 1200 | default (1.0, bug) | 34.70 / 32.93 | -- (matches recorded bicubic baseline exactly) |
+| 1 | 1200 | 0.0 (fixed) | 45.24 / 47.22 | **+10.5 / +14.3 dB** |
+| 1 | 1200 | 0.5 (half-split, sanity check) | 36.02 / 34.80 | +1.3 / +1.9 dB |
+| 2 | 1200 | 0.0 (fixed) | 43.75 / 45.29 | comparable jump |
+| 1 | 3130 | default (1.0, bug) | 35.34 / 34.71 | -- (matches recorded bicubic baseline exactly) |
+| 1 | 3130 | 0.0 (fixed) | 42.25 / 43.84 | **+6.9 / +9.1 dB** |
+
+This is the strongest DLPP result of the session: a >6.9 dB gain on a second, independently-checked
+frame, not a one-frame artifact.
+
+VERIFIED (commands + logs on CT114, `/root/rtxv-spike/analysis/dlpp4/`):
+- Source is 1080p only, no native ground truth exists: confirmed against TASK.md's own earlier
+  note ("Input: two frames of a 1080p library file (HotD S03E01 @12:00, @31:30)").
+- Lanczos rescore: `/usr/lib/jellyfin-ffmpeg/ffmpeg -y -i <dlpp3 ppm> -vf scale=1920:1080:flags=lanczos
+  -pix_fmt rgb24 -f rawvideo <out>.raw`, rc=0 on all four combos, `analysis/dlpp4/score_dlpp4.py`
+  scores the raw output against `gt_001200.rgba`.
+- Wipe field default is the bug: `AIVP_PSIZE=0x50 AIVP_IO=surf AIVP_INPUT=frames/in_001200.rgba
+  ./pe_map ../dll/Display.Driver/nvdlppx.dll --dlpp-process 960,540,1920,1080,32,32,1` (no
+  `AIVP_F10`) -> output md5 `b3c5094c...`, byte-identical to `analysis/t17/off1200_1.ppm`
+  (the recorded bicubic/bypass capture).
+- Setting it to 0.0 changes 1,969,692 of 2,073,600 pixels (95%) vs the default-wipe output, and the
+  result is NOT a trivial copy of ground truth (only 109,458/2,073,600 pixels exact-match `gt`, max
+  abs channel diff 15/255) -- a real, imperfect SR reconstruction, not a memcpy artifact.
+- Wipe=0.5 sanity check: differs from default only in columns 956-1919 of 1920 (491 columns, right
+  ~half), matching the patch's documented `round(oW*wipe)` split-screen semantics exactly
+  (`round(1920*0.5)=960`).
+- Fix reproduces on level 2 (43.75/45.29 dB) and on a second, independent frame (3130: 35.34->42.25
+  dB rgb, +6.9 dB) -- not a single-frame fluke.
+- Logs/ppms: `analysis/dlpp4/{l1,l2}_wipe*.{log,ppm}`, `l1_default_3130.{log,ppm}`,
+  `l1_wipe0_3130.{log,ppm}`, `score_dlpp4.py`, `wipe_diag.py`.
+
+ASSUMED / not reached: whether `AIVP_F10=0.0` is the exact intended value or merely "any value
+below ~1.0 shows more of the real side" (0.0 and 0.5 both tested; the relationship between wipe and
+output looks linear/columnar per the 0.5 sanity check, consistent with a literal split-screen
+compose, not a threshold); whether this same wipe default also affects levels 3/4's *quality*
+(only crash/no-crash and scale were tested there by agent 3 -- wipe was left at the buggy 1.0
+default in all of agent 3's level 3/4 runs too, so their PSNR numbers may themselves be
+undercounting quality 3/4's real output the same way); a true native-resolution ground truth still
+does not exist (none can, given 1080p-only source).
+
+No loader code change (reused existing `AIVP_F10` knob, same as agent 3 reused `AIVP_F38`) -- no
+`rtx-video-re` commit. This TASK.md update is the commit for this session.
+
+Next step: re-run agent 3's level 3/4 scale sweep with `AIVP_F10=0.0` added, to check whether the
+high-quality models were also being scored through the same wipe bug and their real PSNR is higher
+than recorded; then consider whether the loader's default should just change to `AIVP_F10=0.0`
+everywhere so future sweeps do not need to remember to set it.
+
 ## Guardrails
 
 - Never restart `jellyfin.service`. Never touch the live plugin config XML. Always `--no-activate`.
