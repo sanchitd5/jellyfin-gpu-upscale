@@ -1,5 +1,10 @@
 # NVIDIA Maxine VFX SDK - Video Super Resolution, and why it doesn't run yet
 
+> **RETIRED 2026-09-23.** Build flag renamed `WITH_VSR` -> `WITH_MAXINE_VSR` so it is not confused
+> with RTX VSR (`vsr_drv_cuda`, planned as `WITH_RTXCUDA`). Both build scripts refuse it unless
+> `MAXINE_VSR_UNRETIRE=1`; the old name `WITH_VSR` fails outright. Source (`ffmpeg/vf_vsr.c`, patch
+> `0005`) stays in the tree. RTX VSR is the live target: see TASK.md Track B.
+
 Status: **code exists (`ffmpeg/vf_vsr.c`, patch `0005`), builds and registers, but cannot be
 verified end-to-end.** Not a licensing or access blocker anymore - see below. NVIDIA's own NGC
 catalog currently ships zero TensorRT model files for this feature, for any GPU architecture.
@@ -73,7 +78,7 @@ box.)
 ## What this means for `vf_vsr.c` - current state, several rounds of fixes in
 
 The filter (`ffmpeg/vf_vsr.c`, `ffmpeg/0005-add-vsr-filter-to-build.patch`,
-`WITH_VSR=1` in `scripts/build-ffmpeg.sh`) **builds, links, and registers** correctly in
+`WITH_MAXINE_VSR=1` in `scripts/build-ffmpeg.sh`) **builds, links, and registers** correctly in
 `ffmpeg -filters` on every build since the fixes below landed. It is **still not confirmed to
 produce a frame**. The blocker moved twice as real bugs got fixed - documented in order, because
 each one looked like the final answer until the next test disproved it.

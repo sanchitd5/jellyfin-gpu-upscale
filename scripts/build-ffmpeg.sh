@@ -33,7 +33,7 @@
 # itself has no CODE dependency on optix/ort/fsr2/dlss (it is a standalone new file, pure CUDA, no
 # shared plumbing) - but its patch (0005) was written against the tree state with 0001-0004 already
 # applied, because that is what this project's own production build (proxmox-build.sh) always
-# produces: every WITH_* defaults to 1 there. WITH_VSR=1 therefore requires the same four SDKs
+# produces: every WITH_* defaults to 1 there. WITH_MAXINE_VSR=1 therefore requires the same four SDKs
 # WITH_DLSS already requires, purely as a build-mechanics constraint, not a functional one.
 #
 # WHAT YOU MUST OBTAIN YOURSELF (nothing proprietary is vendored in this repo, and nothing here
@@ -54,7 +54,7 @@
 #               NGX_LIB    libnvsdk_ngx.a         same repo, lib/Linux_x86_64.  The DLSS runtime blob
 #                                                 is installed by hand under <prefix>/dlss; see
 #                                                 DLSS.md.
-#   WITH_VSR    VFXSDK_DIR nvVideoEffects.h,      Headers only, from the NGC SDK Core package and the
+#   WITH_MAXINE_VSR    VFXSDK_DIR nvVideoEffects.h,      Headers only, from the NGC SDK Core package and the
 #               VFXVSR_DIR nvVFXVideoSuperRes.h,  nvvfxvideosuperres feature package (NGC, gated behind
 #                                                  an NVIDIA Developer Program login - not fetchable by
 #                                                  this script).  NVIDIA proprietary.
@@ -78,7 +78,21 @@ WITH_OPTIX="${WITH_OPTIX:-0}"
 WITH_ORT="${WITH_ORT:-0}"
 WITH_FSR2="${WITH_FSR2:-0}"
 WITH_DLSS="${WITH_DLSS:-0}"
-WITH_VSR="${WITH_VSR:-0}"
+WITH_MAXINE_VSR="${WITH_MAXINE_VSR:-0}"
+# Old name, renamed so it cannot be mistaken for RTX VSR (`vsr_drv_cuda`, planned as WITH_RTXCUDA).
+if [[ -n "${WITH_VSR:-}" ]]; then
+    echo "WITH_VSR was renamed WITH_MAXINE_VSR (Maxine, retired). RTX VSR will be WITH_RTXCUDA (planned, TASK.md 2.2). Unset WITH_VSR." >&2
+    exit 1
+fi
+# RETIRED 2026-09-23: Maxine VFX `vsr` (vf_vsr.c, patch 0005). NvVFX_Load hangs and NVIDIA ships no
+# TensorRT models for it, so it never produced a frame; a stuck test process held the GPU for days.
+# The source and every WITH_MAXINE_VSR block below stay in the tree, but this gate refuses to build it.
+# RTX VSR (`vsr_drv_cuda`, nvaivpx.dll) is the replacement target, see TASK.md Track B.
+# Override only to work on the hang itself: MAXINE_VSR_UNRETIRE=1 WITH_MAXINE_VSR=1.
+if [[ "$WITH_MAXINE_VSR" == "1" && "${MAXINE_VSR_UNRETIRE:-0}" != "1" ]]; then
+    echo "WITH_MAXINE_VSR=1: Maxine vsr is retired (NvVFX_Load hangs, see VSR.md). Set MAXINE_VSR_UNRETIRE=1 to build it anyway." >&2
+    exit 1
+fi
 
 # Defaults are where these SDKs were unpacked on the build box. Nothing fetches them; a wrong path
 # fails in preflight naming the variable rather than 20 minutes into a compile.
@@ -197,20 +211,20 @@ fi
 # 0005's patch context assumes 0001-0004 all applied (see the note above this script's header) -
 # enforced here for the same reason 0004's own chain is: failing in seconds beats failing after the
 # SDKs are already staged and the build is 20 minutes in.
-if [[ "$WITH_VSR" == "1" ]]; then
+if [[ "$WITH_MAXINE_VSR" == "1" ]]; then
     [[ "$WITH_OPTIX" == "1" && "$WITH_ORT" == "1" && "$WITH_FSR2" == "1" && "$WITH_DLSS" == "1" ]] \
-        || die "WITH_VSR=1 needs WITH_OPTIX=1 WITH_ORT=1 WITH_FSR2=1 WITH_DLSS=1: patch 0005 applies on top of 0001-0004"
+        || die "WITH_MAXINE_VSR=1 needs WITH_OPTIX=1 WITH_ORT=1 WITH_FSR2=1 WITH_DLSS=1: patch 0005 applies on top of 0001-0004"
     [[ -f "$VFXSDK_DIR/include/nvVideoEffects.h" ]] \
-        || die "WITH_VSR=1: no nvVideoEffects.h under VFXSDK_DIR=$VFXSDK_DIR/include (see VSR.md)"
+        || die "WITH_MAXINE_VSR=1: no nvVideoEffects.h under VFXSDK_DIR=$VFXSDK_DIR/include (see VSR.md)"
     [[ -f "$VFXVSR_DIR/include/nvVFXVideoSuperRes.h" ]] \
-        || die "WITH_VSR=1: no nvVFXVideoSuperRes.h under VFXVSR_DIR=$VFXVSR_DIR/include (see VSR.md)"
+        || die "WITH_MAXINE_VSR=1: no nvVFXVideoSuperRes.h under VFXVSR_DIR=$VFXVSR_DIR/include (see VSR.md)"
     [[ -f "$VFXLIBS_DIR/libVideoFX.so" ]] \
-        || die "WITH_VSR=1: no libVideoFX.so under VFXLIBS_DIR=$VFXLIBS_DIR (see VSR.md)"
+        || die "WITH_MAXINE_VSR=1: no libVideoFX.so under VFXLIBS_DIR=$VFXLIBS_DIR (see VSR.md)"
     [[ -f "$VFXLIBS_DIR/libnvinfer.so.10" ]] \
-        || die "WITH_VSR=1: no libnvinfer.so.10 (TensorRT) under VFXLIBS_DIR=$VFXLIBS_DIR - CreateEffect" \
+        || die "WITH_MAXINE_VSR=1: no libnvinfer.so.10 (TensorRT) under VFXLIBS_DIR=$VFXLIBS_DIR - CreateEffect" \
                "returns \"not yet implemented\" without it, confirmed the hard way (see VSR.md)"
-    command -v patchelf >/dev/null || die "WITH_VSR=1: patchelf not found (apt install patchelf) - needed to fix libVideoFX.so's own rpath, see VSR.md"
-    say "note: WITH_VSR builds and registers the filter, and CreateEffect works against VFXLIBS_DIR's" \
+    command -v patchelf >/dev/null || die "WITH_MAXINE_VSR=1: patchelf not found (apt install patchelf) - needed to fix libVideoFX.so's own rpath, see VSR.md"
+    say "note: WITH_MAXINE_VSR builds and registers the filter, and CreateEffect works against VFXLIBS_DIR's" \
         "exact library set (which this build stages). NvVFX_Load does NOT - it hangs, and no frame" \
         "has ever come out of this filter. See VSR.md 'Round 3'. Build it if you are working on that" \
         "hang; it is not a working upscaler."
@@ -257,7 +271,7 @@ cp -r Vulkan-Headers/include/vk_video /usr/local/include/ 2>/dev/null || true
 # whichever it finds, so building it first would leave libplacebo on the old one.
 #
 # Both this and libplacebo below are skipped when a stamp file says the same tag is already
-# installed at /usr/local. Neither depends on which WITH_* flags are set, so every WITH_VSR
+# installed at /usr/local. Neither depends on which WITH_* flags are set, so every WITH_MAXINE_VSR
 # iteration was rebuilding them from source unconditionally - minutes of wasted C++ compilation per
 # run during exactly the kind of rapid rebuild-and-test loop this filter needed. Bump the tag (or
 # delete the stamp) to force a rebuild.
@@ -380,7 +394,7 @@ if [[ "$WITH_FSR2" == "1" || "$WITH_DLSS" == "1" ]]; then
 fi
 
 VSR_FLAGS=()
-if [[ "$WITH_VSR" == "1" ]]; then
+if [[ "$WITH_MAXINE_VSR" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_vsr.c" libavfilter/
     patch -p1 < "$HERE/ffmpeg/0005-add-vsr-filter-to-build.patch"
     # Pure CUDA, no Vulkan/ffnvcodec involvement (see the file's own header comment) - just the SDK's
@@ -434,7 +448,7 @@ if [[ "$WITH_DLSS" == "1" && ! -d "$PREFIX/dlss" ]]; then
     say "note: $PREFIX/dlss is missing, so the dlss and dlaa levels will not be offered (DLSS.md)"
 fi
 
-if [[ "$WITH_VSR" == "1" ]]; then
+if [[ "$WITH_MAXINE_VSR" == "1" ]]; then
     # Stage VFXLIBS_DIR wholesale where the rpath above points. No separate features/<name>
     # subdirectory is needed - confirmed directly: CreateEffect finds libnvVFXVideoSuperRes.so and
     # libnvidia-ngx-vsr.so.1.8.2 from plain LD_LIBRARY_PATH/rpath resolution alone, sitting flat
@@ -477,7 +491,7 @@ if [[ "$WITH_DLSS" == "1" ]]; then
     "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bdlss\b" \
         && echo "  dlss: present" || die "dlss filter missing from the build"
 fi
-if [[ "$WITH_VSR" == "1" ]]; then
+if [[ "$WITH_MAXINE_VSR" == "1" ]]; then
     "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bvsr\b" \
         && echo "  vsr: present (registered - NOT confirmed to run, see VSR.md)" \
         || die "vsr filter missing from the build"

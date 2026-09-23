@@ -93,6 +93,17 @@ fi
 # it cannot find and the session plays on quietly without it.
 if [ "$WITH_FFMPEG" = "1" ]; then
     echo "==> ffmpeg (slow)"
+    # WITH_MAXINE_VSR (Maxine vsr) is RETIRED: NvVFX_Load hangs and it never produced a frame (VSR.md).
+    # Refused before the snapshot, so a stray WITH_MAXINE_VSR=1 never touches the live binary.
+    # build-ffmpeg.sh carries the same gate; MAXINE_VSR_UNRETIRE=1 overrides both.
+    if [ -n "${WITH_VSR:-}" ]; then
+        echo "==> FAILED: WITH_VSR was renamed WITH_MAXINE_VSR (Maxine, retired). RTX VSR will be WITH_RTXCUDA (planned, TASK.md 2.2)." >&2
+        exit 1
+    fi
+    if [ "${WITH_MAXINE_VSR:-0}" = "1" ] && [ "${MAXINE_VSR_UNRETIRE:-0}" != "1" ]; then
+        echo "==> FAILED: WITH_MAXINE_VSR=1 but Maxine vsr is retired (set MAXINE_VSR_UNRETIRE=1 to override)" >&2
+        exit 1
+    fi
     if [ -f "$PATCHED_FFMPEG" ]; then
         cp -a "$PATCHED_FFMPEG" "$PATCHED_FFMPEG.prev"
         echo "    previous binary saved as $PATCHED_FFMPEG.prev"
@@ -102,10 +113,6 @@ if [ "$WITH_FFMPEG" = "1" ]; then
     # them. Asking for one and then demanding five is how this script spent a build producing a
     # binary it then rejected. build-ffmpeg.sh fails in preflight, in seconds, when an SDK is not
     # where it expects, and each WITH_* and SDK path here can be overridden from the environment.
-    # WITH_VSR is NOT defaulted to 1 like the other five: it is new, unverified beyond "builds and
-    # registers" (the SDK's own TensorRT model files are a separate NGC download this project does
-    # not have - see VSR.md), so it stays opt-in rather than mandatory-by-default. Pass WITH_VSR=1
-    # explicitly to include it.
     # build-ffmpeg.sh's own verify step `die`s on a missing filter, which under this script's
     # `set -e` would abort straight past the restore logic below and leave the broken binary
     # installed - happened twice on this exact VSR task before this guard existed. `|| true`
@@ -116,7 +123,7 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         WITH_ORT="${WITH_ORT:-1}" \
         WITH_FSR2="${WITH_FSR2:-1}" \
         WITH_DLSS="${WITH_DLSS:-1}" \
-        WITH_VSR="${WITH_VSR:-0}" \
+        WITH_MAXINE_VSR="${WITH_MAXINE_VSR:-0}" \
         OPTIX_SDK="${OPTIX_SDK:-/root/gameupscale/optix-dev-8.1.0}" \
         ./scripts/build-ffmpeg.sh || true
 
@@ -127,7 +134,7 @@ if [ "$WITH_FFMPEG" = "1" ]; then
     }
 
     required_filters="oidn optix ort fsr2 dlss"
-    [ "${WITH_VSR:-0}" = "1" ] && required_filters="$required_filters vsr"
+    [ "${WITH_MAXINE_VSR:-0}" = "1" ] && required_filters="$required_filters vsr"
     missing=""
     for f in $required_filters; do
         "$PATCHED_FFMPEG" -hide_banner -filters 2>/dev/null | grep -qE "^ *[TSC.]* *$f " || missing="$missing $f"
@@ -142,7 +149,7 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         fi
         exit 1
     fi
-    echo "    all five custom filters present$([ "${WITH_VSR:-0}" = "1" ] && echo ", plus vsr")"
+    echo "    all five custom filters present$([ "${WITH_MAXINE_VSR:-0}" = "1" ] && echo ", plus vsr")"
     # The snapshot STAYS. Deleting it on success left no way back from the case this check cannot
     # see: a binary that builds, installs and lists all five filters, and then fails against the
     # driver on the first frame. OptiX, NGX and NVOFA all negotiate at runtime, so linking proves
