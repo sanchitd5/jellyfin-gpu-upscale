@@ -40,13 +40,13 @@ findings for both tracks are in `TASK.md`; the retired AIVP neural-path investig
 `TASK.L17.md`; the GPU-residency roadmap this filter/backend map feeds is in
 [roadmap/](roadmap/driver-features.md) and [roadmap/gpu-only-filters.md](roadmap/gpu-only-filters.md).
 
-## Invariants — do not break these
+## Invariants - do not break these
 
 **1. The patcher assembly must live outside the plugin directory.**
 Jellyfin loads plugins into a collectible `AssemblyLoadContext`; Harmony cannot emit detours against
 one (`Resolving to a collectible assembly is not supported`). Jellyfin also enumerates plugin DLLs
 with `SearchOption.AllDirectories`, so a *subfolder* is not far enough away. The patcher ships to
-`/usr/lib/jellyfin-gpuupscale/`. The two sides exchange only primitives — JSON strings and an
+`/usr/lib/jellyfin-gpuupscale/`. The two sides exchange only primitives - JSON strings and an
 `object`-typed logger. Never let a shared type cross that boundary.
 
 **2. Lib.Harmony must be 2.4.2+.** 2.4.1 refuses .NET 10 outright.
@@ -76,7 +76,7 @@ survive minification and module renumbering; names and ids do not.
 
 **6. Per-session options travel as lowercase query parameters.**
 Jellyfin's `ParseStreamOptions` copies every lowercase-initial query param into `StreamOptions`,
-readable with `GetOption(...)`, and nothing clamps them. A *bitrate* would not survive — Jellyfin
+readable with `GetOption(...)`, and nothing clamps them. A *bitrate* would not survive - Jellyfin
 clamps it to source bitrate before `EncodingHelper` sees it. An earlier sentinel-bitrate design was
 abandoned for exactly that reason. Do not reintroduce it.
 
@@ -89,11 +89,11 @@ untouched copy is worse than being told nothing. If you add a feature, add its h
 decision path and the direct-play override. If they diverge, the override forces expensive transcodes
 for material the engine then declines to enhance.
 
-**9. Hook points decide filter order, not file order — know which is which.**
+**9. Hook points decide filter order, not file order - know which is which.**
 FSRCNNX hooks `LUMA`; Anime4K hooks `MAIN`; RCAS hooks `LUMA`; the old CAS hooks `MAIN`. When two
 passes hook the *same* point, concatenation order decides. When they hook different points, the
 hook points decide and file order is irrelevant. This is why Anime4K + RCAS sharpens *before*
-enlarging regardless of how the file is composed — that pairing was measured and kept because it
+enlarging regardless of how the file is composed - that pairing was measured and kept because it
 still beat CAS-after, but the reasoning must be checked, not assumed, whenever a shader is added.
 
 **10. The patched ffmpeg binary is separate, and all five mandatory filters must survive a
@@ -129,7 +129,7 @@ The client is data-driven on purpose: a new level is one entry in an options arr
 JavaScript. Adding the server side is the part that is easy to forget.
 
 **12. RCAS sharpness is inverted and clamped.** `0.0` is maximum, larger is gentler, and the shader
-hard-clamps to `[0, 2]` — a value above 2.0 silently does nothing. Any viewer-facing "low/medium/
+hard-clamps to `[0, 2]` - a value above 2.0 silently does nothing. Any viewer-facing "low/medium/
 high" must map through that inversion or the labels lie.
 
 ## Verification standards
@@ -160,7 +160,7 @@ needs no harness. Check the reverse as well: an axis set to off must **not** app
 
 When testing the browser script, drive the **real served files** rather than a simulation. A headless
 harness that mocks the webpack chunk loader will happily validate your assumptions instead of
-checking them — that is precisely how the `webpackChunk` vs `webpackChunkjellyfin_web` bug survived
+checking them - that is precisely how the `webpackChunk` vs `webpackChunkjellyfin_web` bug survived
 "verification".
 
 ## Measuring image quality here
@@ -169,7 +169,7 @@ Objective metrics disagree with each other on this content, and each can be game
 
 - **Raw sharpness (Laplacian) rewards noise and ringing.** It ranked the worst-ringing shader top.
 - **Ground-truth-referenced sharpness** (compare against the reference's *own* Laplacian, so
-  overshoot counts as error) fixes that — but is still gameable on its own: a tuned sharpener can hit
+  overshoot counts as error) fixes that - but is still gameable on its own: a tuned sharpener can hit
   the right *total* edge energy by putting it in the wrong places.
 - **Use both, plus PSNR/SSIM.** Reconstruction raises fidelity while adding detail; synthesis adds
   detail while lowering it. That difference is the whole question, and only the pair reveals it.
@@ -232,7 +232,7 @@ This runs on live servers, often sharing a GPU with other workloads.
 
 - Restarting Jellyfin kills in-flight transcodes and logs out dashboard sessions. If a user is mid-
   session, ask before restarting.
-- Do not kill ffmpeg processes indiscriminately to clean up tests — you may be ending someone's
+- Do not kill ffmpeg processes indiscriminately to clean up tests - you may be ending someone's
   playback. Stop your own sessions by id.
 - Changing `MaxConcurrent`, `RequireClientOptIn` or `ForceTranscodeForDirectPlay` changes GPU load
   for every viewer, not just yours.
@@ -245,7 +245,7 @@ Measurement is for deciding between options, not for gating delivery.
 ## Shaders and licensing
 
 FSRCNNX is igv's work under **LGPL-3.0-or-later**; Anime4K is bloc97's under **MIT**. Neither is
-vendored — `scripts/install-shaders.sh` fetches them so the licences stay with their authors. Do not
+vendored - `scripts/install-shaders.sh` fetches them so the licences stay with their authors. Do not
 commit them. The CAS shaders in `shaders/` are this project's own.
 
 RCAS is derived at install time from AMD FidelityFX FSR v1.0.2 (MIT, via agyild's mpv port) by
