@@ -1475,7 +1475,19 @@ does), not a context/thread problem at all.
      - VERIFIED: no LD_PRELOAD needed. `nvaivpx.dll` imports only api-ms-win-* and `USER32.dll`;
        libcuda comes through the loader's `dlopen("libcuda.so.1")` + `dlsym`. The interposer was
        only for tracing.
-     - Not attempted: the `vf_aivp_spike` scratch filter.
+   - **2026-09-23, `vf_aivp_spike` scratch filter runs.** rtx-video-re `ffmpeg-spike/` (loader as
+     `libaivp_embed.a` on its own worker thread, hand-written PTX nv12<->RGBA, `copy_count.so`
+     dlsym shim). Scratch ffmpeg 8.1.2 at `/root/rtxv-spike/ff`, production binary untouched.
+     Pipeline: NVDEC -> nv12_to_rgba -> Process on ffmpeg's ctx and stream -> rgba_to_nv12 -> NVENC:
+     - VERIFIED: md5 via `inject=` of `in_001200.rgba`: flags 0 `b3c5094c...`, `AIVP_FLAGS=0x100`
+       `6d9a012a...`, both equal the harness.
+     - VERIFIED: 600-frame 960x540 h264 clip -> 1920x1080 h264_nvenc: 400 fps; 6000 frames 440
+       fps, 15% of one core, max RSS 257.6 MB at both lengths. `-f null`: ~1660 fps; with
+       `hwdownload` forcing completion ~900 fps (faster than the harness's 4.3 ms, unexplained).
+     - VERIFIED: host copies HtoD 333 and DtoH 0 at 600 frames, same as bypass (init only); DtoD
+       2/frame are NVDEC's own surface copy. DLL callbacks per frame: 19 launches, 0 alloc/HtoD.
+     - ASSUMED: stream is ffmpeg's default (NULL); the shim cannot see symbols resolved through
+       `cuGetProcAddress`; `scale_cuda` absent (no nvcc), so no stock baseline.
 
 ## Track C: integration, once a data dir exists
 
