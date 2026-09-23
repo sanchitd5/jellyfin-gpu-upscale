@@ -1495,6 +1495,16 @@ does), not a context/thread problem at all.
        HF 26.8 vs GT 2.28). Floats `+0x4b8..+0x4c4` are never read. Next: why the DLL passes the
        full width (a per-level or per-frame "network region" setting upstream), and why the
        network output is noise when enabled (feature scale/layout into L17).
+     - **2026-09-23, leads from an external design note, untested: see `hints.md`.** Ordered next
+       tests, all host side:
+       (1) **Config selection:** the note selects a config from quality and "fast" (output exactly
+       nscale x input). Every run so far was exact 2x, so possibly a bicubic-only config. Retry at
+       1280x720->1920x1080 and 960x540->2880x1620 per level and watch L17 `+0x498`.
+       (2) **Tunables:** `dlpp_preProcess` argbuf `+0x38`/`+0x3c` = detail/smooth, never set by us.
+       (3) **Zeroed scratch:** `cuMemsetD8` all Process allocations to 0 before forcing split=0,
+       to test whether the noise is uninitialised scratch.
+       Also unresolved: the PSNR script's bilinear baseline read 48.80 dB against 41.66 earlier.
+       Reconcile it before scoring.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
