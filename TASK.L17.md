@@ -67,12 +67,13 @@ finishing before drawing conclusions from partial numbers.
    with `a1=0`; one call passes a small host descriptor (`06 00 04 00 03 00 01 00 07 00 07 00 ...`).
    Never conclusively shown to affect L17, but never fully decoded either.
 
-## Recommendation
+## Status: active (2026-09-23)
 
-Given ten agents and no result within 5 dB of bicubic, treat this as **parked** unless item 1 or 2
-above produces a concrete new lead quickly (say, one more agent round). The working fallback,
-`vsr_drv_cuda` in bypass mode (`AIVP_FLAGS=0x100`, GPU-resident, already beats bicubic), does not
-depend on any of this and can ship independently. See `TASK.md` Track C / the GPU-resident preset.
+The user wants a real neural RTX VSR, not the bypass fallback. Not parked. Continue on items 1 and
+2 above, in that order, since they are the two with a concrete next action rather than a repeat of
+work already done. The bypass fallback (`AIVP_FLAGS=0x100`, GPU-resident, already beats bicubic)
+ships in parallel as the interim path, it does not replace this goal. See `TASK.md` Track C / the
+GPU-resident preset for the bypass path.
 
 ## Access reference (unchanged from TASK.md / lookups)
 
