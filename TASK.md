@@ -1374,6 +1374,35 @@ does), not a context/thread problem at all.
        bilinear done - there is no output to compare. **This is not a capture yet; 1.5 not started.**
      - Next: probe each launch's dst (only for args whose qword 0/1 are device ptrs - blind DtoH on
        pixelFold's non-pointer arg0 segfaulted) to find the first kernel whose output goes to zero.
+   - **2026-09-23, step 1.4 part 2 DONE: first real VSR output frame.** rtx-video-re `75dcd6e`,
+     `AIVP_IO=surf ./pe_map nvaivpx.dll --aivp-process 960,540,1920,1080` (logs `aivp10..13.log`,
+     `io_surf.log`, `io_tex.log`, `sweep*.log` on CT114).
+     - **Root cause: Process's `rdx`/`r8` are CUDA surface (or texture) object handles, not raw
+       device pointers.** Evidence chain: per-launch probes (only args landing inside a recorded
+       alloc) showed preProcess output = `(-1,-1,-1,0)` fp16 at *every* pixel (it read zeros from a
+       raw ptr), and postProcess left a 0x55-poisoned `dout` 100% untouched. Wrapping in/out in
+       array-backed objects (`cuArray3DCreate_v2` RGBA8 + `SURFACE_LDST`, `cuSurfObjectCreate` /
+       `cuTexObjectCreate`): preProcess probe → `[00 bc 00 bc 6e ba 00 00]` = (-1,-1,-0.80) = our
+       R0 G0 B25 pixel; output `8256636/8294400 nonzero`, first px `00 00 19 ff` = input px 0.
+       Surf-in and tex-in (point filter) give byte-identical output.
+     - Candidates ruled out along the way (params only): `+0x08` flags (`0x1`, `0x100`, `0x10000`,
+       `0x1000000`, `0x01010101`) and `+0x38 = 1.0f` → no change with raw ptrs. Slot 3 identity,
+       slot 12 (`0x68`, x2, a3 = small host descriptor `06 00 04 00 03 00 01 00 07 00 ...`, unnamed)
+       and s12-as-stream were NOT needed and remain untested/unnamed.
+     - postProcess args `{DLL buf alloc#337, dst=our handle, 1920x1088, 1920x1080 x2}`; dst = the
+       value we passed (was the raw `dout`, now the surf handle).
+     - **Vs bilinear** (`loader/cmp_vsr.py`, synthetic card: R/G gradients + 16px blue checker):
+       PSNR vs bilinear 32.34 dB, vs nearest 26.45; per-ch MAD vs bilinear 0.78/0.65/0.77. Checker
+       edge row 100 cols 26..37 VSR `229 229 229 229 229 178 76 25 25 25 25 25` vs bilinear `230 ...
+       179 76 25 ...`. So: correct geometry/colour, not garbage, but on this card it is ~bilinear -
+       **no evidence yet that the network adds detail** (the last kernel is literally
+       `..._bilinearAndSRBlockBicubic2`, residual over an upsample; a flat synthetic card may give
+       ~0 residual). Artefact: last column wrong (R at x=1919 = 117, expected ~254).
+     - Assumed, not verified: fmt `0x20` = RGBA8 (colours come out right, so plausible); level 0 is
+       remapped to 4 by `cmove` at `0x18002a2ec`, so "level 0" ran as level 4.
+     - **1.5 can start**: the capture path (19 launches, names, grids, argbufs, weight uploads) is
+       reproducible. Before sweeping: run one real video frame (extract with jellyfin-ffmpeg) and
+       diff vs bilinear, to prove the residual is nonzero on real content; fix the x=1919 column.
 
 ## Track C: integration, once a data dir exists
 
