@@ -1525,6 +1525,11 @@ does), not a context/thread problem at all.
        unchanged), 75/80/89/90/120 make Process fail rc=5 with zero launches.
        Next: dump L16 output as 64-ch fp16 and test channel-permutation hypotheses against the
        4x4 phase pattern of the L17 residual.
+     - **2026-09-23 (L17 agent 6), argbuf tail decoded, not fixed.** L17 `+0x4a8..+0x4b4` are
+       (H, W) pairs: source 544x960 (height padded to 16), output 1088x1920. The kernel never reads
+       `+0x4a8`: overwriting it leaves md5 `25c94c00` unchanged. `+0x4ac` (source width) is read 12
+       times, and any other value drops output to 14-16 dB, so it is live and already correct.
+       Neither field explains the noise. Still next: the L16 channel-permutation test above.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
