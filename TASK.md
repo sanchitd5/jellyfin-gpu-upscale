@@ -1451,6 +1451,13 @@ does), not a context/thread problem at all.
        (`+0x198 +0x3e0 +0x3e8`) and the fp16 bicubic taps; the `4670…01` fields, the tail
        2.0f/0.5f and every zero field set to 1 do nothing. Slot 12 is not yet tested; next
        suspect is kernel-side gating (dynamic smem size s11=0x4080 or a missing launch attribute).
+     - **2026-09-23 (L17 agent 2), narrowed, not fixed.** L17's cubin carved from nvaivpx.dll
+       (sm_80 at file `0x3a0e80`; sm_120 `0x7bc8e0`, sm_75 `0x867370`). Its `.nv.info` gives
+       3 struct params: 584 B at `+0`, 584 B at `+0x248`, 280 B at `+0x490` (total `0x5a8`),
+       64 threads, exits only at text end (`0x1b760`, `0x1b780`), so no early-return gate. Slot 12
+       is called twice per Process with a small host descriptor and returns 0; not decoded.
+       Blocked: no nvdisasm/cuobjdump on CT114 or Mac, so the in-kernel branch that skips the
+       conv path cannot be read without an NVIDIA disassembler.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
