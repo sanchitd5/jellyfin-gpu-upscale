@@ -1552,6 +1552,17 @@ does), not a context/thread problem at all.
        16px border cropped vs 34.70 full frame, so the canonical score is border-dominated.
        Next: find what cancels the bias term (a second bias/offset field, or an output
        offset/scale in the argbuf), not the features. Scripts: CT114 `analysis/n18/e*.py`.
+     - **2026-09-23 (L17 agent 9), argbuf field sweep, no bias-cancelling field, not fixed.**
+       Swept all 301 L17 argbuf dwords not characterised by agents 1..8 (pointers, dims/pitch,
+       split, tile count/magic, tail floats, fp16 taps excluded) with network on (`AIVP_F10=0`),
+       frame 1200, values 0, 1, -1, 0.5f, 1.0f, 2.0f and the launch-16 value via `AIVP_ARGCOPY`:
+       1956 runs, 1754 bit-identical to base (`25c94c00`), 114 no output. Nothing beats
+       bicubic (34.70/32.93). Best: `+0x3a8` (cur 0x40) = 1 gives 29.763/32.424 (base
+       29.141/31.202); on frame 3130 25.934/30.982 (base 25.645/30.023, bicubic 35.341/34.705),
+       md5 `96e71910`. Next best `+0x150`=0 29.480, `+0x290`=L16 value 29.414. All gains are
+       under 1.3 dB of a 5 dB gap, so no argbuf dword cancels the constant term. Ruled out:
+       a single-dword offset/scale fix in L17's argbuf. Scripts: CT114 `analysis/b3/`
+       (`sweep.py`, `sweep_001200.tsv`).
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
