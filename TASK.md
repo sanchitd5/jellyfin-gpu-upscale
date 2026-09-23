@@ -1679,6 +1679,34 @@ does), not a context/thread problem at all.
        `AIVP_ARENA` change from item 3) committed this session, md5-verified Mac/CT114 before commit.
        **Verdict: the neural path is not closer to beating bicubic. Slot 12 was the last unexplored
        host<->DLL interaction point and is now closed out negative.** See TASK.L17.md item 6.
+     - **2026-09-23 (L17 agent 15), two never-tried gaps from agent 14's review, both closed.**
+       Task 1 (agent 14 review point 7, launches 3-15 never dumped): dumped every launch 3-15's
+       output feature map on frame 1200, network on (`AIVP_PROBE`/`AIVP_DUMP`, `AIVP_PROBE_FULL=1`),
+       matched to kernel names via `cuFuncGetName`. All 13 are finite, non-constant, non-saturated
+       (absmax ~1.0-1.04, nonzero fraction 0.81-0.95, mean/std varying stage to stage) - real
+       feature-map data at every stage, not degenerate. **Closes negative: the "L17 ignores good
+       input" framing from agents 1-13 still holds; nothing upstream of L17 is silently broken.**
+       Task 2 (agent 14 review point 5, our own hardcoded `+0x30`/`+0x34` pixel-format fields): added
+       `AIVP_PFIN`/`AIVP_PFOUT` env overrides in `aivp.c` (previously only settable by editing the
+       `g_pfin`/`g_pfout` defaults). Swept both together across 0, 1, 0x2, 0x3, 0x8, 0x1c, 0x20
+       (current default), 0x21, 0x29, 0x36, network on, frame 1200: launch count stays 19 for every
+       value (no kernel-count change, only output changes), and the values collapse into exactly
+       three output buckets, confirming the `0x20`/`0x29`/`0x36 "special"` comment in `aivp.c` is
+       real, observable behavior, not just a guess. `0x29`/`0x36` degrade the image outright (1.48
+       dB, corrupted). **`0x1c` (and its whole non-special bucket) is a real, if modest, gain over
+       our own `0x20` default**: frame 1200 29.171/32.430 RGB/Y vs `0x20`'s 29.141/31.202 (Y +1.23
+       dB); frame 3130 26.372/30.920 vs `0x20`'s 25.645/30.023 (RGB +0.73 dB, Y +0.90 dB) - the same
+       direction on both frames, so it is not a frame-1200-only artifact. Still well short of
+       bicubic (34.699/32.929 and 35.341/34.705). Also confirmed format choice does not gate the
+       network's contribution: `AIVP_F10=0` vs `AIVP_F10=1` still produce different md5s under
+       `AIVP_PFIN/OUT=0x1c`, same as under the default `0x20`, so the format mismatch is not what
+       is silently killing the network path. Loader change (`AIVP_PFIN`/`AIVP_PFOUT` knobs)
+       committed this session, md5-verified Mac/CT114 before commit, baseline output unchanged
+       (`25c94c00...`).
+       **Verdict: neither task moves the neural path past bicubic, but task 2 is a genuine,
+       cross-frame-verified gain over our own hardcoded default - worth adopting as the new
+       default and re-running the L17 argbuf sweeps under it.** See TASK.L17.md review points 5
+       and 7 for the detailed reconciliation.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
      one harness `cuCtxSynchronize` per frame, timed). CT114, 960x540 -> 1920x1080, surf I/O,

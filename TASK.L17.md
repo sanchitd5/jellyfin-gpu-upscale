@@ -172,6 +172,24 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    `g_pfin`/`g_pfout`) across other plausible DXGI/CUDA format codes with network on, the same way
    `+0x10` was swept once someone noticed it was our own scaffolding.
 
+   **2026-09-23 (L17 agent 15), tested.** Added `AIVP_PFIN`/`AIVP_PFOUT` env overrides in `aivp.c`
+   (previously the fields were only settable by editing the `g_pfin`/`g_pfout` C defaults). Swept
+   `0, 1, 0x2, 0x3, 0x8, 0x1c, 0x20 (current default), 0x21, 0x29, 0x36` together on `+0x30`/`+0x34`,
+   network on (`AIVP_F10=0`), frame 1200. Launch count stays 19 for every value (host-side-visible
+   behavior: the DLL branches on the format field without changing which/how many kernels run),
+   and the outputs collapse into exactly three md5 buckets — confirming the `0x20/0x29/0x36
+   special` comment in `aivp.c` really is observable black-box behavior, not a guess. `0x29`/`0x36`
+   corrupt the image outright (1.48 dB). The rest of the tested values (`0, 1, 0x2, 0x3, 0x8, 0x1c,
+   0x21`) share one bucket, and it beats our own `0x20` default: frame 1200 `0x1c` gives
+   29.171/32.430 RGB/Y vs `0x20`'s 29.141/31.202 (Y +1.23 dB); frame 3130 `0x1c` gives
+   26.372/30.920 vs `0x20`'s 25.645/30.023 (RGB +0.73 dB, Y +0.90 dB) — same direction on both
+   frames, not a frame-1200 overfit. Also confirmed with `AIVP_F10=0` vs `1` under `0x1c` that
+   format choice doesn't gate whether the network's contribution matters (md5s still differ,
+   same as under `0x20`). Still well short of bicubic on both frames. **Verdict: real, modest,
+   cross-frame gain from fixing our own hardcoded default — closes this gap positive, though not
+   enough on its own to beat bicubic.** No DLL disassembly was needed or done; the branch was
+   found purely from black-box md5/score differences across the swept values.
+
 6. **Frame/content choice: not a gap, a valid methodology flag.** Both CT114 test frames come
    from one already-decent 1080p library source downscaled to 960x540, then compared against that
    same 1080p as GT. Agent 8 found bicubic itself scores 47.20 dB with a 16px border cropped vs
@@ -208,6 +226,20 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    agent 8's L16 dump and the early per-launch probes already used) and sanity-check each for
    non-degenerate statistics (nonzero fraction, range, not-all-identical), the same bar already
    applied to preProcess/L16/L17/postProcess.
+
+   **2026-09-23 (L17 agent 15), tested.** Dumped every launch 3-15's output buffer with
+   `AIVP_PROBE=1 AIVP_PROBE_FULL=1 AIVP_DUMP=...`, network on, frame 1200, matched to kernel names
+   via `cuFuncGetName` (`all_fuse_with_pooling_fp16_*` at launches 3-5/12/14/16,
+   `conv2d_v4_fp16_*` at 6/9, `hfuse_with_pooling_fp16_*` at 7/10, `upsampling_with_conv2d_fp16_*`
+   at 8/11/13/15). Output-address chaining across consecutive launches (this launch's write
+   address feeding the next launch's read address) identified which of each launch's several
+   pointer args is its own output. All 13 are fully finite (zero NaN/Inf), non-constant (50/50
+   sampled distinct values every time), not saturated (`absmax` 1.004-1.037, consistent with a
+   clamped/tanh-style activation range) and not degenerate (nonzero fraction 0.81-0.95, mean/std
+   vary smoothly stage to stage, e.g. mean drifts from -0.31 at launch 3 to -0.05 at launch 15).
+   **Every stage between preProcess and L16 is real, non-degenerate feature data. Closes this
+   gap negative: nothing upstream of L17 is silently broken; the "L17 ignores good input" framing
+   from agents 1-13 still holds.**
 
 8. **`vf_aivp_spike` ffmpeg-hosting shortcut: confirmed gap — the actual neural-on path was never
    run through the filter.** Every `vf_aivp_spike`/shortcut-assumption verification
