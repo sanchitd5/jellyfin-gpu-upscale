@@ -1505,6 +1505,15 @@ does), not a context/thread problem at all.
        to test whether the noise is uninitialised scratch.
        Also unresolved: the PSNR script's bilinear baseline read 48.80 dB against 41.66 earlier.
        Reconcile it before scoring.
+     - **2026-09-23 (L17 agent 4), split explained, noise narrowed, not fixed.** The split comes from
+       Process params `+0x10`, a float split-screen fraction (split = f x output width). The
+       harness writes 1.0 there, so the network covered nothing. `AIVP_F10=0` runs the full
+       network. That run is still noisy (29.14 dB against 37.47 base). The residual has the right
+       sign (corr 0.33 to 0.43 with GT detail) but is 5-8x too large: scaling it by 0.12 to 0.20
+       gives 37.98 to 38.34 dB. Zeroing L17's feature input changes the output by only 0.37/255,
+       so the network features hardly reach the result. Ruled out: config selection (hint 1),
+       preProcess tunables (2), zeroed scratch (3), linear/normalized texture binding (5).
+       Next: look for a gain or feature-scale field that multiplies the L17 residual.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
