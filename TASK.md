@@ -2239,6 +2239,45 @@ case, run at minimum: one non-16-aligned width (e.g. 854x480), one non-exact-rat
 and check for correctness (no crash, no garbage, output actually looks upscaled), not just
 absence of error.
 
+**Update (2026-09-23), all three concerns tested against the real `dlpp_spike` filter, level 1,
+real network, CT114, Rick and Morty S09E06 (same file as the earlier zero-copy/PSNR run), read-only
+extraction, no library writes:**
+
+1. **Non-exact output ratio: CONFIRMED, no code change needed.** 960x540 -> 1706x960 (scale
+   1.777, not 2x/3x/4x). Ran clean, no crash. `DLPP level 1 960x540 -> 1706x960 (scale 1.777)`
+   logged; dumped frame inspected pixel-by-pixel (finite 0-255, no constant-fill runs beyond what
+   the dark starfield background itself produces, edge column variance matches mid-frame) and
+   viewed as PNG: sharp, no letterbox band, no seam at the right edge. At level 1 we never write
+   the native-scale field (`params+0x38` is level>=3 only, per `dlpp_embed.c`), so the DLL is
+   choosing whatever internal path handles a non-2x ratio entirely on its own -- confirms the
+   working theory (`dlpp_ResampleAndComposeFP16` or equivalent auto-selected) without any filter
+   code change. Level 3/4 non-exact-ratio (where the native-scale field IS written) was not
+   re-tested here; that field is defined for exact integer scales and a non-exact ratio at
+   level>=3 remains untested.
+2. **Non-16-aligned width: CONFIRMED, current allocation is already sufficient.** 854x480 (real
+   480p 16:9, not a multiple of 16) -> 1708x960 (2x, also non-16-aligned). Ran clean, no crash.
+   Edge-pixel check (last 8 columns, last row) showed no padding seam, no black/garbage band;
+   PNG view is sharp with no artifact at the right or bottom edge. `aivp_make_array` allocates a
+   real CUDA array (`cuArray3DCreate`) sized exactly w x h with no pre-padding on our side, and
+   this was enough -- CUDA arrays are not tied to a pitch/alignment requirement the way a raw
+   pitched buffer would be, so the DLL's own internal padding (if any) never had to be visible to
+   us. The "over-allocate + guard region" contingency in this plan was not needed; not implemented,
+   since nothing here called for it.
+3. **Small resolution: CONFIRMED, works cleanly.** Genuine 640x480 (4:3, real 480p, not just a
+   downscaled 16:9 crop) -> 1280x960, level 1. Ran clean, no crash, same edge/corruption checks
+   clean, PNG view sharp and correctly upscaled.
+
+VERIFIED: all three via `-hwaccel cuda -hwaccel_output_format cuda` decode of the real S09E06 file,
+`dlpp_spike` dump_frame captured and inspected both numerically (Python PPM parse: dimensions,
+byte range, edge-column variance, run-length check) and visually (converted to PNG, viewed). No
+Jellyfin disruption: PID 548311 stayed idle throughout, no other ffmpeg processes touched.
+ASSUMED / not reached: level 3/4 at a non-exact ratio; PSNR was not re-measured for these three
+(the brief asked for correctness, not a new quality number, and none of the three dump frames line
+up with the existing `gt_rm6.rgba` reference frame index).
+
+Next step: this clears the three-concern precondition this file called out. Nothing here needs
+further work before the plugin's 5-place checklist as far as arbitrary-resolution correctness goes.
+
 ## Track B: DLPP, `vf_dlpp_spike` ffmpeg integration, network genuinely on (2026-09-23)
 
 **Verdict: works end to end, GPU-resident, with the real network producing output, and the
