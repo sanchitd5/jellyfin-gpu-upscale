@@ -97,13 +97,25 @@ finishing before drawing conclusions from partial numbers.
    NVIDIA Control Panel. No clean ordering found; scores bounce non-monotonically and any local gain
    (e.g. `+0x3a8=3`'s Y-PSNR) fails to transfer to frame 3130. Not a Control-Panel-style lever.
 
-## Status: active (2026-09-23)
+## Status: RETIRED as a neural target (2026-09-23, user decision)
 
-The user wants a real neural RTX VSR, not the bypass fallback. Not parked. Continue on items 1 and
-2 above, in that order, since they are the two with a concrete next action rather than a repeat of
-work already done. The bypass fallback (`AIVP_FLAGS=0x100`, GPU-resident, already beats bicubic)
-ships in parallel as the interim path, it does not replace this goal. See `TASK.md` Track C / the
-GPU-resident preset for the bypass path.
+AIVP's role is now fixed resampler only, not neural. `AIVP_FLAGS=0x100` bypass mode (GPU-resident,
+faster and better than bicubic) is the shipped answer for `vsr_drv_cuda`. Items 1 and 2 above (the
+preProcess-biasing lead, slot 12's descriptor) are NOT to be pursued further as a path to neural
+AIVP output. The L17 bias-term problem stays unsolved and is no longer being chased: sixteen
+agent-rounds searched AIVP's own argument buffer, allocation layout, host callbacks, and pixel
+format with no result that transfers across frames or beats bicubic.
+
+Why this closes cleanly rather than leaving a dangling goal: AIVP's own kernel chain is internally
+named `dlpp_preProcess`/`dlpp_postProcess`/etc, i.e. AIVP is a wrapper around DLPP's network, not a
+separate one. DLPP driven directly (see "Track B: DLPP" in `TASK.md`) turned out to have two of its
+own harness bugs (the same `+0x10` field, plus `+0x38`, the native-scale field) that, once fixed,
+produced a genuine, cross-frame, double-digit-dB gain over bicubic at quality level 1. AIVP's
+wrapper apparently never sets these correctly for whatever internal path it takes, which is
+consistent with everything found here: the wrapper's own bias-term problem was never really about
+AIVP's argument buffer at all, it was upstream of what this file's search space covered, and DLPP's
+direct path goes around it entirely. Real neural super-resolution ships via DLPP, not AIVP.
+See `TASK.md` "Track B: DLPP" for the live work.
 
 ## Review (agent 14, fresh eyes)
 
