@@ -1,0 +1,1474 @@
+From 0db5be95d695cf71ea021fe227703c8ae37c4d0d Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 07 Aug 2026 08:45:43 -0700
+Subject: [PATCH] avfilter/rtx_cuda: clean up comments
+
+
+---
+ libavfilter/rtx_cuda.c             |  57 ++---------
+ libavfilter/rtx_cuda.h             | 104 +++----------------
+ libavfilter/vf_deepdvc_drv_cuda.c  |  28 +-----
+ libavfilter/vf_dlpp_drv_cuda.c     |  31 +-----
+ libavfilter/vf_isr_cuda.c          |  51 +++-------
+ libavfilter/vf_smoothmotion_cuda.c | 198 +++++++++----------------------------
+ libavfilter/vf_truehdr_cuda.c      |  69 ++-----------
+ libavfilter/vf_truehdr_drv_cuda.c  |  76 +++-----------
+ 8 files changed, 112 insertions(+), 502 deletions(-)
+
+diff --git a/libavfilter/rtx_cuda.c b/libavfilter/rtx_cuda.c
+index 43784bd7fc..b77e25f7df 100644
+--- a/libavfilter/rtx_cuda.c
++++ b/libavfilter/rtx_cuda.c
+@@ -36,9 +36,8 @@
+ 
+ #define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, r->hwctx->internal->cuda_dl, x)
+ 
+-/* Arena sub-buffer alignment (>= cuMemAlloc's own guarantee, which the
+- * per-buffer allocations used to rely on) and a trailing guard covering the
+- * tile/halo over-read past the final buffer described in the header. */
++/* Arena sub-buffer alignment (>= cuMemAlloc's own guarantee) and a trailing
++ * guard covering the tile/halo over-read past the final buffer. */
+ #define RTX_ALLOC_ALIGN 512
+ #define RTX_ALLOC_GUARD (1 << 20)
+ 
+@@ -61,11 +60,6 @@ const FFRtxPixFmt *ff_rtx_find_fmt(const FFRtxPixFmt *tbl, int n,
+ 
+ /* ------------------------------------------------------------------------- *
+  * cuSurfObjectCreate/Destroy
+- *
+- * The only pair ffnvcodec's dynlink loader does not export, so it comes
+- * straight out of libcuda -- once per process.  libcuda is already loaded (the
+- * hwcontext holds it) and lives for the process, so this neither dlcloses nor
+- * refcounts.
+  * ------------------------------------------------------------------------- */
+ typedef CUresult (*tcuSurfObjectCreate)(FFCUsurfObject *, const CUDA_RESOURCE_DESC *);
+ typedef CUresult (*tcuSurfObjectDestroy)(FFCUsurfObject);
+@@ -128,9 +122,6 @@ int ff_rtx_config_formats(AVFilterContext *ctx, AVFilterLink *inlink,
+     if (!outpf)
+         return 0;
+ 
+-    /* av_get_pix_fmt() strcmps its argument, so an option cleared to NULL --
+-     * av_opt_set(..., "format", NULL, 0) is legal for a string option -- must
+-     * not reach it. */
+     if (f->out_format && *f->out_format) {
+         fmt = av_get_pix_fmt(f->out_format);
+         if (fmt == AV_PIX_FMT_NONE) {
+@@ -231,8 +222,6 @@ int ff_rtx_arch_gate(AVFilterContext *ctx, FFRtxCuda *r,
+         av_log(ctx, AV_LOG_ERROR, gate->hard_msg, cc_major, cc_minor);
+         return AVERROR(ENOSYS);
+     }
+-    /* Blackwell (cc 12.x) and Ada (cc 8.9) are the two the cubins were verified
+-     * byte-exact on; everything else needs the opt-in. */
+     if (cc_major >= 12 || (cc_major == 8 && cc_minor == 9))
+         return 0;
+     if (!experimental) {
+@@ -274,9 +263,6 @@ int ff_rtx_load_modules(AVFilterContext *ctx, FFRtxCuda *r, const char *dir,
+             av_log(ctx, AV_LOG_ERROR, "cannot read cubin %s\n", path);
+             return ret;
+         }
+-        /* Every cubin is a multi-arch fatbin; cuModuleLoadData picks the image
+-         * for the running GPU, so a failure here means this data dir carries
+-         * none. */
+         ret = CHECK_CU(cu->cuModuleLoadData(&r->mod[mods[i].mid], buf));
+         av_file_unmap(buf, bsz);
+         if (ret < 0) {
+@@ -330,8 +316,6 @@ int ff_rtx_alloc_arena(AVFilterContext *ctx, FFRtxCuda *r, int nalloc,
+     }
+ 
+     fill_sizes(ctx, sz);
+-    /* Lay the arena out in one pass, parking each ordinal's offset in alloc[]
+-     * until there is a base address to add it to. */
+     for (int a = 0; a < nalloc; a++) {
+         r->alloc[a] = total;
+         total += FFALIGN(sz[a] > 0 ? (size_t)sz[a] : 1, RTX_ALLOC_ALIGN);
+@@ -346,9 +330,6 @@ int ff_rtx_alloc_arena(AVFilterContext *ctx, FFRtxCuda *r, int nalloc,
+         r->alloc[a] += r->arena;
+ 
+     if (flags & FF_RTX_ARENA_ZERO) {
+-        /* cuMemAlloc does not zero.  Start from a known-zero arena so any
+-         * scratch a kernel reads before writing is deterministically 0, as in a
+-         * fresh loader process; the weight uploads then fill their buffers. */
+         if ((ret = CHECK_CU(cu->cuMemsetD8Async(r->arena, 0, total, r->stream))) < 0)
+             return ret;
+         if ((ret = CHECK_CU(cu->cuStreamSynchronize(r->stream))) < 0)
+@@ -406,22 +387,19 @@ int ff_rtx_upload_weights(AVFilterContext *ctx, FFRtxCuda *r, const char *dir,
+             ret = AVERROR_INVALIDDATA;
+             break;
+         }
+-        /* Async: a graph carries hundreds of small uploads (dlpp_drv: 525
+-         * averaging 8.8 KiB) and the blocking form pays its round trip on every
+-         * one of them.  The source is the mapping below, which has to stay put
+-         * until the copies land -- hence the synchronize before it is dropped. */
++        /* Async: a graph carries hundreds of small uploads and the blocking form
++         * pays its round trip on every one.  The source is the mapping below,
++         * which has to stay put until the copies land -- hence the synchronize
++         * before it is dropped. */
+         ret = CHECK_CU(cu->cuMemcpyHtoDAsync((CUdeviceptr)up[i].dst,
+                                              weights + up[i].file_off, up[i].size,
+                                              r->stream));
+         if (ret < 0)
+             break;
+-        /* Track how far into the arena the uploads reach, so a later
+-         * ff_rtx_snapshot_arena() only has to preserve that much. */
+         end = (size_t)((CUdeviceptr)up[i].dst + up[i].size - r->arena);
+         if (end > r->arena_uploaded)
+             r->arena_uploaded = end;
+     }
+-    /* The copies read from the mapping, so they must complete before it goes. */
+     if (ret >= 0)
+         ret = CHECK_CU(cu->cuStreamSynchronize(r->stream));
+     else
+@@ -601,16 +579,6 @@ int ff_rtx_find_launch_prefix(const FFRtxCuda *r, const FFRtxFunc *funcs, int nf
+ 
+ /* ------------------------------------------------------------------------- *
+  * Per-frame replay
+- *
+- * None of this synchronizes.  Every op -- the input copy, all the launches, the
+- * output copy -- is issued on the shared device stream (hwctx->stream), and
+- * every consumer runs on it too: a downstream CUDA filter, or hwcontext_cuda's
+- * transfer path, which copies on that same stream and syncs itself.  So stream
+- * issue-order already orders our output before any read of it, and orders the
+- * next producer's reuse of the freed input buffer after our read.  Blocking per
+- * frame would only bound errors to this frame, at the cost of all CPU/GPU
+- * overlap.  This relies on the single-shared-stream contract: a consumer on its
+- * own context/stream would need an event at that boundary.
+  * ------------------------------------------------------------------------- */
+ int ff_rtx_filter_frame(AVFilterLink *inlink, AVFrame *in, FFRtxCuda *r,
+                         const FFRtxFrameOp *op,
+@@ -641,9 +609,6 @@ int ff_rtx_filter_frame(AVFilterLink *inlink, AVFrame *in, FFRtxCuda *r,
+     if (ret < 0)
+         goto fail;
+ 
+-    /* Restore the arena to its post-upload state for a graph that reads scratch
+-     * before writing it: a fresh process gets zeroed pages, a long-running host
+-     * recycles dirty memory. */
+     if (op->flags & FF_RTX_OP_RESET_ARENA) {
+         ret = ff_rtx_reset_arena(ctx, r);
+         if (ret < 0)
+@@ -682,9 +647,6 @@ int ff_rtx_launch(AVFilterContext *ctx, FFRtxCuda *r, int fnid,
+     void *extra[] = { CU_LAUNCH_PARAM_BUFFER_POINTER, params,
+                       CU_LAUNCH_PARAM_BUFFER_SIZE, &psize, CU_LAUNCH_PARAM_END };
+ 
+-    /* The tables are the generator's, but the sizes they are indexed against
+-     * are the caller's -- ISR has to state them by hand, its header carrying no
+-     * MAX_FID -- so an out-of-range id is a bug to report, not to dereference. */
+     if (fnid < 0 || fnid > r->max_fid || !r->fn[fnid]) {
+         av_log(ctx, AV_LOG_ERROR, "launch of unresolved kernel id %d (max %d)\n",
+                fnid, r->max_fid);
+@@ -762,11 +724,8 @@ int ff_rtx_fill_opaque_alpha(AVFilterContext *ctx, FFRtxCuda *r, AVFrame *out,
+ 
+     /* Set just the alpha u16 of each pixel, stride = bpp.  A padded row is
+      * covered by running over the padding too: it is inside the frame
+-     * allocation and nothing reads it (hwframe transfers copy oW*bpp per row),
+-     * so one memset does the whole plane instead of one per row -- which at 4K
+-     * was over two thousand launches on the critical stream.  The pitch comes
+-     * from cuMemAllocPitch and is a multiple of 512, hence of bpp, but fall
+-     * back to the row loop rather than assume it. */
++     * allocation and nothing reads it, so one memset does the whole plane
++     * instead of one per row.  Fall back to the row loop if pitch % bpp != 0. */
+     if (out->linesize[0] % (int)px == 0) {
+         size_t stride_px = (size_t)out->linesize[0] / px;
+         return CHECK_CU(cu->cuMemsetD2D16Async(a0, px, 0xFFFF, 1,
+diff --git a/libavfilter/rtx_cuda.h b/libavfilter/rtx_cuda.h
+index 8acb94a2d5..893c387dfa 100644
+--- a/libavfilter/rtx_cuda.h
++++ b/libavfilter/rtx_cuda.h
+@@ -70,7 +70,6 @@
+ #ifndef CU_AD_FORMAT_UNORM_INT_101010_2
+ #define CU_AD_FORMAT_UNORM_INT_101010_2 ((CUarray_format)0x50)
+ #endif
+-/* cuLaunchKernel packed-argument sentinels. */
+ #ifndef CU_LAUNCH_PARAM_END
+ #define CU_LAUNCH_PARAM_END            ((void*)0x00)
+ #define CU_LAUNCH_PARAM_BUFFER_POINTER ((void*)0x01)
+@@ -138,8 +137,7 @@ typedef struct FFRtxLaunch {
+  * A frame format the graph can be bound to.  @p sel is the kernel's own format
+  * selector where the network has one (VSR/DLPP: 0 = raw 8-bit RGB order,
+  * 1 = raw 8-bit with an R<->B swap, 2 = the format-agnostic tex.f32 read /
+- * sust.p store that packs any UNORM array in its native order); features
+- * without a selector leave it 0, or reuse the field for their own flag.
++ * sust.p store that packs any UNORM array in its native order).
+  */
+ typedef struct FFRtxPixFmt {
+     enum AVPixelFormat f;
+@@ -150,10 +148,7 @@ typedef struct FFRtxPixFmt {
+ 
+ /* The packed-RGB formats the VSR-family networks accept.  The R<->B swap only
+  * exists on the raw 8-bit path, so B-first formats are 8-bit only; higher bit
+- * depths go through the native-order sel-2 path.  A feature whose selector is
+- * not mapped cannot honour sel at all, so it takes only the R-first 8-bit rows
+- * (FF_RTX_N_RGB8_R_FIRST): feeding it a B-first frame would drive the network
+- * with red and blue transposed. */
++ * depths go through the native-order sel-2 path. */
+ extern const FFRtxPixFmt ff_rtx_packed_rgb_fmts[5];
+ #define FF_RTX_N_RGB8_R_FIRST 2
+ 
+@@ -165,8 +160,7 @@ const FFRtxPixFmt *ff_rtx_find_fmt(const FFRtxPixFmt *tbl, int n,
+  * ------------------------------------------------------------------------- */
+ /**
+  * One image the graph binds: a CUDA array or a linear/pitched allocation, with
+- * the bindless texture and/or surface handle over it.  Only the members the
+- * requested binding needs are set; the rest stay zero.
++ * the bindless texture and/or surface handle over it.
+  */
+ typedef struct FFRtxImage {
+     CUarray        arr;    ///< set for array-backed images
+@@ -210,7 +204,6 @@ typedef struct FFRtxCuda {
+     int                  ready;          ///< the graph is built and replayable
+ } FFRtxCuda;
+ 
+-/** The launch at index @p i of a graph built by ff_rtx_alloc_launches(). */
+ static inline FFRtxLaunch *ff_rtx_launch_at(const FFRtxCuda *r, int i)
+ {
+     return (FFRtxLaunch *)((uint8_t *)r->launches + (size_t)i * r->launch_size);
+@@ -236,9 +229,6 @@ void ff_rtx_uninit(AVFilterContext *ctx);
+ /* ------------------------------------------------------------------------- *
+  * Device binding and output plumbing
+  * ------------------------------------------------------------------------- */
+-/**
+- * The formats a filter accepts, for ff_rtx_config_formats().
+- */
+ typedef struct FFRtxFormats {
+     const FFRtxPixFmt *in_tbl;
+     int                n_in;
+@@ -252,24 +242,15 @@ typedef struct FFRtxFormats {
+  * The config_output prologue every filter shares: require a CUDA hwframe input,
+  * look its sw_format up in the input table, and resolve the output format --
+  * the `format` option when set, else the input format -- in the output table.
+- * @p outpf may be NULL for a filter whose output format is its input format.
+  */
+ int ff_rtx_config_formats(AVFilterContext *ctx, AVFilterLink *inlink,
+                           const FFRtxFormats *f,
+                           AVHWFramesContext **in_frames_ctx,
+                           const FFRtxPixFmt **inpf, const FFRtxPixFmt **outpf);
+ 
+-/**
+- * Take a reference on the input frames context's device and cache the CUDA
+- * context and stream.  Must be called before anything else touches @p r.
+- */
+ int ff_rtx_bind_device(AVFilterContext *ctx, FFRtxCuda *r,
+                        AVHWFramesContext *in_frames_ctx);
+ 
+-/**
+- * Set the output link's size and build its CUDA frames context.  Call after
+- * ff_rtx_bind_device() and before ff_rtx_setup().
+- */
+ int ff_rtx_config_hwframes(AVFilterContext *ctx, AVFilterLink *outlink,
+                            FFRtxCuda *r, int oW, int oH,
+                            enum AVPixelFormat sw_format);
+@@ -305,8 +286,6 @@ int ff_rtx_arch_gate(AVFilterContext *ctx, FFRtxCuda *r,
+ /**
+  * Load every cubin named by @p mods out of @p dir and resolve every kernel in
+  * @p funcs, into r->mod[]/r->fn[] sized for @p max_mid / @p max_fid.
+- * @p load_hint, if set, is appended to a module-load failure (which is nearly
+- * always "this data dir has no image for the running GPU").
+  */
+ int ff_rtx_load_modules(AVFilterContext *ctx, FFRtxCuda *r, const char *dir,
+                         const FFRtxModule *mods, int nmod, int max_mid,
+@@ -337,15 +316,8 @@ int ff_rtx_alloc_arena(AVFilterContext *ctx, FFRtxCuda *r, int nalloc,
+ 
+ /**
+  * Arrange for ff_rtx_reset_arena() to restore the arena to its post-upload
+- * state.  For graphs that read scratch before writing it: a fresh process gets
+- * zeroed pages from cuMemAlloc and is byte-exact, but a long-running host
+- * recycles dirty memory, so the arena has to be put back between frames.
+- *
+- * Only the uploaded prefix is snapshotted.  ff_rtx_alloc_arena() zeroed the
+- * whole arena and the uploads then wrote a prefix of it, so everything past the
+- * last uploaded byte is known to be zero -- the reset can memset it instead of
+- * copying it back, which is bit-identical and much cheaper (a device-to-device
+- * copy reads and writes, a memset only writes).  Call after the uploads.
++ * state.  Only the uploaded prefix is snapshotted; everything past it is known
++ * to be zero so reset uses memset instead of copy.  Call after the uploads.
+  */
+ int ff_rtx_snapshot_arena(AVFilterContext *ctx, FFRtxCuda *r);
+ int ff_rtx_reset_arena(AVFilterContext *ctx, FFRtxCuda *r);
+@@ -370,19 +342,6 @@ int ff_rtx_alloc_launches(AVFilterContext *ctx, FFRtxCuda *r,
+ #define FF_RTX_CLAMP (1 << 3)  ///< texture address mode CLAMP (else the default WRAP)
+ #define FF_RTX_ZERO  (1 << 4)  ///< zero the backing store (pitched images only)
+ 
+-/**
+- * Bind a W x H image the graph can read and/or write.  Textures are always
+- * created linear-filtered with normalized coordinates, which is what the
+- * captured graphs sample with.
+- *
+- * ff_rtx_image_array()  -- a CUDA array, the usual input texture / output surface
+- * ff_rtx_image_pitch()  -- pitched linear memory bound as a PITCH2D texture
+- * ff_rtx_image_linear() -- a plain packed buffer, no texture or surface
+- *
+- * The returned pointer is owned by @p r and stays valid until
+- * ff_rtx_free_graph(); NULL means the image could not be created (the reason is
+- * already logged).
+- */
+ FFRtxImage *ff_rtx_image_array(AVFilterContext *ctx, FFRtxCuda *r, int W, int H,
+                                CUarray_format cufmt, unsigned flags);
+ FFRtxImage *ff_rtx_image_pitch(AVFilterContext *ctx, FFRtxCuda *r, int W, int H,
+@@ -392,19 +351,13 @@ FFRtxImage *ff_rtx_image_linear(AVFilterContext *ctx, FFRtxCuda *r,
+ 
+ /**
+  * Bind a texture over pitched memory the caller owns -- an input frame's own
+- * plane, say -- rather than over an image this core allocated.  Same descriptor
+- * as ff_rtx_image_pitch() gives, so a filter that binds both ways samples both
+- * the same; the caller owns the handle and destroys it.
++ * plane, say -- rather than over an image this core allocated.
+  */
+ int ff_rtx_tex_over_pitch(AVFilterContext *ctx, FFRtxCuda *r, CUdeviceptr ptr,
+                           size_t pitch, int W, int H, CUarray_format cufmt,
+                           unsigned flags, CUtexObject *tex);
+ 
+-/**
+- * Index of the first launch running kernel @p name, or -1.  For the features
+- * whose generated config does not yet carry the launch index of a tunable's
+- * kernel the way VSR's sel_launch does.
+- */
++/** Index of the first launch running kernel @p name, or -1. */
+ int ff_rtx_find_launch(const FFRtxCuda *r, const FFRtxFunc *funcs, int nfunc,
+                        const char *name);
+ /** As ff_rtx_find_launch(), matching a kernel-name prefix. */
+@@ -419,10 +372,6 @@ int ff_rtx_find_launch_prefix(const FFRtxCuda *r, const FFRtxFunc *funcs, int nf
+ #define FF_RTX_OP_RESET_ARENA  (1 << 1)  ///< restore the pristine arena before each frame
+ #define FF_RTX_OP_OPAQUE_ALPHA (1 << 2)  ///< force opaque alpha over the output
+ 
+-/**
+- * What one frame through a configured graph consists of.  in_img and out_img
+- * are the same image for a filter that works in place.
+- */
+ typedef struct FFRtxFrameOp {
+     const FFRtxImage *in_img, *out_img;
+     int iW, iH, ibpp;
+@@ -436,8 +385,8 @@ typedef struct FFRtxFrameOp {
+ /**
+  * One whole frame: take the output buffer, copy the input frame's properties,
+  * push the CUDA context, replay the graph over the frame, pop, and forward the
+- * result.  @p retag, if set, adjusts the output frame's properties (the TrueHDR
+- * filters retag SDR input as HDR) before the graph runs.  Consumes @p in.
++ * result.  @p retag, if set, adjusts the output frame's properties before the
++ * graph runs.  Consumes @p in.
+  */
+ int ff_rtx_filter_frame(AVFilterLink *inlink, AVFrame *in, FFRtxCuda *r,
+                         const FFRtxFrameOp *op,
+@@ -450,9 +399,8 @@ int ff_rtx_launch(AVFilterContext *ctx, FFRtxCuda *r, int fnid,
+ 
+ /**
+  * Issue the whole launch list in order.  @p use_psize selects the kernel's own
+- * EIATTR_CBANK_PARAM_SIZE rather than the captured driver argsize -- the driver
+- * over-reports for some DLPP tex/surf kernels, which makes cuLaunchKernel fail
+- * with CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES.
++ * EIATTR_CBANK_PARAM_SIZE rather than the captured driver argsize -- needed for
++ * some DLPP tex/surf kernels that over-report and would otherwise fail.
+  */
+ int ff_rtx_launch_all(AVFilterContext *ctx, FFRtxCuda *r, int use_psize);
+ 
+@@ -465,13 +413,8 @@ int ff_rtx_image_to_frame(AVFilterContext *ctx, FFRtxCuda *r,
+                           int W, int H, int bpp);
+ 
+ /**
+- * Force opaque alpha over @p out.  The resample store kernel
+- * (dlpp_ResampleAndComposeFP16) omits the alpha write in its formatted path --
+- * unlike postProcess, which stores 1.0 -- so >= 10-bit output on the resample
+- * path would come out fully transparent (RGB is correct; verified in SASS, and
+- * the SDK DLL has the same omission).  These networks always produce opaque
+- * output, so this runs for any sel-2 output: it fixes the resample case and is
+- * a harmless no-op on the fast path.
++ * Force opaque alpha over @p out.  The resample store kernel omits the alpha
++ * write in its formatted path so >= 10-bit output would come fully transparent.
+  */
+ int ff_rtx_fill_opaque_alpha(AVFilterContext *ctx, FFRtxCuda *r, AVFrame *out,
+                              int oW, int oH, int bpp);
+@@ -479,30 +422,15 @@ int ff_rtx_fill_opaque_alpha(AVFilterContext *ctx, FFRtxCuda *r, AVFrame *out,
+ /* ------------------------------------------------------------------------- *
+  * Teardown and helpers
+  * ------------------------------------------------------------------------- */
+-/**
+- * Release everything ff_rtx_* built, against the CUDA context it was built on,
+- * and reset @p r so a graph can be built again.  Safe when nothing is
+- * configured.  config_output() may run more than once -- a mid-stream
+- * reconfigure, or a media player rebuilding its filter graph on seek -- so this
+- * must leave no leaked allocation and no stale device pointer baked into a
+- * launch argument block.
+- */
++/** Release everything ff_rtx_* built and reset @p r so a graph can be rebuilt. Safe when nothing is configured. */
+ void ff_rtx_free_graph(AVFilterContext *ctx, FFRtxCuda *r);
+ 
+-/**
+- * Evaluate the `w`/`h` output-size expressions over in_w/iw/in_h/ih.  An unset
+- * or empty expression means @p defscale x the input.
+- */
++/** Evaluate the `w`/`h` output-size expressions over in_w/iw/in_h/ih. An unset or empty expression means @p defscale x the input. */
+ int ff_rtx_eval_dims(AVFilterContext *ctx, AVFilterLink *inlink,
+                      const char *w_expr, const char *h_expr, int defscale,
+                      int *oW, int *oH);
+ 
+-/**
+- * TrueHDR's internal network resolution: shorter side -> 544, longer side
+- * aspect-scaled and quantized to a multiple of 32.  Must bit-match the float32
+- * arithmetic of rtxv.fit.truehdr.nn_dims (verified byte-exact across 28
+- * resolutions).
+- */
++/** TrueHDR's internal network resolution: shorter side -> 544, longer side aspect-scaled and quantized to a multiple of 32. */
+ void ff_rtx_nn_dims(int W, int H, int *NW, int *NH);
+ 
+ #endif /* AVFILTER_RTX_CUDA_H */
+diff --git a/libavfilter/vf_deepdvc_drv_cuda.c b/libavfilter/vf_deepdvc_drv_cuda.c
+index f442f05249..0ec0ec0f44 100644
+--- a/libavfilter/vf_deepdvc_drv_cuda.c
++++ b/libavfilter/vf_deepdvc_drv_cuda.c
+@@ -94,9 +94,6 @@ typedef struct DvcDrvCudaContext {
+ #define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
+ 
+ static const AVOption deepdvc_drv_cuda_options[] = {
+-    /* Both are a final blend strength in applyLUTToSurface.  1.0 = the driver's
+-     * default (byte-exact with the captured graph); 0 = identity/pass-through;
+-     * higher = stronger saturation.  vibrance is the primary control. */
+     { "vibrance", "vibrance strength (0=off/identity, 1=default, higher=stronger)",
+       OFFSET(vibrance), AV_OPT_TYPE_FLOAT, {.dbl=1.0}, 0, 8, FLAGS },
+     { "gain", "secondary saturation gain (1=default)",
+@@ -136,9 +133,6 @@ static const FFRtxArchGate dvcdrv_gate = {
+         "(`rtxv inject`) or module load will fail.\n",
+ };
+ 
+-/* ------------------------------------------------------------------------- *
+- * One-time graph setup for the selected config + W,H (context current).
+- * ------------------------------------------------------------------------- */
+ static void fill_sizes(AVFilterContext *ctx, long long *sz)
+ {
+     DvcDrvCudaContext *s = ctx->priv;
+@@ -173,10 +167,8 @@ static int setup_graph(AVFilterContext *ctx)
+     if (ret < 0)
+         return ret;
+ 
+-    /* Single in-place frame image.  SURFACE_LDST so applyLUTToSurface's SUST
+-     * store is valid; the texture (linear/normalized/wrap, matching the loader)
+-     * feeds both the sample reads and the surface store via one bindless
+-     * handle. */
++    /* In-place: one handle serves as both texture (sample reads) and surface
++     * store (applyLUTToSurface). */
+     s->frame = ff_rtx_image_array(ctx, &s->r, s->W, s->H, s->pf->cufmt,
+                                   FF_RTX_TEX | FF_RTX_LDST);
+     if (!s->frame)
+@@ -184,9 +176,7 @@ static int setup_graph(AVFilterContext *ctx)
+ 
+     if ((ret = ff_rtx_alloc_launches(ctx, &s->r, c->nlaunch, sizeof(DvcGenLaunch))) < 0)
+         return ret;
+-    /* DeepDVC is in-place: both I/O fixups are the one frame texture, so it is
+-     * passed as both the tex and the surf handle.  The casts are only
+-     * `unsigned long long *` vs `uint64_t *` on LP64. */
++    /* In-place: the frame texture is both tex and surf handle. */
+     if (dvcdrv_fill_graph(s->cfg, s->W, s->H, s->W, s->H,
+                           (const dvcdrv_devptr *)s->r.alloc,
+                           (dvcdrv_devptr)s->frame->tex, (dvcdrv_devptr)s->frame->tex,
+@@ -195,9 +185,7 @@ static int setup_graph(AVFilterContext *ctx)
+         return AVERROR_BUG;
+     }
+ 
+-    /* Tunables: patch the two blend floats on applyLUTToSurface (params 0x10/0x14
+-     * -> arg 0x20/0x24).  Default 1.0 == the captured graph (byte-exact); 0 =
+-     * identity/pass-through. */
++    /* Patch blend floats on applyLUTToSurface. */
+     li = ff_rtx_find_launch(&s->r, (const FFRtxFunc *)c->funcs, c->nfunc,
+                             "applyLUTToSurface");
+     if (li < 0) {
+@@ -219,14 +207,9 @@ static int setup_graph(AVFilterContext *ctx)
+     return 0;
+ }
+ 
+-/* ------------------------------------------------------------------------- *
+- * Per-frame: copy the frame into the in-place image, replay the graph, copy out.
+- * ------------------------------------------------------------------------- */
+ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+ {
+     DvcDrvCudaContext *s = inlink->dst->priv;
+-    /* In place: the graph reads and enhances the one frame image.  psize is the
+-     * kernel's own cbank size, NOT the captured argsize. */
+     const FFRtxFrameOp op = {
+         .in_img = s->frame,  .iW = s->W, .iH = s->H, .ibpp = s->pf->bpp,
+         .out_img = s->frame, .oW = s->W, .oH = s->H, .obpp = s->pf->bpp,
+@@ -254,9 +237,6 @@ static int config_output(AVFilterLink *outlink)
+     };
+     int ret;
+ 
+-    /* This can run again on a link reconfigure or a graph rebuild; drop the
+-     * previous graph first so the rebuild neither leaks nor inherits stale
+-     * device pointers. */
+     ff_rtx_free_graph(ctx, &s->r);
+ 
+     if ((ret = ff_rtx_config_formats(ctx, inlink, &fmts, &in_frames_ctx,
+diff --git a/libavfilter/vf_dlpp_drv_cuda.c b/libavfilter/vf_dlpp_drv_cuda.c
+index 9f5e99cf05..c9572389bd 100644
+--- a/libavfilter/vf_dlpp_drv_cuda.c
++++ b/libavfilter/vf_dlpp_drv_cuda.c
+@@ -110,15 +110,8 @@ typedef struct DlppDrvCudaContext {
+ #define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
+ 
+ static const AVOption dlpp_drv_cuda_options[] = {
+-    /* DLPP quality selects the internal SR network (model index via params +0xc).
+-     * q1 -> base model 1; q2 -> deeper model 2 (both do a fixed internal 2x +
+-     * resample for other ratios). q3/q4 -> the high-quality models 5/6, which do
+-     * NATIVE integer upscaling at the `scale` factor (2/3/4) and require output =
+-     * scale x input. Default 1.
+-     *
+-     * The driver's own index 0 selects the same model 1 as index 1, and produces a
+-     * byte-identical graph.  It is not exposed: one model under two numbers only
+-     * invites someone to A/B them and find no difference. */
++    /* Driver index 0 selects the same model as index 1 -- not exposed to avoid
++     * confusion. */
+     { "quality", "DLPP quality (1=base, 2=deeper; 3/4=native-scale high quality)", OFFSET(quality), AV_OPT_TYPE_INT, {.i64=1}, 1, 4, FLAGS },
+     /* Native SR scale for quality 3/4 only (ignored for 1/2): 2/3/4 -> the driver's
+      * pixel_shuffle2/3/4 head (params[0x38]). Exact scale x input output uses the
+@@ -180,9 +173,6 @@ static const FFRtxArchGate dlppdrv_gate = {
+         "sm_80 image, unverified on real hardware.\n",
+ };
+ 
+-/* ------------------------------------------------------------------------- *
+- * One-time graph setup for the selected config + W,H,oW,oH (context current).
+- * ------------------------------------------------------------------------- */
+ static void fill_sizes(AVFilterContext *ctx, long long *sz)
+ {
+     DlppDrvCudaContext *s = ctx->priv;
+@@ -217,8 +207,6 @@ static int setup_graph(AVFilterContext *ctx)
+     if (ret < 0)
+         return ret;
+ 
+-    /* input array + texture (linear/normalized/clamp; the frame is copied in
+-     * each frame), and the output array + surface (the SUST.P target). */
+     s->in_img = ff_rtx_image_array(ctx, &s->r, s->W, s->H, s->inpf->cufmt,
+                                    FF_RTX_TEX | FF_RTX_CLAMP);
+     s->out_img = ff_rtx_image_array(ctx, &s->r, s->oW, s->oH, s->outpf->cufmt,
+@@ -226,11 +214,7 @@ static int setup_graph(AVFilterContext *ctx)
+     if (!s->in_img || !s->out_img)
+         return AVERROR_EXTERNAL;
+ 
+-    /* Build the graph.  dlppdrv_fill_graph() is generated from the same fit as
+-     * the tables above and assigns every field through its named
+-     * dlppdrv_*_params struct, so the argument blocks are constructed rather
+-     * than patched.  The casts are only `unsigned long long *` vs `uint64_t *`
+-     * on LP64. */
++    /* Build the graph. */
+     if ((ret = ff_rtx_alloc_launches(ctx, &s->r, c->nlaunch, sizeof(DlppGenLaunch))) < 0)
+         return ret;
+     if (dlppdrv_fill_graph(s->cfg, s->W, s->H, s->oW, s->oH,
+@@ -241,15 +225,12 @@ static int setup_graph(AVFilterContext *ctx)
+         return AVERROR_BUG;
+     }
+ 
+-    /* Format selectors, on the shared DLPP glue kernels. */
+     if ((ret = ff_dlpp_patch_selectors(ctx, &s->r, funcs, c->nfunc,
+                                        s->inpf, s->outpf, c->tag, &pre)) < 0)
+         return ret;
+     srchead = ff_rtx_find_launch_prefix(&s->r, funcs, c->nfunc, DLPPDRV_SRC_HEAD_KERNEL);
+ 
+-    /* Split-screen comparison wipe (params +0x10 -> SR-head kernel arg @0x498 =
+-     * round(oW*wipe)).  0 (default) leaves the byte-exact-with-the-DLL full-SR
+-     * output; >0 shows the left oW*wipe columns as the bicubic reference. */
++    /* Split-screen comparison wipe. */
+     if (s->wipe > 0) {
+         uint32_t col = (uint32_t)(s->wipe * (float)s->oW + 0.5f);
+         if (srchead < 0) {
+@@ -281,13 +262,9 @@ static int setup_graph(AVFilterContext *ctx)
+     return 0;
+ }
+ 
+-/* ------------------------------------------------------------------------- *
+- * Per-frame: bind the input frame as a texture, replay the graph, copy out.
+- * ------------------------------------------------------------------------- */
+ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+ {
+     DlppDrvCudaContext *s = inlink->dst->priv;
+-    /* psize is the kernel's own cbank size, NOT the captured argsize */
+     const FFRtxFrameOp op = {
+         .in_img = s->in_img,  .iW = s->W,  .iH = s->H,  .ibpp = s->inpf->bpp,
+         .out_img = s->out_img, .oW = s->oW, .oH = s->oH, .obpp = s->outpf->bpp,
+diff --git a/libavfilter/vf_isr_cuda.c b/libavfilter/vf_isr_cuda.c
+index 5aa5458e34..7a49ea619f 100644
+--- a/libavfilter/vf_isr_cuda.c
++++ b/libavfilter/vf_isr_cuda.c
+@@ -80,16 +80,12 @@
+ FF_RTX_ASSERT_MODULE_LAYOUT(IsrModule);
+ FF_RTX_ASSERT_FUNC_LAYOUT(IsrFunc);
+ 
+-/* ISR's module tables index modules and kernels densely from 0, and its graph is
+- * captured rather than fitted, so the generated header carries no MAX_MID/FID. */
++/* Captured graph has no MAX_MID/FID in the generated header; we define them here. */
+ #define ISR_MAX_MID 64
+ #define ISR_MAX_FID 128
+ 
+-/* IsrGenLaunch is the odd one out: no psize (every launch uses the captured
+- * argsize), and three extra fields carrying the per-tile pointer cursor, which
+- * is the one thing that still advances per tile at frame time rather than once
+- * at config time.  So this filter drives ff_rtx_launch() itself instead of
+- * handing the whole list to ff_rtx_launch_all(). */
++/* IsrGenLaunch: no psize (uses captured argsize), plus per-tile pointer cursor
++ * that advances at frame time, so this filter drives ff_rtx_launch() itself. */
+ 
+ typedef struct IsrCudaContext {
+     const AVClass *class;
+@@ -110,9 +106,7 @@ typedef struct IsrCudaContext {
+ #define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
+ 
+ static const AVOption isr_cuda_options[] = {
+-    /* The snippet validates Scale to exactly {2,4,8} (CreateFeature rejects
+-     * anything else with 0xBAD00005) and has no resampling path, so the output is
+-     * always scale x the input -- there is deliberately no w/h expression here. */
++    /* Snippet only accepts {2,4,8} and has no resampling path. */
+     { "scale", "integer upscale factor (2, 4 or 8)", OFFSET(scale),
+       AV_OPT_TYPE_INT, {.i64 = 2}, 2, 8, FLAGS },
+     { "data", "directory with the extracted ISR cubins, fat binaries and weights",
+@@ -125,22 +119,12 @@ AVFILTER_DEFINE_CLASS(isr_cuda);
+ 
+ FF_RTX_ASSERT_PRIV_LAYOUT(IsrCudaContext);
+ 
+-/* The snippet keeps a separate class variant per architecture (sm_75 / _86 /
+- * _89 / _120 / _120 PTX), so a capture only ever yields the capturing GPU's
+- * images.  `rtxv extract isr` lifts the other arches straight out of the DLL --
+- * they are named there, so the correspondence is exact -- and bundles each
+- * kernel as a sm_75+86+89+120 fatbin that cuModuleLoadData picks from.  A data
+- * dir built that way covers Turing through Blackwell; one that was not still
+- * holds bare single-arch cubins, hence this hint. */
++/* Snippet ships per-arch variants; `rtxv extract isr` bundles them as fatbins. */
+ #define ISR_LOAD_HINT \
+     "Re-run `rtxv extract isr <nvngx_dlisr.dll>` and `rtxv install`: the " \
+     "generator bundles the sm_75/86/89/120 images the snippet ships. " \
+     "Newer architectures than sm_120 need a capture on that GPU."
+ 
+-/* ------------------------------------------------------------------------- *
+- * Resolution model -- the same closed forms rtx-video-re's rtxv.gen.isr verifies
+- * against live captures.
+- * ------------------------------------------------------------------------- */
+ static int isr_tiles_axis(int n)
+ {
+     return n <= ISR_TILE ? 1 : 1 + (n - ISR_TILE + ISR_STRIDE - 1) / ISR_STRIDE;
+@@ -180,8 +164,7 @@ static int setup_graph(AVFilterContext *ctx)
+     if ((ret = ff_rtx_alloc_arena(ctx, &s->r, c->nalloc, fill_sizes, 0)) < 0)
+         return ret;
+ 
+-    /* Packed RGBA8 staging: the graph's convert kernels read/write a tightly
+-     * packed buffer, while AVFrame CUDA planes are pitched. */
++    /* Packed RGBA8 staging: convert kernels need tight buffers, not pitched. */
+     s->in_buf  = ff_rtx_image_linear(ctx, &s->r, (size_t)s->W * s->H * 4,
+                                      (size_t)s->W * 4);
+     s->out_buf = ff_rtx_image_linear(ctx, &s->r, (size_t)s->oW * s->oH * 4,
+@@ -189,8 +172,7 @@ static int setup_graph(AVFilterContext *ctx)
+     if (!s->in_buf || !s->out_buf)
+         return AVERROR_EXTERNAL;
+ 
+-    /* Unlike the fitted features, ISR's uploads are a literal table addressed by
+-     * allocation ordinal and byte offset rather than a generated fill. */
++    /* ISR uploads: literal table by allocation ordinal + byte offset. */
+     up = av_calloc(c->nupload, sizeof(*up));
+     if (!up)
+         return AVERROR(ENOMEM);
+@@ -204,11 +186,7 @@ static int setup_graph(AVFilterContext *ctx)
+     if (ret < 0)
+         return ret;
+ 
+-    /* Materialise every launch: template args, scalar patches, pointer fixups.
+-     * isr_fill_graph() is generated from the same capture as the tables above and
+-     * assigns every field through its named isr_*_params struct, so the argument
+-     * blocks are constructed rather than patched by offset.  The casts are only
+-     * `unsigned long long` vs `uint64_t` on LP64. */
++    /* Build the graph: isr_fill_graph() assigns fields through named params structs. */
+     if ((ret = ff_rtx_alloc_launches(ctx, &s->r, c->nlaunch, sizeof(IsrGenLaunch))) < 0)
+         return ret;
+     if (isr_fill_graph(s->cfg, s->W, s->H, s->scale, (const isr_devptr *)s->r.alloc,
+@@ -229,8 +207,7 @@ static int isr_launch(AVFilterContext *ctx, IsrGenLaunch *r, int tile)
+ {
+     IsrCudaContext *s = ctx->priv;
+ 
+-    /* The per-tile launches differ only in where they read from / write to in the
+-     * tile batch, so point the cursor at this tile rather than rebuilding args. */
++    /* Advance per-tile cursor to this tile's batch slot. */
+     if (r->cur_off >= 0) {
+         CUdeviceptr p = r->cur_base + r->cur_stride * tile;
+         memcpy(r->params + r->cur_off, &p, 8);
+@@ -246,19 +223,18 @@ static int isr_run(AVFilterContext *ctx)
+     IsrGenLaunch *rl = s->r.launches;
+     int ret;
+ 
+-    /* whole-image pre-pass: convert to fp16, split into the tile batch */
++    /* Pre-pass: convert to fp16, split into tile batch. */
+     for (int i = 0; i < c->pre_n; i++)
+         if ((ret = isr_launch(ctx, &rl[i], 0)) < 0)
+             return ret;
+ 
+-    /* the network body runs once per tile, in full, before moving to the next --
+-     * every tile reuses the same scratch buffers, so the order matters */
++    /* Network body per tile: tiles reuse scratch buffers, so order matters. */
+     for (int t = 0; t < s->tiles; t++)
+         for (int i = 0; i < c->body_n; i++)
+             if ((ret = isr_launch(ctx, &rl[c->pre_n + i], t)) < 0)
+                 return ret;
+ 
+-    /* whole-image post-pass: stitch the tiles, convert back to RGBA8 */
++    /* Post-pass: stitch tiles, convert back to RGBA8. */
+     for (int i = 0; i < c->post_n; i++)
+         if ((ret = isr_launch(ctx, &rl[c->pre_n + c->body_n + i], 0)) < 0)
+             return ret;
+@@ -268,8 +244,7 @@ static int isr_run(AVFilterContext *ctx)
+ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+ {
+     IsrCudaContext *s = inlink->dst->priv;
+-    /* isr_run() replaces the plain launch list: the per-tile pointer cursor is
+-     * the one thing that still advances at frame time. */
++    /* isr_run() handles per-tile pointer cursor that advances at frame time. */
+     const FFRtxFrameOp op = {
+         .in_img = s->in_buf,   .iW = s->W,  .iH = s->H,  .ibpp = s->pf->bpp,
+         .out_img = s->out_buf, .oW = s->oW, .oH = s->oH, .obpp = s->pf->bpp,
+diff --git a/libavfilter/vf_smoothmotion_cuda.c b/libavfilter/vf_smoothmotion_cuda.c
+index 68d925caaa..3ce8eed6e9 100644
+--- a/libavfilter/vf_smoothmotion_cuda.c
++++ b/libavfilter/vf_smoothmotion_cuda.c
+@@ -67,12 +67,7 @@
+  * weights it names, through pkg-config (see configure's nvfdata_* checks). */
+ #include <smoothmotion_cuda_gen.h>
+ 
+-/* The packed array formats the output surface takes; the rest of what this
+- * filter needs (CU_TRSF_NORMALIZED_COORDINATES, cuSurfObjectCreate) comes from
+- * rtx_cuda.h, which resolves it once per process rather than per instance.
+- * PITCH2D textures only accept the base integer formats (the packed
+- * UNORM_INT*X4 are array-only); UNSIGNED_INT8/16 with normalized coords still
+- * read as [0,1]. */
++/* Packed array formats for output surface. PITCH2D textures only accept base integer types. */
+ #ifndef CU_AD_FORMAT_UNORM_INT8X4
+ #define CU_AD_FORMAT_UNORM_INT8X4 ((CUarray_format)0xc2)
+ #endif
+@@ -85,18 +80,14 @@
+ 
+ #define SM_CH 4
+ 
+-/* One module id past the per-kernel fatbins, for the conversion PTX this filter
+- * carries itself: parking it in the shared module table means ff_rtx_free_graph()
+- * unloads it with the rest. */
++/* Conversion PTX slot past fatbins; unloaded with the graph by ff_rtx_free_graph(). */
+ #define SM_CVT_MID SM_NLAUNCH
+ 
+ typedef struct SmoothMotionContext {
+     const AVClass *class;
+ 
+-    /* The shared core owns the device reference, the module table, the arena the
+-     * scratch buffers are cut from and every image below, and releases the lot in
+-     * ff_rtx_free_graph().  What stays here is what this filter does differently:
+-     * a launch list refilled per frame, and its own format conversion. */
++    /* Core owns device/modules/arena/images (freed by ff_rtx_free_graph).
++     * This filter owns per-frame launches and format conversion. */
+     FFRtxCuda   r;
+ 
+     int W, H;                           ///< frame size the graph is built for
+@@ -105,15 +96,10 @@ typedef struct SmoothMotionContext {
+     SMGenLaunch gen[SM_NLAUNCH];
+     unsigned long long sb[4];
+ 
+-    /* Inputs are bound as bindless textures DIRECTLY over pitched device memory
+-     * (CU_RESOURCE_TYPE_PITCH2D), like vf_bwdif_cuda - no input CUDA arrays/copies.
+-     * The warp textures (t_in*) carry the renderable data (RGBA, or packed Y,U,V);
+-     * the flow textures (t_fl*) carry what the downscale/optical-flow backbone reads
+-     * (== warp textures for RGB, or luma-grey Y,Y,Y for YUV).  The OUTPUT must stay
+-     * a CUDA array: the warp writes it via SUST.P and cuSurfObjectCreate requires
+-     * an array.  For RGB the input textures are (re)bound per-frame over the source
+-     * frames -- the only handles this filter owns rather than the core; for YUV
+-     * they are the pack buffers' own persistent textures. */
++    /* Inputs: PITCH2D textures over pitched memory (no arrays/copies). Warp textures
++     * carry renderable data; flow textures are warp aliases for RGB, luma-grey for YUV.
++     * Output must be a CUDA array (SUST.P). RGB input textures rebound per-frame;
++     * YUV uses persistent pack buffer textures. */
+     FFRtxImage  *out_img;               ///< network output: array + surface
+     FFRtxImage  *warp0, *warp1;         ///< packed input buffers + their textures
+     FFRtxImage  *flow0, *flow1;         ///< luma-grey flow buffers + textures (YUV)
+@@ -157,34 +143,17 @@ typedef struct SmoothMotionContext {
+ #define V AV_OPT_FLAG_VIDEO_PARAM
+ #define F AV_OPT_FLAG_FILTERING_PARAM
+ 
+-/* `data` defaults to SM_DEFAULT_DATA_DIR, which the generated header states --
+- * the same <FEAT>_DEFAULT_DATA_DIR the other filters' headers here carry.  It
+- * names wherever the extraction tool wrote the files it fitted this table
+- * alongside, so the table and the kernels can never silently mismatch.  This
+- * file used to rebuild that path itself, from a hardcoded workspace root plus
+- * the driver version, which could only be right on one machine.  There is
+- * deliberately no fallback: a header lacking the define predates it, and
+- * building against it is the very mismatch the define prevents, so it fails
+- * here rather than at load time.
+- *
+- * The layout under it is this feature's own -- the per-kernel fatbins live in a
+- * fatbins/ subdirectory rather than loose beside weights.bin as the other
+- * features' cubins do -- but that is the data dir's business, not the caller's,
+- * so it is derived here and there is one `data` option like everywhere else. */
++/* Data layout: fatbins in subdirectory, weights.bin alongside. No fallback path. */
+ #define SM_FATBIN_SUBDIR "fatbins"
+ #define SM_WEIGHTS_FILE  "weights.bin"
+ 
+ static const AVOption smoothmotion_cuda_options[] = {
+-    /* The network only synthesises the t=0.5 midpoint, so the output rate is
+-     * always exactly 2x the input - there is no target-rate option. */
++    /* Network emits t=0.5 midpoint only; output is always 2x input rate. */
+     { "interp_start", "point to start interpolation",             OFFSET(interp_start),         AV_OPT_TYPE_INT,    {.i64=15},    0, 255, V|F },
+     { "interp_end",   "point to end interpolation",               OFFSET(interp_end),           AV_OPT_TYPE_INT,    {.i64=240},   0, 255, V|F },
+     { "data",         "directory with the extracted Smooth Motion kernel fatbins + " SM_WEIGHTS_FILE,
+                                                                   OFFSET(data_dir),             AV_OPT_TYPE_STRING, {.str=SM_DEFAULT_DATA_DIR}, 0, 0, V|F },
+-    /* Emit the network's native packed buffer instead of de-interleaving it:
+-     * RGB/x2rgb10 -> rgba64 (a plain copy, no repack), YUV -> packed 4:4:4
+-     * (VUYX 8-bit / XV48LE 16-bit).  Lets a packed-format consumer skip a
+-     * redundant unpack+repack round-trip. */
++    /* Emit native packed buffer (rgba64 for RGB/x2rgb10, VUYX/XV48LE for YUV). */
+     { "packed",       "emit the network's packed output directly", OFFSET(packed),              AV_OPT_TYPE_BOOL,   {.i64=0},     0, 1,   V|F },
+     { NULL }
+ };
+@@ -193,11 +162,7 @@ AVFILTER_DEFINE_CLASS(smoothmotion_cuda);
+ 
+ FF_RTX_ASSERT_PRIV_LAYOUT(SmoothMotionContext);
+ 
+-/* ------------------------------------------------------------------------- *
+- * Kernel loading (table-driven, modules deduplicated by name)
+- * ------------------------------------------------------------------------- */
+-/* Every fatbin the driver ships carries every architecture it supports, so a
+- * module that will not load means this data dir was built without them. */
++/* Kernel loading: table-driven, modules deduplicated by name. */
+ #define SM_LOAD_HINT \
+     "Re-run `rtxv extract smoothmotion <libnvidia-present.so>` and " \
+     "`rtxv install`: the kernels are carved out of the driver as whole " \
+@@ -213,9 +178,7 @@ static int load_kernels(AVFilterContext *ctx)
+     char        dir[1024];
+     int         nmod = 0;
+ 
+-    /* One multi-arch fatbin per kernel, deduplicated by name -- several launches
+-     * run the same kernel.  The driver picks the cubin matching the device's arch
+-     * (cuModuleLoadData accepts a fatbin image). */
++    /* One multi-arch fatbin per kernel, deduplicated by name. */
+     for (int i = 0; i < SM_NLAUNCH; i++) {
+         const char *name = sm_kernel_names[i];
+         int m;
+@@ -244,18 +207,14 @@ static int load_kernels(AVFilterContext *ctx)
+ static int format_is_planar444_16(enum AVPixelFormat fmt);
+ static int format_is_packed_yuv(enum AVPixelFormat fmt);
+ 
+-/* The element format the input textures read: PITCH2D takes only the base
+- * integer types, and UNSIGNED_INT8/16 with normalized coords still read as
+- * [0,1], matching the array path byte for byte. */
++/* PITCH2D accepts only base integer types; normalized coords read as [0,1]. */
+ static CUarray_format sm_tex_format(const SmoothMotionContext *s)
+ {
+     return s->elem_bytes == 8 ? CU_AD_FORMAT_UNSIGNED_INT16
+                               : CU_AD_FORMAT_UNSIGNED_INT8;
+ }
+ 
+-/* Bind a texture over a source frame's own memory (the straight-through RGB
+- * path, which the network reads without a pack pass).  Rebound per frame, so
+- * unlike every other handle here it is this filter's to destroy. */
++/* Bind texture over source frame memory (RGB path). Rebound per-frame; destroyed by this filter. */
+ static int make_input_tex(AVFilterContext *ctx, CUdeviceptr ptr, size_t pitch,
+                           CUtexObject *tex)
+ {
+@@ -265,12 +224,7 @@ static int make_input_tex(AVFilterContext *ctx, CUdeviceptr ptr, size_t pitch,
+                                  sm_tex_format(s), FF_RTX_CLAMP, tex);
+ }
+ 
+-/* ------------------------------------------------------------------------- *
+- * Allocate scratch + weights, generate the graph for WxH, build I/O objects.
+- * Must be called with the CUDA context current.
+- * ------------------------------------------------------------------------- */
+-/* The four scratch buffers the generated graph works over, order {W,sA,sB,sC};
+- * the weights land in the first. */
++/* Four scratch buffers {W,sA,sB,sC}; weights land in W buffer. */
+ static void fill_sizes(AVFilterContext *ctx, long long *sz)
+ {
+     SmoothMotionContext *s = ctx->priv;
+@@ -281,7 +235,7 @@ static void fill_sizes(AVFilterContext *ctx, long long *sz)
+         sz[a] = (long long)v[a];
+ }
+ 
+-/* The pack/unpack kernel pair for the input format, out of the conversion PTX. */
++/* Pack/unpack kernels from conversion PTX. */
+ static int setup_convert_kernels(AVFilterContext *ctx)
+ {
+     extern const unsigned char ff_vf_smoothmotion_cuda_ptx_data[];
+@@ -291,9 +245,7 @@ static int setup_convert_kernels(AVFilterContext *ctx)
+     const char *packfn, *unpackfn;
+     int ret;
+ 
+-    /* packed RGB (x2rgb10) unpacks to RGBA16 and repacks (no chroma, and no
+-     * separate luma-grey flow buffer since the net derives luma internally);
+-     * YUV packs to (Y,U,V) + luma-grey flow and de-interleaves to planar. */
++    /* packed RGB: unpacks to RGBA16, repacks on output; YUV: packs to (Y,U,V) + luma-grey flow. */
+     if (s->is_packed_rgb) {
+         packfn   = s->format == AV_PIX_FMT_X2BGR10LE ? "Pack_x2bgr10" : "Pack_x2rgb10";
+         unpackfn = s->format == AV_PIX_FMT_X2BGR10LE ? "Unpack_x2bgr10" : "Unpack_x2rgb10";
+@@ -315,14 +267,11 @@ static int setup_convert_kernels(AVFilterContext *ctx)
+                    s->format == AV_PIX_FMT_P212 ||
+                    s->format == AV_PIX_FMT_P216    ? "Pack_p216" :
+                                                      "Pack_p016";   /* P010/P016 */
+-        /* The warp buffer is already interleaved in VUYX / XV48LE order, so
+-         * `packed` output is a direct copy (no unpack kernel); only the planar
+-         * path needs to de-interleave. */
++    /* VUYX/XV48LE warp buffer is already in output order; `packed` copies directly. */
+         unpackfn = s->elem_bytes == 8 ? "Unpack_yuv444p16" : "Unpack_yuv444p";
+     }
+ 
+-    /* Loaded into the module table's reserved slot so it is unloaded with the
+-     * fatbins rather than needing a teardown of its own. */
++    /* Loaded into reserved slot; unloaded with graph by ff_rtx_free_graph(). */
+     ret = ff_cuda_load_module(ctx, s->r.hwctx, &s->r.mod[SM_CVT_MID],
+                               ff_vf_smoothmotion_cuda_ptx_data,
+                               ff_vf_smoothmotion_cuda_ptx_len);
+@@ -345,18 +294,14 @@ static int setup_graph(AVFilterContext *ctx)
+     if ((ret = load_kernels(ctx)) < 0)
+         return ret;
+ 
+-    /* One contiguous arena for the four scratch buffers, zeroed so any scratch a
+-     * kernel reads before writing is deterministically 0.  Contiguity is the
+-     * shared core's guarantee against a tile/halo read past a buffer's end
+-     * landing in an unmapped hole once the heap fragments. */
++    /* Contiguous zeroed arena: contiguity prevents tile/halo reads crossing into unmapped holes. */
+     if ((ret = ff_rtx_alloc_arena(ctx, &s->r, 4, fill_sizes, FF_RTX_ARENA_ZERO)) < 0)
+         return ret;
+     for (int a = 0; a < 4; a++)
+         s->sb[a] = (unsigned long long)s->r.alloc[a];
+-    /* the param graph (s->gen) is filled per-frame in interpolate_frame, once the
+-     * tex/surf handles for the current frames exist (see sm_fill_params + SMHandles) */
++    /* Graph filled per-frame in interpolate_frame once tex/surf handles exist. */
+ 
+-    /* weights -> sb[0] (the W buffer), which is sized for exactly them */
++    /* Weights -> sb[0] (W buffer), sized for exactly them. */
+     fill_sizes(ctx, sz);
+     up.file_off = 0;
+     up.size     = sz[0];
+@@ -365,9 +310,7 @@ static int setup_graph(AVFilterContext *ctx)
+                                      &up, 1)) < 0)
+         return ret;
+ 
+-    /* OUTPUT array + surface: the warp writes via SUST.P, and cuSurfObjectCreate
+-     * requires a CUDA array (no pitch2d/linear surfaces).  Packed UNORM_INT8X4/16X4
+-     * makes the (unused) texture path return [0,1]; SURFACE_LDST enables SUST.P. */
++    /* Output array + surface: warp writes via SUST.P; cuSurfObjectCreate needs an array. */
+     s->out_img = ff_rtx_image_array(ctx, &s->r, s->W, s->H,
+                                     s->elem_bytes == 8 ? CU_AD_FORMAT_UNORM_INT16X4
+                                                        : CU_AD_FORMAT_UNORM_INT8X4,
+@@ -375,10 +318,7 @@ static int setup_graph(AVFilterContext *ctx)
+     if (!s->out_img)
+         return AVERROR_EXTERNAL;
+ 
+-    /* YUV and packed RGB: the pack/unpack kernels plus the persistent buffers
+-     * both frames are packed into, each carrying its own input texture.  (The
+-     * straight-through RGB path binds its textures per frame over the source
+-     * frames instead, in interpolate_frame.) */
++    /* YUV/packed-RGB: persistent pack buffers + input textures. RGB path binds per-frame. */
+     if (s->is_yuv || s->is_packed_rgb) {
+         const CUarray_format tf = sm_tex_format(s);
+         const unsigned tex = FF_RTX_TEX | FF_RTX_CLAMP;
+@@ -412,10 +352,7 @@ static int setup_graph(AVFilterContext *ctx)
+            "(arena %.1f MiB)\n", s->W, s->H, (double)s->r.arena_size / (1 << 20));
+     return 0;
+ }
+-/* ------------------------------------------------------------------------- *
+- * Interpolation: replay the generated 25-launch graph.
+- * ------------------------------------------------------------------------- */
+-/* array->device (output CUDA array -> linear packed buffer for unpack) */
++/* Copy output array to linear packed buffer. */
+ static int copy_array_to_lin(AVFilterContext *ctx, CUarray src, const FFRtxImage *dst)
+ {
+     SmoothMotionContext *s = ctx->priv;
+@@ -427,8 +364,7 @@ static int copy_array_to_lin(AVFilterContext *ctx, CUarray src, const FFRtxImage
+     return CHECK_CU(cu->cuMemcpy2DAsync(&c, s->r.stream));
+ }
+ 
+-/* pack a YUV source frame into the packed warp buffer (Y,U,V,255) and, if flow
+- * != 0, the luma-grey flow buffer (Y,Y,Y,255), upsampling 4:2:0 chroma. */
++/* Pack YUV frame into warp + optional luma-grey flow buffers. */
+ static int launch_pack(AVFilterContext *ctx, AVFrame *src,
+                        const FFRtxImage *warp_img, const FFRtxImage *flow_img)
+ {
+@@ -476,7 +412,7 @@ static int launch_pack(AVFilterContext *ctx, AVFrame *src,
+                                        0, s->r.stream, args, NULL));
+ }
+ 
+-/* de-interleave the linear packed buffer into a planar YUV444P frame */
++/* De-interleave packed buffer to planar YUV444P. */
+ static int launch_unpack(AVFilterContext *ctx, const FFRtxImage *src_img, AVFrame *dst)
+ {
+     SmoothMotionContext *s = ctx->priv;
+@@ -501,8 +437,7 @@ static int launch_unpack(AVFilterContext *ctx, const FFRtxImage *src_img, AVFram
+                                        0, s->r.stream, args, NULL));
+ }
+ 
+-/* Emit a source frame through the output hwframe pool (device->device copy) so
+- * every frame leaving the filter shares one hwframe context. */
++/* Passthrough: device->device copy to unify hwframe context. */
+ static int passthrough_frame(AVFilterContext *ctx, AVFrame *src)
+ {
+     SmoothMotionContext *s = ctx->priv;
+@@ -524,17 +459,12 @@ static int passthrough_frame(AVFilterContext *ctx, AVFrame *src)
+             return ret;
+         if ((ret = launch_unpack(ctx, s->warp0, s->work)) < 0)
+             return ret;
+-        /* No sync: the unpack into s->work is stream-ordered w.r.t. any
+-         * same-stream downstream consumer, and nothing here depends on the
+-         * host observing completion (matches every other CUDA filter). */
++        /* Stream-ordered; no sync needed. */
+         return 0;
+     }
+ 
+     if (s->packed && (s->is_yuv || s->is_packed_rgb)) {
+-        /* packed output: the pack kernel already writes the warp buffer in the
+-         * output frame's byte order (VUYX / XV48LE for YUV, RGBA16 for x2rgb10),
+-         * so run it into scratch and copy that out - no network, no repack.
+-         * lin_warp0 is free here (no interpolation). */
++        /* Packed output: pack kernel writes in output byte order; copy directly. */
+         if ((ret = launch_pack(ctx, src, s->warp0, NULL)) < 0)
+             return ret;
+         c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+@@ -554,12 +484,9 @@ static int passthrough_frame(AVFilterContext *ctx, AVFrame *src)
+     c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+     c.dstDevice = (CUdeviceptr)s->work->data[0];
+     c.dstPitch = s->work->linesize[0];
+-    /* straight-through copy (RGB, rgba64, or x2rgb10 -> x2rgb10): frame_bytes is
+-     * the true per-pixel size (4 for x2rgb10; elem_bytes is its internal 8). */
++    /* frame_bytes is the true per-pixel size (4 for x2rgb10; elem_bytes is internal 8). */
+     c.WidthInBytes = s->W * s->frame_bytes;
+     c.Height = s->H;
+-    /* device->device async copy on the stream; no host-side sync needed - the
+-     * result is ordered for any same-stream consumer downstream. */
+     return CHECK_CU(cu->cuMemcpy2DAsync(&c, s->r.stream));
+ }
+ 
+@@ -576,14 +503,11 @@ static int interpolate_frame(AVFilterContext *ctx, int64_t work_pts)
+     av_frame_copy_props(s->work, s->f0);
+ 
+     if (s->is_yuv || s->is_packed_rgb) {
+-        /* pack both frames into their persistent warp (+ luma-grey flow, YUV
+-         * only) buffers; the input textures are already bound over these
+-         * (setup_graph).  For packed RGB lin_flow* is unallocated (0) and ignored. */
++        /* Pack frames into persistent buffers; textures already bound. */
+         if ((ret = launch_pack(ctx, s->f0, s->warp0, s->flow0)) < 0) return ret;
+         if ((ret = launch_pack(ctx, s->f1, s->warp1, s->flow1)) < 0) return ret;
+     } else {
+-        /* RGB: bind input textures directly over the source frames (no copy).
+-         * downscale reads the same RGB textures as the warp (t_fl* == t_in*). */
++        /* RGB: bind textures over source frames directly (no copy). */
+         if ((ret = make_input_tex(ctx, (CUdeviceptr)s->f0->data[0],
+                                   s->f0->linesize[0], &s->t_in0)) < 0) return ret;
+         if ((ret = make_input_tex(ctx, (CUdeviceptr)s->f1->data[0],
+@@ -592,9 +516,7 @@ static int interpolate_frame(AVFilterContext *ctx, int64_t work_pts)
+         s->t_fl1 = s->t_in1;
+     }
+ 
+-    /* fill the graph with the current frames' tex/surf handles; sm_fill_params writes
+-     * them into in_tex0/in_tex1/out_surf, so no by-offset patching here.  The flow
+-     * (downscale) path uses the luma textures for YUV, == the warp textures for RGB. */
++    /* Fill graph with current frames' handles; sm_fill_params writes by field name. */
+     SMHandles h = {
+         .flow_tex = { s->t_fl0, s->t_fl1 },
+         .warp_tex = { s->t_in0, s->t_in1 },
+@@ -614,10 +536,9 @@ static int interpolate_frame(AVFilterContext *ctx, int64_t work_pts)
+             return ret;
+     }
+ 
+-    /* copy the warp output array back into the work frame */
++    /* Copy warp output to work frame. */
+     if (!s->direct_out) {
+-        /* packed array -> linear -> planar YUV444P, packed 4:4:4, or repacked
+-         * x2rgb10 (whichever fn_unpack selects) */
++        /* Array -> linear -> planar YUV444P / packed 4:4:4 / repacked x2rgb10. */
+         if ((ret = copy_array_to_lin(ctx, s->out_img->arr, s->unpack_buf)) < 0)
+             return ret;
+         if ((ret = launch_unpack(ctx, s->unpack_buf, s->work)) < 0)
+@@ -635,13 +556,7 @@ static int interpolate_frame(AVFilterContext *ctx, int64_t work_pts)
+             return ret;
+     }
+ 
+-    /* RGB input textures are bound per-frame over the source frames; release them
+-     * now that the launches have completed (YUV textures are persistent).  This
+-     * is the only sync the filter needs: cuTexObjectDestroy is a host call with
+-     * no stream ordering, so the downscale/warp launches that read these textures
+-     * must be drained first.  The YUV and packed-RGB paths have persistent
+-     * textures (no per-frame destroy) and are fully stream-ordered downstream,
+-     * so they return without blocking. */
++    /* RGB: sync then destroy per-frame input textures (YUV has persistent textures). */
+     if (!s->is_yuv && !s->is_packed_rgb) {
+         ret = CHECK_CU(cu->cuStreamSynchronize(s->r.stream));
+         if (s->t_in0) CHECK_CU(cu->cuTexObjectDestroy(s->t_in0));
+@@ -651,7 +566,7 @@ static int interpolate_frame(AVFilterContext *ctx, int64_t work_pts)
+     return ret;
+ }
+ 
+-/* cadence: choose / synthesize the next output frame (from vf_nvoffruc) */
++/* Cadence: choose or synthesize next output frame. */
+ static int process_work_frame(AVFilterContext *ctx)
+ {
+     SmoothMotionContext *s = ctx->priv;
+@@ -706,11 +621,7 @@ static av_cold int init(AVFilterContext *ctx)
+     return 0;
+ }
+ 
+-/* Drop the graph.  ff_rtx_free_graph() releases everything the core allocated --
+- * the modules, the arena, every image and the device reference -- against the
+- * context it was built on; what is left here is the handles this filter owns
+- * itself, which alias core-owned textures on the YUV path and so must be
+- * dropped rather than destroyed. */
++/* Drop graph: core releases modules/arena/images/device; we null our own handles. */
+ static void free_graph(AVFilterContext *ctx)
+ {
+     SmoothMotionContext *s = ctx->priv;
+@@ -913,9 +824,7 @@ retry:
+         goto exit;
+     }
+ 
+-    /* FF_FILTER_FORWARD_WANTED expanded: the macro returns 0 directly, which
+-     * would skip the pop below and leave our context on the thread's stack -- on
+-     * the most-taken path through activate(), so it would grow once per frame. */
++    /* Must not return early without popping: leaves CUDA context on thread stack. */
+     if (ff_outlink_frame_wanted(outlink)) {
+         ff_inlink_request_frame(inlink);
+         ret = 0;
+@@ -948,10 +857,7 @@ static int config_output(AVFilterLink *outlink)
+     enum AVPixelFormat out_format;
+     int exact, ret;
+ 
+-    /* This can run again on a link reconfigure or a graph rebuild; drop the
+-     * previous graph first so the rebuild neither leaks nor inherits stale
+-     * device pointers, and drop the buffered source frames with it -- they are
+-     * sized for the old configuration. */
++    /* Reconfigure: drop previous graph + buffered frames (sized for old config). */
+     free_graph(ctx);
+     av_frame_free(&s->f0);
+     av_frame_free(&s->f1);
+@@ -990,20 +896,13 @@ static int config_output(AVFilterLink *outlink)
+     }
+     s->is_yuv = format_is_yuv(s->format);
+     s->is_packed_rgb = format_is_packed_rgb(s->format);
+-    /* 8 bytes/pixel for any 16-bit 4-channel INTERNAL path: the 16-bit YUV
+-     * formats (routed through format_is_16bit), packed 16-bit RGBA (rgba64), and
+-     * x2rgb10 (unpacked to RGBA16).  rgba64/x2rgb10 are RGB not YUV, so they are
+-     * kept out of format_is_16bit/format_is_yuv. */
++    /* elem_bytes: internal packed pixel size (4 or 8). */
+     s->elem_bytes = (format_is_16bit(s->format) ||
+                      s->format == AV_PIX_FMT_RGBA64 ||
+                      s->is_packed_rgb) ? 2 * SM_CH : SM_CH;
+-    /* bytes per pixel of the actual frame; differs from elem_bytes only for
+-     * x2rgb10 (a 32-bit packed word that unpacks to 8-byte RGBA16 internally). */
++    /* frame_bytes: actual per-pixel size (x2rgb10 is 4, elem_bytes is 8). */
+     s->frame_bytes = s->is_packed_rgb ? 4 : s->elem_bytes;
+-    /* output is a plain array->frame copy (no de-interleave kernel) for the
+-     * straight-through RGB formats, and for every `packed` request: the network
+-     * already writes VUYX / XV48LE (YUV) or RGBA16 (x2rgb10) in the output
+-     * frame's byte order, so nothing needs reshuffling. */
++    /* direct_out: plain array->frame copy (RGB or `packed` output). */
+     s->direct_out = (!s->is_yuv && !s->is_packed_rgb) || s->packed;
+     s->W = inlink->w;
+     s->H = inlink->h;
+@@ -1014,12 +913,7 @@ static int config_output(AVFilterLink *outlink)
+     if ((ret = ff_rtx_bind_device(ctx, &s->r, in_frames_ctx)) < 0)
+         return ret;
+ 
+-    /* YUV inputs are emitted as planar 4:4:4 (no output-side chroma downsample);
+-     * the network produces packed 4:4:4 and we de-interleave it.  16-bit inputs
+-     * (P010/P016) keep full precision via YUV444P16.  With `packed`, the network
+-     * buffer is emitted directly: packed 4:4:4 (VUYX / XV48LE) for YUV, and the
+-     * native RGBA16 (rgba64) for x2rgb10/x2bgr10.  The size is unchanged: this
+-     * filter interpolates in time, not space. */
++    /* YUV -> planar 4:4:4 output; `packed` emits network buffer directly. Size unchanged. */
+     if (s->is_yuv)
+         out_format = s->packed ?
+             (s->elem_bytes == 8 ? AV_PIX_FMT_XV48LE : AV_PIX_FMT_VUYX) :
+diff --git a/libavfilter/vf_truehdr_cuda.c b/libavfilter/vf_truehdr_cuda.c
+index 6b1b9acee5..b3e017823d 100644
+--- a/libavfilter/vf_truehdr_cuda.c
++++ b/libavfilter/vf_truehdr_cuda.c
+@@ -83,11 +83,7 @@ FF_RTX_ASSERT_FUNC_LAYOUT(ThdrFunc);
+ FF_RTX_ASSERT_UPLOAD_LAYOUT(ThdrGenUpload);
+ FF_RTX_ASSERT_LAUNCH_LAYOUT(ThdrGenLaunch);
+ 
+-/* Supported packed frame formats.  The input is read format-agnostically through
+- * a texture (normalized to [0,1]); R-first 8-bit (rgb0/rgba) is the standard SDR
+- * input (there is no B-first path).  The output is HDR: fp16 rgba (default) or
+- * 10-bit x2bgr10le, selected by two flag words in the drtm arg buffer -- carried
+- * here in FFRtxPixFmt::sel. */
++/* Input: R-first 8-bit or 10-bit x2bgr10le (no B-first path). Output: HDR fp16 or 10-bit. */
+ static const FFRtxPixFmt thdr_in_fmts[] = {
+     { AV_PIX_FMT_RGB0,      CU_AD_FORMAT_UNSIGNED_INT8,       4, 0 },
+     { AV_PIX_FMT_RGBA,      CU_AD_FORMAT_UNSIGNED_INT8,       4, 0 },
+@@ -127,9 +123,7 @@ static const AVOption truehdr_cuda_options[] = {
+     { "maxluminance", "peak luminance in nits (400..2000)", OFFSET(maxluminance), AV_OPT_TYPE_DOUBLE, {.dbl=1000}, 400, 2000, FLAGS },
+     { "data", "directory with extracted TrueHDR cubins + weights.bin",
+       OFFSET(data_dir), AV_OPT_TYPE_STRING, {.str=TRUEHDR_DEFAULT_DATA_DIR}, 0, 0, FLAGS },
+-    /* Named rather than left NULL-for-the-default, so `format` reports what it
+-     * does: unlike the super-resolution filters there is no same-as-input
+-     * output here -- the whole point is the SDR->HDR change. */
++    /* Named default so `format` reports what it does (no same-as-input output here). */
+     { "format", "output: rgbaf16le=scRGB linear Rec.709 80nit (default), x2bgr10le=HDR10 PQ Rec.2020",
+       OFFSET(out_format), AV_OPT_TYPE_STRING, {.str="rgbaf16le"}, 0, 0, FLAGS },
+     { NULL }
+@@ -139,20 +133,11 @@ AVFILTER_DEFINE_CLASS(truehdr_cuda);
+ 
+ FF_RTX_ASSERT_PRIV_LAYOUT(TrueHdrCudaContext);
+ 
+-/* As for vsr_cuda: a capture only yields the capturing GPU's images, so
+- * `rtxv extract truehdr` replaces each one with the snippet's own fatbin --
+- * every architecture the DLL ships, plus the PTX -- and fills the conv backbone
+- * in from the sibling ELFs.  A data dir built with --no-fatbins still holds
+- * bare single-arch cubins, which is what a module-load failure here usually
+- * means.  No arch gate: nothing in an SDK snippet's cubins is a
+- * statically-matched guess needing an opt-in. */
++/* Capture yields only one GPU's images; `rtxv extract` repacks as multi-arch fatbins. */
+ #define THDR_LOAD_HINT \
+     "Re-run `rtxv extract truehdr <nvngx_truehdr.dll>` and `rtxv install`: the " \
+     "generator repacks each kernel as the snippet's own multi-arch fatbin."
+ 
+-/* ------------------------------------------------------------------------- *
+- * One-time graph setup for W,H.  Must run with the CUDA context current.
+- * ------------------------------------------------------------------------- */
+ static void fill_sizes(AVFilterContext *ctx, long long *sz)
+ {
+     TrueHdrCudaContext *s = ctx->priv;
+@@ -175,9 +160,7 @@ static int setup_graph(AVFilterContext *ctx)
+                                    (const FFRtxFunc *)thdr_funcs, THDR_NFUNC, THDR_MAX_FID,
+                                    THDR_LOAD_HINT)) < 0)
+         return ret;
+-    /* Zero the arena: calculate_pov and k_conv_fp16_nhwc read uninitialised
+-     * scratch (compute-sanitizer initcheck), which in a fresh CLI process is
+-     * zeroed pages and therefore byte-exact. */
++    /* Zero the arena: conv/pov kernels read scratch before writing. */
+     if ((ret = ff_rtx_alloc_arena(ctx, &s->r, THDR_NALLOC, fill_sizes,
+                                   FF_RTX_ARENA_ZERO)) < 0)
+         return ret;
+@@ -192,48 +175,24 @@ static int setup_graph(AVFilterContext *ctx)
+     if (ret < 0)
+         return ret;
+ 
+-    /* Snapshot the pristine arena (weights + zeroed scratch); every frame resets
+-     * it, so the graph always reads the same clean scratch instead of whatever
+-     * the previous frame or another host (mpv) left behind. */
++    /* Snapshot pristine arena; reset from it each frame for clean scratch. */
+     if ((ret = ff_rtx_snapshot_arena(ctx, &s->r)) < 0)
+         return ret;
+ 
+-    /* Input: pitched linear memory read with linear/normalized/clamp sampling
+-     * (the texture unit normalizes any 8/10-bit UNORM format to [0,1]). */
+     s->in_img = ff_rtx_image_pitch(ctx, &s->r, W, H, s->inpf->cufmt, s->inpf->bpp,
+                                    FF_RTX_TEX | FF_RTX_CLAMP);
+-    /* Zero texture bound to the graph's stale intermediate-texture handles (the
+-     * generator's kind-4 fixups).  A small zeroed buffer read with clamp -> every
+-     * sample is 0, exactly reproducing the read from an unbound handle that the
+-     * CLI relied on (byte-exact), but as a real, safe object that can never alias
+-     * a live texture. */
++    /* Zero texture for stale intermediate handles (kind-4 fixups): clamped read -> always 0. */
+     s->zero = ff_rtx_image_pitch(ctx, &s->r, 64, 64, s->inpf->cufmt, s->inpf->bpp,
+                                  FF_RTX_TEX | FF_RTX_CLAMP | FF_RTX_ZERO);
+-    /* HDR output array + surface: fp16 rgba or 10-bit x2bgr10le. */
+     s->out_img = ff_rtx_image_array(ctx, &s->r, W, H, s->outpf->cufmt,
+                                     FF_RTX_SURF | FF_RTX_LDST);
+-    /* Private scratch surface bound to the graph's stale scratch/clear surface
+-     * handles (the generator's kind-3 fixups).  Several kernels write surfaces the
+-     * DLL created as extra bindless objects (e.g. truehdr_postprocessing is a pure
+-     * clear -- sust {0,0,0,0} over WxH -- and truehdr_debanding writes a scratch
+-     * surface); their handles were baked as invariant literals with no fixup because
+-     * the capture's PTX analysis only tagged the primary output surface.  In a fresh
+-     * process the literals alias nothing (writes dropped, byte-exact), but in a busy
+-     * CUDA context (mpv/nvdec, gpu-next's Vulkan interop) they alias LIVE objects --
+-     * e.g. our own input texture gets postprocessing's handle -> the clear zeros the
+-     * input -> black output.  Route all such writes here; nothing reads them back
+-     * (no suld anywhere in the graph), so it is output-irrelevant and matches the
+-     * byte-exact reference.  sust.p.v4.b32 -> 4x32-bit. */
++    /* Scratch surface for stale handle writes (kind-3 fixups): nothing reads them back. */
+     s->scratch = ff_rtx_image_array(ctx, &s->r, W, H, CU_AD_FORMAT_UNSIGNED_INT32,
+                                     FF_RTX_SURF | FF_RTX_LDST);
+     if (!s->in_img || !s->zero || !s->out_img || !s->scratch)
+         return AVERROR_EXTERNAL;
+ 
+-    /* Build the graph.  thdr_fill_graph() is generated from the same fit as the
+-     * tables above and assigns every field through its named thdr_*_params
+-     * struct.  Kinds 3 and 4 are the two stale slots the SDK snippet leaves
+-     * bound; they are given the private objects above rather than left dangling.
+-     * The casts are only `unsigned long long *` vs `uint64_t *` on LP64. */
++    /* Build the graph: kinds 3/4 route stale handles to private objects. */
+     if ((ret = ff_rtx_alloc_launches(ctx, &s->r, THDR_NLAUNCH, sizeof(ThdrGenLaunch))) < 0)
+         return ret;
+     handle[3] = (thdr_devptr)s->scratch->surf;
+@@ -245,9 +204,7 @@ static int setup_graph(AVFilterContext *ctx)
+         return AVERROR_BUG;
+     }
+ 
+-    /* drtm overrides: the 4 tunables (float32, computed in double then cast to
+-     * bit-match the DLL) and the output-format flag words.  These sit at fixed
+-     * offsets in the truehdr_drtm launch's arg buffer (see rtx-video-re). */
++    /* drtm overrides: tunables and output-format flags at fixed arg offsets. */
+     if (THDR_DRTM_LAUNCH < 0 || THDR_DRTM_LAUNCH >= s->r.nlaunch) {
+         av_log(ctx, AV_LOG_ERROR, "no drtm launch in graph\n");
+         return AVERROR_BUG;
+@@ -274,13 +231,7 @@ static int setup_graph(AVFilterContext *ctx)
+     return 0;
+ }
+ 
+-/* ------------------------------------------------------------------------- *
+- * Per-frame: bind the input frame as a texture, replay the graph, copy out.
+- * ------------------------------------------------------------------------- */
+-/* The output is HDR, not the SDR the input props describe -- retag it so a
+- * colour-managed consumer (mpv gpu-next) interprets it correctly and does not
+- * see the frame properties "change on the fly".  fp16 = scRGB (linear, Rec.709,
+- * full range); x2bgr10le = HDR10 (PQ, Rec.2020).  Both are RGB. */
++/* Retag output as HDR (scRGB or HDR10 PQ/Rec.2020). */
+ static void retag_hdr(AVFilterContext *ctx, AVFrame *out)
+ {
+     TrueHdrCudaContext *s = ctx->priv;
+diff --git a/libavfilter/vf_truehdr_drv_cuda.c b/libavfilter/vf_truehdr_drv_cuda.c
+index 98a0e76a1f..5837262556 100644
+--- a/libavfilter/vf_truehdr_drv_cuda.c
++++ b/libavfilter/vf_truehdr_drv_cuda.c
+@@ -72,12 +72,7 @@ FF_RTX_ASSERT_FUNC_LAYOUT(ThdrvFunc);
+ FF_RTX_ASSERT_UPLOAD_LAYOUT(ThdrvGenUpload);
+ FF_RTX_ASSERT_LAUNCH_LAYOUT(ThdrvGenLaunch);
+ 
+-/* Supported packed frame formats.  Input is read format-agnostically through a
+- * texture normalized to [0,1] and there is no B-first path, so it is the shared
+- * table's R-first 8-bit rows -- exactly what FF_RTX_N_RGB8_R_FIRST names.
+- * Output: scRGB fp16 rgba (linear, drtm arg0x2c=0) or HDR10 x2bgr10le (PQ /
+- * SMPTE ST.2084, drtm arg0x2c=1 -> the kernel emits [0,1] PQ values that the
+- * SUST.P.2D packs into the 10-bit surface).  See rtx-video-re docs/drtm610/. */
++/* Output: scRGB fp16 rgba or HDR10 x2bgr10le. */
+ static const FFRtxPixFmt thdrv_out_fmts[] = {
+     { AV_PIX_FMT_RGBAF16LE, CU_AD_FORMAT_HALF,               8, 0 },
+     { AV_PIX_FMT_X2BGR10LE, CU_AD_FORMAT_UNORM_INT_101010_2, 4, 0 },
+@@ -196,9 +191,6 @@ static const FFRtxArchGate thdrv_gate = {
+         "statically matched (sm_75/86/87/89), UNVERIFIED on real hardware.\n",
+ };
+ 
+-/* ------------------------------------------------------------------------- *
+- * One-time graph setup for W,H.  Must run with the CUDA context current.
+- * ------------------------------------------------------------------------- */
+ static void fill_sizes(AVFilterContext *ctx, long long *sz)
+ {
+     TrueHdrDrvCudaContext *s = ctx->priv;
+@@ -207,11 +199,7 @@ static void fill_sizes(AVFilterContext *ctx, long long *sz)
+     thdrv_fill_allocs(s->W, s->H, NW, NH, sz);
+ }
+ 
+-/* One internal graph surface (S1 or S2): a float32 array exposed to its producer
+- * kernel as a surface and to its consumer as a texture.  The texture descriptor
+- * mirrors the input texture (normalized coords, linear filter) so the producer's
+- * pixel-coord SUST and the consumer's normalized TLD line up exactly as they do
+- * in loader_ppe. */
++/* Internal surface (S1 or S2): float32 array with both texture and surface. */
+ static FFRtxImage *mk_interm(AVFilterContext *ctx, FFRtxCuda *r, int W, int Ha)
+ {
+     return ff_rtx_image_array(ctx, r, W, Ha, CU_AD_FORMAT_FLOAT,
+@@ -238,8 +226,7 @@ static int setup_graph(AVFilterContext *ctx)
+                                    (const FFRtxFunc *)thdrv_funcs, THDRV_NFUNC, THDRV_MAX_FID,
+                                    NULL)) < 0)
+         return ret;
+-    /* Zero the arena so any scratch the conv/pov kernels read before writing is
+-     * deterministically 0, as in a fresh loader process. */
++    /* Zero the arena: conv/pov kernels read scratch before writing. */
+     if ((ret = ff_rtx_alloc_arena(ctx, &s->r, THDRV_NALLOC, fill_sizes,
+                                   FF_RTX_ARENA_ZERO)) < 0)
+         return ret;
+@@ -254,17 +241,12 @@ static int setup_graph(AVFilterContext *ctx)
+     if (ret < 0)
+         return ret;
+ 
+-    /* Snapshot the pristine arena (weights + zeroed scratch); reset from it each
+-     * frame so the graph always reads clean scratch regardless of host memory
+-     * reuse. */
++    /* Snapshot pristine arena; reset from it each frame for clean scratch. */
+     if ((ret = ff_rtx_snapshot_arena(ctx, &s->r)) < 0)
+         return ret;
+ 
+-    /* Input: pitched linear memory, normalized/linear sampling (matches
+-     * loader_ppe; the texture unit normalizes the 8-bit UNORM input to [0,1]). */
+     s->in_img = ff_rtx_image_pitch(ctx, &s->r, W, H, s->inpf->cufmt, s->inpf->bpp,
+                                    FF_RTX_TEX);
+-    /* Output array + surface (HDR fp16 rgba = scRGB, or 10-bit PQ). */
+     s->out_img = ff_rtx_image_array(ctx, &s->r, W, H, s->outpf->cufmt,
+                                     FF_RTX_SURF | FF_RTX_LDST);
+     /* Internal surfaces S1 (postprocessing->debanding) and S2 (debanding->drtm). */
+@@ -273,11 +255,7 @@ static int setup_graph(AVFilterContext *ctx)
+     if (!s->in_img || !s->out_img || !s->s1 || !s->s2)
+         return AVERROR_EXTERNAL;
+ 
+-    /* Build the graph.  thdrv_fill_graph() is generated from the same fit as the
+-     * tables above and assigns every field through its named thdrv_*_params
+-     * struct.  The internal S1/S2 surfaces and textures are passed by fix kind,
+-     * which is the index the generated code reads them at.  The casts are only
+-     * `unsigned long long *` vs `uint64_t *` on LP64. */
++    /* Build the graph. S1/S2 surfaces and textures are passed by fix kind index. */
+     if ((ret = ff_rtx_alloc_launches(ctx, &s->r, THDRV_NLAUNCH, sizeof(ThdrvGenLaunch))) < 0)
+         return ret;
+     handle[3] = (thdrv_devptr)s->s1->surf;
+@@ -297,16 +275,7 @@ static int setup_graph(AVFilterContext *ctx)
+     }
+     a = ff_rtx_launch_at(&s->r, THDRV_DRTM_LAUNCH)->params;
+ 
+-    /* Resolve the tunables the preset names, before marshalling them below.  The
+-     * SDK preset selects the adaptive path and the exposure/middlegray that
+-     * emulate the SDK truehdr_cuda curve (middlegray one step lower for PQ
+-     * output).  Only tunables left at auto (-1) take a preset value, so an
+-     * explicit one passed alongside the preset still wins -- including one that
+-     * happens to equal the neutral default, which a compare-against-the-default
+-     * test could not tell apart.  The resolved values live in locals: the
+-     * AVOption fields stay as the user set them, so a re-run of config_output
+-     * resolves from the same starting point and av_opt_get still reports what
+-     * was asked for. */
++    /* Resolve preset tunables (auto=-1 takes preset value, explicit wins). */
+     sdk        = s->preset == THDRV_PRESET_SDK;
+     tonemap    = s->tonemap >= 0 ? s->tonemap : 1;
+     exposure   = s->exposure   >= 0 ? s->exposure   : (sdk ? 800.0 : 200.0);
+@@ -317,34 +286,20 @@ static int setup_graph(AVFilterContext *ctx)
+                "preset=sdk: tonemap=%d exposure=%.0f middlegray=%.0f\n",
+                tonemap, exposure, middlegray);
+ 
+-    /* drtm override: peak luminance (float32, computed in double then cast to
+-     * bit-match the reference). */
++    /* drtm override: peak luminance. */
+     {
+         float maxlum = (float)av_clipd(s->maxluminance, 400, 2000);
+         memcpy(a + THDRV_OFF_MAXLUMINANCE, &maxlum, 4);
+     }
+ 
+-    /* Output format flags (drtm final SUST).  arg0x2c = TRANSFER: 0 = scRGB linear
+-     * (rgb*MaxLuminance/80, fp16); 1 = PQ / SMPTE ST.2084 -> normalized [0,1] the
+-     * 10-bit x2bgr10le surface packs.  arg0x2b = GAMUT: 1 = Rec.709->Rec.2020 primary
+-     * matrix.  x2bgr10le output enables PQ, and (by default) the gamut too == HDR10 /
+-     * BT.2100.  arg0x2b is byte 3 of a packed dword, so write a single byte. */
++    /* Output format flags: PQ transfer and Rec.709->Rec.2020 gamut for x2bgr10le. */
+     if (s->outpf->f == AV_PIX_FMT_X2BGR10LE) {
+         int32_t pq = 1;
+         memcpy(a + THDRV_OFF_TRANSFER, &pq, 4);
+         a[THDRV_OFF_GAMUT] = s->gamut ? 1 : 0;
+     }
+ 
+-    /* Adaptive inverse-tone-map (tonemap>=1, the default).  The captured drtm template
+-     * runs ToneMapMode 0 -- a near-linear bypass that reads only MaxLuminance, so
+-     * tonemap=0 is byte-exact vs the loader but blows out midtones.  Mode 1 enables the
+-     * driver's adaptive curve, which additionally consumes the live calculate_pov
+-     * scene stat (drtm arg0x48 = the per-frame bright-pixel fraction; the graph
+-     * already produces it and the arena reset zero-inits its atomic accumulator each
+-     * frame -- see filter_frame / loader_ppe) and is gated by the tone floats.  Those
+-     * MUST be non-zero or the curve divides by zero (NaN), so write the tunable set
+-     * with neutral shadow-lift.  Offsets are the drtm610-named arg offsets.  Mode 0
+-     * is left entirely untouched. */
++    /* Adaptive inverse-tone-map (mode 1). Shadow lift must be non-zero to avoid NaN. */
+     if (tonemap >= 1) {
+         float f_contrast   = (float)av_clipd(s->contrast,   0.1, 4.0);
+         float f_shadowlift = 1.0f;               /* neutral; curve needs it non-zero */
+@@ -358,10 +313,7 @@ static int setup_graph(AVFilterContext *ctx)
+         memcpy(a + THDRV_OFF_MIDDLEGRAY,  &f_middlegray, 4);
+         memcpy(a + THDRV_OFF_EXPOSURE,    &f_exposure,   4);
+         memcpy(a + THDRV_OFF_TONEMAPMODE, &mode,         4);
+-        /* Per-channel gamma is a separate opt-in: it needs its enable byte
+-         * (arg0x40) set as well as the exponent (arg0x10).  Only touch them when
+-         * the user asked for a non-identity gamma, so gamma=1.0 leaves the
+-         * (byte-exact) mode-1 arg buffer untouched. */
++        /* Per-channel gamma is opt-in: only enable when non-identity. */
+         if (s->gamma != 1.0) {
+             float g = (float)av_clipd(s->gamma, 0.25, 4.0);
+             memcpy(a + THDRV_OFF_GAMMA, &g, 4);
+@@ -380,13 +332,7 @@ static int setup_graph(AVFilterContext *ctx)
+     return 0;
+ }
+ 
+-/* ------------------------------------------------------------------------- *
+- * Per-frame: bind the input frame as a texture, replay the graph, copy out.
+- * ------------------------------------------------------------------------- */
+-/* The output is HDR, not the SDR the input props describe -- retag so a
+- * colour-managed consumer interprets it.  rgbaf16le = scRGB (linear light,
+- * Rec.709, full range); x2bgr10le = HDR10 (PQ / SMPTE ST.2084, Rec.2020 primaries
+- * when the gamut matrix is on -- the standard -- else Rec.709). */
++/* Retag output as HDR (scRGB or HDR10 PQ/Rec.2020). */
+ static void retag_hdr(AVFilterContext *ctx, AVFrame *out)
+ {
+     TrueHdrDrvCudaContext *s = ctx->priv;

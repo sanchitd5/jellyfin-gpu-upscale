@@ -27,25 +27,29 @@
  * CUDA kernels (cubins/fatbins) plus a weights blob directly through the CUDA
  * driver API, instead of going through a vendor SDK (NGX, OptiX, Maxine VFX).
  *
- * STATUS: scaffolding only, no filter uses this yet and it has not been
- * compiled or run. Written from a pattern document handed to this project,
- * not derived from a working implementation in this repo. It exists to
- * capture the intended contract in code so a real consumer filter can be
- * built and tested against it - do not assume any function here behaves
- * correctly until a filter exercises it end to end. This project's own rule
- * (AGENTS.md/CLAUDE.md: read the actual SDK, never guess an API shape)
- * applies here too: nothing in this header should be treated as verified
- * until real cubins, a real weights.bin, and a real generated per-feature
- * header exist to compile and run it against.
+ * STATUS: SUPERSEDED - do not build a filter against this file.
  *
- * Two things this project does NOT yet have, and this header alone does not
- * provide:
- *   - Any actual cubin/fatbin for a real effect (extraction of NVIDIA's RTX
- *     Video Super Resolution kernels was explored and did not turn up a
- *     usable artifact on Linux; see VSR.md).
- *   - Any actual weights.bin for such an effect.
- * Without those, this header has no consumer and cannot be tested. Treat it
- * as a filed contract, not working infrastructure, until both exist.
+ * This was written from a pattern document, by hand, before anyone had a real
+ * implementation of the same core to compare against. One now exists:
+ * `ffmpeg-patches/0002-avfilter-add-a-shared-core-for-the-rtx-video-cuda.patch`
+ * carries the upstream `rtx_cuda.c`/`rtx_cuda.h` pair the RTX Video filters
+ * were actually written against, together with seven consumer filters that
+ * exercise it (`vsr_cuda`, `vsr_drv_cuda`, `dlpp_drv_cuda`, `isr_cuda`,
+ * `truehdr_cuda`, `deepdvc_drv_cuda`, `smoothmotion_cuda`). Take that header
+ * and drop this one rather than reconciling the two; a hand-written
+ * approximation of a contract whose real version is on disk is exactly the
+ * "guessed API shape" AGENTS.md forbids.
+ *
+ * The one thing this file got wrong is worth recording, because it was copied
+ * from a conclusion in VSR.md that turned out to be false. The note that used
+ * to sit here said no usable cubin for RTX VSR existed on Linux, so this
+ * header could never have a consumer. Extraction does not happen on Linux and
+ * does not need a Linux entry point: the kernels come out of the Windows
+ * driver's PPE plugins (`nvaivpx.dll`, `ppe/features/AIVP` and
+ * `ppe/features/DLPP`) as cubins plus a weights blob, and run anywhere CUDA
+ * runs. See the corrected section in VSR.md and the task brief in
+ * `rtx-cuda-vsr-task.md`. The real blocker is obtaining the out-of-tree
+ * extractor (`rtx-video-re`), not the absence of kernels.
  *
  * Follows this project's existing CUDA convention (see vf_optix.c): the CUDA
  * driver API is reached through nv-codec-headers' CudaFunctions dynlink

@@ -1,0 +1,1786 @@
+From fe061a2d37ce40ac261ae20947ee446646c4944a Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:10 +0800
+Subject: [PATCH] avfilter: add smoothmotion_cuda, NVIDIA Smooth Motion frame interpolation
+
+Doubles the frame rate with the frame generator the NVIDIA driver ships as
+"Smooth Motion" (in libnvidia-present.so).  The network is an FP8 conv/attention
+U-Net; per interpolated frame it runs a fixed 25-launch graph -- downscale,
+conv/attention backbone, depth_to_space, conv_out for the flow field, then
+warp_coarse.  It emits the t=0.5 midpoint, so it is exact for 2x and the filter
+offers nothing else.
+
+The kernels are fully resolution-parametric: the driver runs the same graph with
+dimensions, grids, scratch sizes and param-block offsets scaled to the native
+frame size, without tiling and without resampling to a fixed internal
+resolution.  smoothmotion_cuda_gen.h reproduces that scaling, so arbitrary input
+sizes work.
+
+This one does not use the rtx_cuda core.  It is a frame-rate filter rather than
+a 1:1 one, it drives per-kernel multi-arch fatbins rather than a module list,
+and it needs YUV input, so it carries its own CUDA kernels
+(vf_smoothmotion_cuda.cu) to pack the supported 8/10/12/16-bit planar and
+semi-planar layouts into the packed 4:4:4 the network samples, and to unpack the
+result.  Packed inputs skip that step entirely.
+
+The two input frames are bound as bindless textures and the output as a bindless
+surface; the handles are written into the parameter block by name through
+sm_fill_params, so the filter never patches the block by byte offset.
+---
+ configure                           |    2 +
+ doc/filters.texi                    |   63 ++
+ libavfilter/Makefile                |    1 +
+ libavfilter/allfilters.c            |    1 +
+ libavfilter/vf_smoothmotion_cuda.c  | 1164 +++++++++++++++++++++++++++++++++++
+ libavfilter/vf_smoothmotion_cuda.cu |  462 ++++++++++++++
+ 6 files changed, 1693 insertions(+)
+
+diff --git a/configure b/configure
+index 899e5abd40..5e4e2914e4 100755
+--- a/configure
++++ b/configure
+@@ -4288,6 +4288,8 @@ showcqt_filter_deps="avformat swscale"
+ showcqt_filter_suggest="libfontconfig libfreetype"
+ signature_filter_deps="gpl avcodec avformat"
+ smartblur_filter_deps="gpl swscale"
++smoothmotion_cuda_filter_deps="ffnvcodec nvfdata_smoothmotion"
++smoothmotion_cuda_filter_deps_any="cuda_nvcc cuda_llvm"
+ sobel_opencl_filter_deps="opencl"
+ sofalizer_filter_deps="libmysofa"
+ spp_filter_deps="gpl avcodec"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index ac3afebe19..87b6706c41 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27831,6 +27831,69 @@ scale_cuda=passthrough=0
+ @end example
+ @end itemize
+ 
++@section smoothmotion_cuda
++
++Double the frame rate with NVIDIA Smooth Motion, the frame generator built into
++the NVIDIA driver, running its kernels directly on CUDA.
++
++An optical-flow network predicts a flow field between each pair of consecutive
++frames and warps them to the midpoint, so one new frame is inserted between
++every two input frames and the output frame rate is exactly twice the input.
++The network emits the temporal midpoint only, so there is no ratio to choose.
++
++Unlike the super-resolution networks the kernels are fully resolution
++parametric -- the same graph runs at the native frame size, without tiling and
++without resampling to a fixed internal resolution -- so any input size works.
++
++It accepts the following options:
++
++@table @option
++@item interp_start
++@item interp_end
++Bounds of the interpolation region, @code{0} to @code{255}.  Defaults
++@code{15} and @code{240}.
++
++@item packed
++Emit the network's packed output directly instead of converting it back to the
++input layout.  Default @code{false}.
++
++@item data
++Directory holding the extracted per-kernel fat binaries (in a @file{fatbins}
++subdirectory) and @file{weights.bin}.
++@end table
++
++@subsection Supported formats
++
++A wide set of packed and planar CUDA formats, because the filter carries its own
++CUDA kernels to pack whatever it is given into the packed 4:4:4 the network
++samples, and to unpack the result:
++
++@table @asis
++@item Packed RGB
++@code{rgb0}, @code{bgr0}, @code{rgba}, @code{bgra} (8-bit), @code{rgba64}
++(16-bit), and @code{x2rgb10le}/@code{x2bgr10le} (packed 10-bit).  Emitted
++unchanged.
++
++@item Semi-planar and planar YUV
++@code{nv12}, @code{nv16}, @code{yuv420p}, @code{yuv444p} (8-bit, emitted as
++@code{yuv444p}); @code{p010}, @code{p016}, @code{p210}, @code{p212},
++@code{p216}, @code{yuv444p16}, @code{yuv444p10msb}, @code{yuv444p12msb}
++(higher bit depth, emitted as @code{yuv444p16}).
++
++@item Packed 4:4:4 YUV
++@code{vuyx}, @code{vuya}, @code{uyva}, @code{ayuv} (8-bit), @code{xv48le},
++@code{ayuv64le} (16-bit) and @code{xv30le} (packed 10-bit).  Chroma is already
++full resolution, so these skip the de-interleave entirely.
++@end table
++
++Chroma is upsampled to 4:4:4 on the way in, so a 4:2:0 or 4:2:2 input comes back
++as 4:4:4; the alpha or padding channel of a packed format is ignored.
++
++The kernels and weights are extracted from the proprietary NVIDIA driver and are
++@emph{not} shipped: the filter is only built when an
++@code{nvidia-video-filters} package carrying the Smooth Motion data is
++installed, and @option{data} defaults to that package's data directory.
++
+ @section thumbnail_cuda
+ 
+ Select the most representative frame in a given sequence of consecutive frames using CUDA.
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index b38b80748c..5a598db304 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -511,6 +511,7 @@ OBJS-$(CONFIG_SIDEDATA_FILTER)               += f_sidedata.o
+ OBJS-$(CONFIG_SIGNALSTATS_FILTER)            += vf_signalstats.o
+ OBJS-$(CONFIG_SIGNATURE_FILTER)              += vf_signature.o
+ OBJS-$(CONFIG_SMARTBLUR_FILTER)              += vf_smartblur.o
++OBJS-$(CONFIG_SMOOTHMOTION_CUDA_FILTER)      += vf_smoothmotion_cuda.o vf_smoothmotion_cuda.ptx.o cuda/load_helper.o
+ OBJS-$(CONFIG_SOBEL_FILTER)                  += vf_convolution.o
+ OBJS-$(CONFIG_SOBEL_OPENCL_FILTER)           += vf_convolution_opencl.o opencl.o \
+                                                 opencl/convolution.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 592b33dfb0..8ca991894b 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -485,6 +485,7 @@ extern const FFFilter ff_vf_signalstats;
+ extern const FFFilter ff_vf_signature;
+ extern const FFFilter ff_vf_siti;
+ extern const FFFilter ff_vf_smartblur;
++extern const FFFilter ff_vf_smoothmotion_cuda;
+ extern const FFFilter ff_vf_sobel;
+ extern const FFFilter ff_vf_sobel_opencl;
+ extern const FFFilter ff_vf_split;
+diff --git a/libavfilter/vf_smoothmotion_cuda.c b/libavfilter/vf_smoothmotion_cuda.c
+new file mode 100644
+index 0000000000..29d143bef6
+--- /dev/null
++++ b/libavfilter/vf_smoothmotion_cuda.c
+@@ -0,0 +1,1164 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ * Based on vf_nvoffruc / vf_framerate - Copyright (C) 2012 Mark Himsley
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Frame-rate up-conversion filter that drives the CUDA kernels used by NVIDIA
++ * "Smooth Motion" (the driver-level frame generator in libnvidia-present.so).
++ * The kernels were extracted as per-kernel multi-arch fatbins and the forward
++ * pass was reverse-engineered by intercepting the live CUDA Driver-API launches.
++ *
++ * The network is an FP8 conv/attention U-Net.  Per interpolated frame it runs a
++ * fixed 25-launch graph: downscale -> conv/attn backbone -> depth_to_space ->
++ * conv_out (flow field) -> warp_coarse.  The kernels are fully resolution-
++ * PARAMETRIC: the driver runs the same graph with dimensions, grids, scratch
++ * sizes and param-block offsets scaled to the native frame size (it does not tile
++ * and does not resample to a fixed internal resolution).  smoothmotion_cuda_gen.h
++ * reproduces that scaling (derived and validated byte-exact against captures at
++ * 512/640/720/900/1024/1080/1440/2160), so this filter supports arbitrary sizes.
++ *
++ * I/O binding: the two input frames are bound as bindless TEXTURE objects (read
++ * with TEX; descriptor = clamp/linear/normalized-coords, packed UNORM_INT8X4 so
++ * samples are [0,1]) and the output as a bindless SURFACE object (warp's SUST.P).
++ * The handles live in the param block (downscale/warp in_tex0/in_tex1 and the warp
++ * out_surf field).  We pass our objects to sm_fill_params via SMHandles and it writes
++ * them into the right fields by name, so this filter never patches the block by byte
++ * offset - the generated code owns the offsets, derived from the captured ABI.
++ *
++ * Validated on an RTX 5090 (driver 595.71.05): passthrough is pixel-exact and
++ * interpolation reaches ~45 dB PSNR vs ground truth on real content (on par with
++ * minterpolate).  The network emits the t=0.5 midpoint, so it is exact for 2x.
++ */
++
++#include <dlfcn.h>
++
++#include "libavutil/avassert.h"
++#include "libavutil/avstring.h"
++#include "libavutil/file.h"
++#include "libavutil/cuda_check.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "filters.h"
++#include "video.h"
++
++#include "cuda/load_helper.h"
++
++/* Generated by rtx-video-re from the proprietary NVIDIA library, and
++ * installed rather than carried here -- located, together with the cubins and
++ * weights it names, through pkg-config (see configure's nvfdata_* checks). */
++#include <smoothmotion_cuda_gen.h>
++
++/* CUsurfObject and the normalized-coords flag/format are absent from ffnvcodec's
++ * dynlink headers; cuSurfObjectCreate/Destroy are not in CudaFunctions either,
++ * so we resolve them from libcuda directly. */
++#ifndef CU_TRSF_NORMALIZED_COORDINATES
++#define CU_TRSF_NORMALIZED_COORDINATES 0x02
++#endif
++#ifndef CU_AD_FORMAT_UNORM_INT8X4
++#define CU_AD_FORMAT_UNORM_INT8X4 0xc2
++#endif
++#ifndef CU_AD_FORMAT_UNORM_INT16X4
++#define CU_AD_FORMAT_UNORM_INT16X4 0xc5
++#endif
++/* PITCH2D textures only accept the base integer formats (the packed UNORM_INT*X4
++ * are array-only); UNSIGNED_INT8/16 with normalized coords still read as [0,1]. */
++#ifndef CU_AD_FORMAT_UNSIGNED_INT8
++#define CU_AD_FORMAT_UNSIGNED_INT8 0x01
++#endif
++#ifndef CU_AD_FORMAT_UNSIGNED_INT16
++#define CU_AD_FORMAT_UNSIGNED_INT16 0x02
++#endif
++typedef unsigned long long FFCUsurfObject;
++typedef CUresult (*tcuSurfObjectCreate)(FFCUsurfObject *, const CUDA_RESOURCE_DESC *);
++typedef CUresult (*tcuSurfObjectDestroy)(FFCUsurfObject);
++
++#define SM_CH 4
++
++typedef struct SmoothMotionContext {
++    const AVClass *class;
++
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef         *device_ref;
++
++    CUcontext cu_ctx;
++    CUstream  stream;
++
++    int W, H;                           ///< frame size the graph is built for
++
++    /* one module/function per launch (modules deduplicated by name) */
++    CUmodule    modules[SM_NLAUNCH];
++    int         n_modules;
++    char        mod_names[SM_NLAUNCH][64];
++    CUfunction  launch_fn[SM_NLAUNCH];
++
++    /* generated graph + scratch buffers, sb[] order {W,sA,sB,sC} */
++    SMGenLaunch gen[SM_NLAUNCH];
++    CUdeviceptr scratch[4];
++    unsigned long long sb[4];
++
++    /* Inputs are bound as bindless textures DIRECTLY over pitched device memory
++     * (CU_RESOURCE_TYPE_PITCH2D), like vf_bwdif_cuda - no input CUDA arrays/copies.
++     * The warp textures (t_in*) carry the renderable data (RGBA, or packed Y,U,V);
++     * the flow textures (t_fl*) carry what the downscale/optical-flow backbone reads
++     * (== warp textures for RGB, or luma-grey Y,Y,Y for YUV).  The OUTPUT must stay
++     * a CUDA array: the warp writes it via SUST.P and cuSurfObjectCreate requires
++     * an array.  For RGB the input textures are (re)bound per-frame over the source
++     * frames; for YUV they are persistent over the lin_* pack buffers. */
++    CUarray        a_out;
++    CUtexObject    t_in0, t_in1;
++    CUtexObject    t_fl0, t_fl1;
++    FFCUsurfObject s_out;
++
++    /* native-YUV support: pack/unpack kernels + linear pack/unpack buffers */
++    int          is_yuv;                ///< input is a YUV format (output = YUV444P[16])
++    int          is_packed_rgb;         ///< packed RGB needing unpack/repack (x2rgb10)
++    int          direct_out;            ///< output is a plain array->frame copy (no unpack)
++    int          elem_bytes;            ///< bytes per INTERNAL packed pixel (net I/O): 4 or 8
++    int          frame_bytes;           ///< bytes per pixel of the actual in/out frame
++    CUmodule     cvt_module;
++    CUfunction   fn_pack;               ///< format-specific pack-to-warp+flow
++    CUfunction   fn_unpack;             ///< packed -> planar YUV444P[16]
++    /* persistent packed buffers for both frames (warp + luma-grey flow) + output
++     * unpack staging; pitch from cuMemAllocPitch (>= W*elem_bytes, tex-aligned). */
++    CUdeviceptr  lin_warp0, lin_warp1, lin_flow0, lin_flow1, lin_out;
++    size_t       lin_pitch;
++
++    void                 *libcuda;
++    tcuSurfObjectCreate   surfCreate;
++    tcuSurfObjectDestroy  surfDestroy;
++
++    /* options */
++    char *data_dir;
++    int   interp_start;
++    int   interp_end;
++    int   packed;                       ///< emit the network's packed output directly
++
++    /* cadence state (from vf_framerate / vf_nvoffruc) */
++    AVRational dest_frame_rate;
++    AVRational srce_time_base;
++    AVRational dest_time_base;
++    int        blend_factor_max;
++    enum AVPixelFormat format;
++
++    AVFrame *work;
++    AVFrame *f0;
++    AVFrame *f1;
++    int64_t  pts0, pts1, delta;
++    int      flush;
++    int64_t  start_pts;
++    int64_t  n;
++} SmoothMotionContext;
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, s->hwctx->internal->cuda_dl, x)
++#define OFFSET(x) offsetof(SmoothMotionContext, x)
++#define V AV_OPT_FLAG_VIDEO_PARAM
++#define F AV_OPT_FLAG_FILTERING_PARAM
++
++/* `data` defaults to SM_DEFAULT_DATA_DIR, which the generated header states --
++ * the same <FEAT>_DEFAULT_DATA_DIR the other filters' headers here carry.  It
++ * names wherever the extraction tool wrote the files it fitted this table
++ * alongside, so the table and the kernels can never silently mismatch.  This
++ * file used to rebuild that path itself, from a hardcoded workspace root plus
++ * the driver version, which could only be right on one machine.  There is
++ * deliberately no fallback: a header lacking the define predates it, and
++ * building against it is the very mismatch the define prevents, so it fails
++ * here rather than at load time.
++ *
++ * The layout under it is this feature's own -- the per-kernel fatbins live in a
++ * fatbins/ subdirectory rather than loose beside weights.bin as the other
++ * features' cubins do -- but that is the data dir's business, not the caller's,
++ * so it is derived here and there is one `data` option like everywhere else. */
++#define SM_FATBIN_SUBDIR "fatbins"
++#define SM_WEIGHTS_FILE  "weights.bin"
++
++static const AVOption smoothmotion_cuda_options[] = {
++    /* The network only synthesises the t=0.5 midpoint, so the output rate is
++     * always exactly 2x the input - there is no target-rate option. */
++    { "interp_start", "point to start interpolation",             OFFSET(interp_start),         AV_OPT_TYPE_INT,    {.i64=15},    0, 255, V|F },
++    { "interp_end",   "point to end interpolation",               OFFSET(interp_end),           AV_OPT_TYPE_INT,    {.i64=240},   0, 255, V|F },
++    { "data",         "directory with the extracted Smooth Motion kernel fatbins + " SM_WEIGHTS_FILE,
++                                                                  OFFSET(data_dir),             AV_OPT_TYPE_STRING, {.str=SM_DEFAULT_DATA_DIR}, 0, 0, V|F },
++    /* Emit the network's native packed buffer instead of de-interleaving it:
++     * RGB/x2rgb10 -> rgba64 (a plain copy, no repack), YUV -> packed 4:4:4
++     * (VUYX 8-bit / XV48LE 16-bit).  Lets a packed-format consumer skip a
++     * redundant unpack+repack round-trip. */
++    { "packed",       "emit the network's packed output directly", OFFSET(packed),              AV_OPT_TYPE_BOOL,   {.i64=0},     0, 1,   V|F },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(smoothmotion_cuda);
++
++/* ------------------------------------------------------------------------- *
++ * Kernel loading (table-driven, modules deduplicated by name)
++ * ------------------------------------------------------------------------- */
++static int load_kernels(AVFilterContext *ctx)
++{
++    SmoothMotionContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    int ret;
++
++    for (int i = 0; i < SM_NLAUNCH; i++) {
++        const char *name = sm_kernel_names[i];
++        int found = -1;
++        for (int m = 0; m < s->n_modules; m++)
++            if (!strcmp(s->mod_names[m], name)) { found = m; break; }
++
++        if (found < 0) {
++            char path[1024];
++            uint8_t *buf = NULL;
++            size_t size = 0;
++            /* Load the per-kernel multi-arch fatbin and let the CUDA driver
++             * pick the cubin matching the current device's arch
++             * (cuModuleLoadData accepts a fatbin image). */
++            snprintf(path, sizeof(path), "%s/%s/%s.fatbin",
++                     s->data_dir, SM_FATBIN_SUBDIR, name);
++            ret = av_file_map(path, &buf, &size, 0, ctx);
++            if (ret < 0) {
++                av_log(ctx, AV_LOG_ERROR, "Smooth Motion kernel missing: %s\n", path);
++                return ret;
++            }
++            ret = CHECK_CU(cu->cuModuleLoadData(&s->modules[s->n_modules], buf));
++            av_file_unmap(buf, size);
++            if (ret < 0)
++                return ret;
++            found = s->n_modules;
++            snprintf(s->mod_names[found], sizeof(s->mod_names[found]), "%s", name);
++            s->n_modules++;
++        }
++
++        ret = CHECK_CU(cu->cuModuleGetFunction(&s->launch_fn[i], s->modules[found], name));
++        if (ret < 0) {
++            av_log(ctx, AV_LOG_ERROR, "cuModuleGetFunction failed for %s\n", name);
++            return ret;
++        }
++    }
++    av_log(ctx, AV_LOG_INFO, "Loaded %d Smooth Motion modules for %d launches "
++           "(fatbin, driver-selected arch)\n", s->n_modules, SM_NLAUNCH);
++    return 0;
++}
++
++static int format_is_planar444_16(enum AVPixelFormat fmt);
++static int format_is_packed_yuv(enum AVPixelFormat fmt);
++
++/* Create a bindless input texture DIRECTLY over pitched device memory
++ * (CU_RESOURCE_TYPE_PITCH2D) - no CUDA array.  pitch2d only takes the base
++ * integer formats, but UNSIGNED_INT8/16 (nch=4) with normalized coords still
++ * read as [0,1], matching the array path byte-for-byte. */
++static int make_input_tex(AVFilterContext *ctx, CUdeviceptr ptr, size_t pitch,
++                          CUtexObject *tex)
++{
++    SmoothMotionContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++
++    CUDA_RESOURCE_DESC rd = { 0 };
++    rd.resType = CU_RESOURCE_TYPE_PITCH2D;
++    rd.res.pitch2D.devPtr = ptr;
++    rd.res.pitch2D.format = s->elem_bytes == 8 ? CU_AD_FORMAT_UNSIGNED_INT16
++                                               : CU_AD_FORMAT_UNSIGNED_INT8;
++    rd.res.pitch2D.numChannels = SM_CH;
++    rd.res.pitch2D.width = s->W;
++    rd.res.pitch2D.height = s->H;
++    rd.res.pitch2D.pitchInBytes = pitch;
++
++    CUDA_TEXTURE_DESC td = { 0 };
++    td.addressMode[0] = td.addressMode[1] = td.addressMode[2] = CU_TR_ADDRESS_MODE_CLAMP;
++    td.filterMode = CU_TR_FILTER_MODE_LINEAR;
++    td.flags = CU_TRSF_NORMALIZED_COORDINATES;
++
++    return CHECK_CU(cu->cuTexObjectCreate(tex, &rd, &td, NULL));
++}
++
++/* ------------------------------------------------------------------------- *
++ * Allocate scratch + weights, generate the graph for WxH, build I/O objects.
++ * Must be called with the CUDA context current.
++ * ------------------------------------------------------------------------- */
++static int setup_graph(AVFilterContext *ctx)
++{
++    SmoothMotionContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    unsigned long long sz[4];
++    uint8_t *wbuf = NULL;
++    size_t wsz = 0;
++    char wpath[1024];
++    int ret;
++
++    ret = load_kernels(ctx);
++    if (ret < 0)
++        return ret;
++
++    /* scratch buffers, order {W,sA,sB,sC}; build the param graph over them */
++    sm_scratch_sizes(s->W, s->H, sz);
++    for (int a = 0; a < 4; a++) {
++        ret = CHECK_CU(cu->cuMemAlloc(&s->scratch[a], sz[a]));
++        if (ret < 0)
++            return ret;
++        CHECK_CU(cu->cuMemsetD8Async(s->scratch[a], 0, sz[a], s->stream));
++        s->sb[a] = (unsigned long long)s->scratch[a];
++    }
++    /* the param graph (s->gen) is filled per-frame in interpolate_frame, once the
++     * tex/surf handles for the current frames exist (see sm_fill_params + SMHandles) */
++
++    /* weights -> sb[0] (the W buffer) */
++    snprintf(wpath, sizeof(wpath), "%s/%s", s->data_dir, SM_WEIGHTS_FILE);
++    ret = av_file_map(wpath, &wbuf, &wsz, 0, ctx);
++    if (ret < 0) {
++        av_log(ctx, AV_LOG_ERROR, "cannot read weights %s\n", wpath);
++        return ret;
++    }
++    if (wsz != sz[0])
++        av_log(ctx, AV_LOG_WARNING, "weights %zu != W size %llu\n", wsz, sz[0]);
++    ret = CHECK_CU(cu->cuMemcpyHtoD(s->scratch[0], wbuf, FFMIN(wsz, sz[0])));
++    av_file_unmap(wbuf, wsz);
++    if (ret < 0)
++        return ret;
++
++    /* OUTPUT array + surface: the warp writes via SUST.P, and cuSurfObjectCreate
++     * requires a CUDA array (no pitch2d/linear surfaces).  Packed UNORM_INT8X4/16X4
++     * makes the (unused) texture path return [0,1]; SURFACE_LDST enables SUST.P. */
++    CUDA_ARRAY3D_DESCRIPTOR ad = { 0 };
++    ad.Width = s->W; ad.Height = s->H; ad.Depth = 0;
++    ad.Format = s->elem_bytes == 8 ? CU_AD_FORMAT_UNORM_INT16X4
++                                   : CU_AD_FORMAT_UNORM_INT8X4;
++    ad.NumChannels = SM_CH;
++    ad.Flags = CUDA_ARRAY3D_SURFACE_LDST;
++    if ((ret = CHECK_CU(cu->cuArray3DCreate(&s->a_out, &ad))) < 0) return ret;
++
++    CUDA_RESOURCE_DESC rd = { 0 };
++    rd.resType = CU_RESOURCE_TYPE_ARRAY;
++    rd.res.array.hArray = s->a_out;
++    if (s->surfCreate(&s->s_out, &rd) != CUDA_SUCCESS) {
++        av_log(ctx, AV_LOG_ERROR, "cuSurfObjectCreate failed\n");
++        return AVERROR_EXTERNAL;
++    }
++
++    /* YUV: pack/unpack kernels + persistent packed buffers for both frames; the
++     * input textures are bound over these buffers below.  (RGB binds its input
++     * textures per-frame directly over the source frames, in interpolate_frame.) */
++    if (s->is_yuv || s->is_packed_rgb) {
++        extern const unsigned char ff_vf_smoothmotion_cuda_ptx_data[];
++        extern const unsigned int  ff_vf_smoothmotion_cuda_ptx_len;
++        const char *packfn, *unpackfn;
++        /* packed RGB (x2rgb10) unpacks to RGBA16 and repacks (no chroma, and no
++         * separate luma-grey flow buffer since the net derives luma internally);
++         * YUV packs to (Y,U,V) + luma-grey flow and de-interleaves to planar. */
++        CUdeviceptr *bufs[5];
++        int nbuf;
++        if (s->is_packed_rgb) {
++            packfn   = s->format == AV_PIX_FMT_X2BGR10LE ? "Pack_x2bgr10" : "Pack_x2rgb10";
++            unpackfn = s->format == AV_PIX_FMT_X2BGR10LE ? "Unpack_x2bgr10" : "Unpack_x2rgb10";
++            bufs[0] = &s->lin_warp0; bufs[1] = &s->lin_warp1; bufs[2] = &s->lin_out;
++            nbuf = 3;
++        } else {
++            packfn   = s->format == AV_PIX_FMT_NV12    ? "Pack_nv12" :
++                       s->format == AV_PIX_FMT_NV16    ? "Pack_nv16" :
++                       s->format == AV_PIX_FMT_YUV420P ? "Pack_yuv420p" :
++                       s->format == AV_PIX_FMT_YUV444P ? "Pack_yuv444p" :
++                       format_is_planar444_16(s->format) ? "Pack_yuv444p16" :
++                       /* packed 4:4:4 YUV */
++                       s->format == AV_PIX_FMT_VUYX ||
++                       s->format == AV_PIX_FMT_VUYA    ? "Pack_vuyx" :
++                       s->format == AV_PIX_FMT_UYVA    ? "Pack_uyva" :
++                       s->format == AV_PIX_FMT_AYUV    ? "Pack_ayuv" :
++                       s->format == AV_PIX_FMT_XV48LE  ? "Pack_xv48" :
++                       s->format == AV_PIX_FMT_AYUV64LE ? "Pack_ayuv64" :
++                       s->format == AV_PIX_FMT_XV30LE  ? "Pack_xv30" :
++                       s->format == AV_PIX_FMT_P210 ||
++                       s->format == AV_PIX_FMT_P212 ||
++                       s->format == AV_PIX_FMT_P216    ? "Pack_p216" :
++                                                         "Pack_p016";   /* P010/P016 */
++            /* The warp buffer is already interleaved in VUYX / XV48LE order, so
++             * `packed` output is a direct copy (no unpack kernel); only the
++             * planar path needs to de-interleave. */
++            unpackfn = s->elem_bytes == 8 ? "Unpack_yuv444p16" : "Unpack_yuv444p";
++            bufs[0] = &s->lin_warp0; bufs[1] = &s->lin_warp1;
++            bufs[2] = &s->lin_flow0; bufs[3] = &s->lin_flow1; bufs[4] = &s->lin_out;
++            nbuf = 5;
++        }
++        ret = ff_cuda_load_module(ctx, s->hwctx, &s->cvt_module,
++                                  ff_vf_smoothmotion_cuda_ptx_data,
++                                  ff_vf_smoothmotion_cuda_ptx_len);
++        if (ret < 0)
++            return ret;
++        if ((ret = CHECK_CU(cu->cuModuleGetFunction(&s->fn_pack, s->cvt_module, packfn))) < 0)
++            return ret;
++        if ((ret = CHECK_CU(cu->cuModuleGetFunction(&s->fn_unpack, s->cvt_module, unpackfn))) < 0)
++            return ret;
++        for (int b = 0; b < nbuf; b++) {
++            size_t pitch;
++            ret = CHECK_CU(cu->cuMemAllocPitch(bufs[b], &pitch,
++                                               (size_t)s->W * s->elem_bytes, s->H, 16));
++            if (ret < 0)
++                return ret;
++            s->lin_pitch = pitch;   /* identical for every same-width allocation */
++        }
++        /* persistent input textures over the pack buffers */
++        if ((ret = make_input_tex(ctx, s->lin_warp0, s->lin_pitch, &s->t_in0)) < 0) return ret;
++        if ((ret = make_input_tex(ctx, s->lin_warp1, s->lin_pitch, &s->t_in1)) < 0) return ret;
++        if (s->is_packed_rgb) {
++            /* RGB: the downscale/flow backbone reads the same RGBA as the warp */
++            s->t_fl0 = s->t_in0;
++            s->t_fl1 = s->t_in1;
++        } else {
++            if ((ret = make_input_tex(ctx, s->lin_flow0, s->lin_pitch, &s->t_fl0)) < 0) return ret;
++            if ((ret = make_input_tex(ctx, s->lin_flow1, s->lin_pitch, &s->t_fl1)) < 0) return ret;
++        }
++    }
++
++    av_log(ctx, AV_LOG_INFO, "Smooth Motion graph generated for %dx%d "
++           "(scratch %.1f MiB)\n", s->W, s->H,
++           (double)(sz[0]+sz[1]+sz[2]+sz[3]) / (1<<20));
++    return 0;
++}
++/* ------------------------------------------------------------------------- *
++ * Interpolation: replay the generated 25-launch graph.
++ * ------------------------------------------------------------------------- */
++/* array->device (output CUDA array -> linear packed buffer for unpack) */
++static int copy_array_to_lin(AVFilterContext *ctx, CUarray src, CUdeviceptr lin)
++{
++    SmoothMotionContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    CUDA_MEMCPY2D c = { 0 };
++    c.srcMemoryType = CU_MEMORYTYPE_ARRAY;  c.srcArray = src;
++    c.dstMemoryType = CU_MEMORYTYPE_DEVICE; c.dstDevice = lin; c.dstPitch = s->lin_pitch;
++    c.WidthInBytes = s->W * s->elem_bytes; c.Height = s->H;
++    return CHECK_CU(cu->cuMemcpy2DAsync(&c, s->stream));
++}
++
++/* pack a YUV source frame into the packed warp buffer (Y,U,V,255) and, if flow
++ * != 0, the luma-grey flow buffer (Y,Y,Y,255), upsampling 4:2:0 chroma. */
++static int launch_pack(AVFilterContext *ctx, AVFrame *src,
++                       CUdeviceptr warp, CUdeviceptr flow)
++{
++    SmoothMotionContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    int W = s->W, H = s->H, pw = s->lin_pitch, pf = s->lin_pitch;
++    CUdeviceptr p0 = (CUdeviceptr)src->data[0];
++    CUdeviceptr p1 = (CUdeviceptr)src->data[1];
++    CUdeviceptr p2 = (CUdeviceptr)src->data[2];
++    int l0 = src->linesize[0], l1 = src->linesize[1], l2 = src->linesize[2];
++    unsigned bx = (W + 15) / 16, by = (H + 15) / 16;
++
++    /* packed RGB (x2rgb10): one 32-bit-word plane -> RGBA16 warp buffer.  The
++     * flow texture aliases the warp buffer (set up in setup_graph), so no flow
++     * store; the flow argument is ignored. */
++    if (s->is_packed_rgb) {
++        void *args[] = { &p0,&l0, &warp,&pw, &W,&H };
++        return CHECK_CU(cu->cuLaunchKernel(s->fn_pack, bx, by, 1, 16, 16, 1,
++                                           0, s->stream, args, NULL));
++    }
++
++    /* packed 4:4:4 YUV: one interleaved plane -> warp + luma-grey flow */
++    if (format_is_packed_yuv(s->format)) {
++        void *args[] = { &p0,&l0, &warp,&pw, &flow,&pf, &W,&H };
++        return CHECK_CU(cu->cuLaunchKernel(s->fn_pack, bx, by, 1, 16, 16, 1,
++                                           0, s->stream, args, NULL));
++    }
++
++    /* semi-planar (NV12/NV16/P0xx/P2xx): 2 planes;
++     * planar (YUV420P/YUV444P): 3 planes */
++    int semiplanar = s->format == AV_PIX_FMT_NV12 ||
++                     s->format == AV_PIX_FMT_NV16 ||
++                     s->format == AV_PIX_FMT_P010 ||
++                     s->format == AV_PIX_FMT_P016 ||
++                     s->format == AV_PIX_FMT_P210 ||
++                     s->format == AV_PIX_FMT_P212 ||
++                     s->format == AV_PIX_FMT_P216;
++    void *args_semi[]   = { &p0,&l0, &p1,&l1, &warp,&pw, &flow,&pf, &W,&H };
++    void *args_planar[] = { &p0,&l0, &p1,&l1, &p2,&l2, &warp,&pw, &flow,&pf, &W,&H };
++    void **args = semiplanar ? args_semi : args_planar;
++
++    return CHECK_CU(cu->cuLaunchKernel(s->fn_pack, bx, by, 1, 16, 16, 1,
++                                       0, s->stream, args, NULL));
++}
++
++/* de-interleave the linear packed buffer into a planar YUV444P frame */
++static int launch_unpack(AVFilterContext *ctx, CUdeviceptr src, AVFrame *dst)
++{
++    SmoothMotionContext *s = ctx->priv;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    int W = s->W, H = s->H, ps = s->lin_pitch;
++    CUdeviceptr y = (CUdeviceptr)dst->data[0];
++    CUdeviceptr u = (CUdeviceptr)dst->data[1];
++    CUdeviceptr v = (CUdeviceptr)dst->data[2];
++    int ly = dst->linesize[0], lu = dst->linesize[1], lv = dst->linesize[2];
++    unsigned bx = (W + 15) / 16, by = (H + 15) / 16;
++
++    /* packed RGB (x2rgb10): RGBA16 -> a single 32-bit-word plane */
++    if (s->is_packed_rgb) {
++        void *rgb_args[] = { &src,&ps, &y,&ly, &W,&H };
++        return CHECK_CU(cu->cuLaunchKernel(s->fn_unpack, bx, by, 1, 16, 16, 1,
++                                           0, s->stream, rgb_args, NULL));
++    }
++
++    void *args[] = { &src,&ps, &y,&ly, &u,&lu, &v,&lv, &W,&H };
++    return CHECK_CU(cu->cuLaunchKernel(s->fn_unpack, bx, by, 1, 16, 16, 1,
++                                       0, s->stream, args, NULL));
++}
++
++/* Emit a source frame through the output hwframe pool (device->device copy) so
++ * every frame leaving the filter shares one hwframe context. */
++static int passthrough_frame(AVFilterContext *ctx, AVFrame *src)
++{
++    SmoothMotionContext *s = ctx->priv;
++    AVFilterLink *outlink = ctx->outputs[0];
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    CUDA_MEMCPY2D c = { 0 };
++    int ret;
++
++    s->work = ff_get_video_buffer(outlink, outlink->w, outlink->h);
++    if (!s->work)
++        return AVERROR(ENOMEM);
++    av_frame_copy_props(s->work, src);
++
++    if (s->is_yuv && !s->packed) {
++        /* convert the source (4:2:0/4:4:4) to the YUV444P output: pack (chroma
++         * upsample) then de-interleave; no network, no flow buffer.  lin_warp0 is
++         * free scratch here (no interpolation in flight). */
++        if ((ret = launch_pack(ctx, src, s->lin_warp0, 0)) < 0)
++            return ret;
++        if ((ret = launch_unpack(ctx, s->lin_warp0, s->work)) < 0)
++            return ret;
++        /* No sync: the unpack into s->work is stream-ordered w.r.t. any
++         * same-stream downstream consumer, and nothing here depends on the
++         * host observing completion (matches every other CUDA filter). */
++        return 0;
++    }
++
++    if (s->packed && (s->is_yuv || s->is_packed_rgb)) {
++        /* packed output: the pack kernel already writes the warp buffer in the
++         * output frame's byte order (VUYX / XV48LE for YUV, RGBA16 for x2rgb10),
++         * so run it into scratch and copy that out - no network, no repack.
++         * lin_warp0 is free here (no interpolation). */
++        if ((ret = launch_pack(ctx, src, s->lin_warp0, 0)) < 0)
++            return ret;
++        c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
++        c.srcDevice = s->lin_warp0;
++        c.srcPitch = s->lin_pitch;
++        c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
++        c.dstDevice = (CUdeviceptr)s->work->data[0];
++        c.dstPitch = s->work->linesize[0];
++        c.WidthInBytes = s->W * s->elem_bytes;   /* interleaved 4-channel pixel */
++        c.Height = s->H;
++        return CHECK_CU(cu->cuMemcpy2DAsync(&c, s->stream));
++    }
++
++    c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
++    c.srcDevice = (CUdeviceptr)src->data[0];
++    c.srcPitch = src->linesize[0];
++    c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
++    c.dstDevice = (CUdeviceptr)s->work->data[0];
++    c.dstPitch = s->work->linesize[0];
++    /* straight-through copy (RGB, rgba64, or x2rgb10 -> x2rgb10): frame_bytes is
++     * the true per-pixel size (4 for x2rgb10; elem_bytes is its internal 8). */
++    c.WidthInBytes = s->W * s->frame_bytes;
++    c.Height = s->H;
++    /* device->device async copy on the stream; no host-side sync needed - the
++     * result is ordered for any same-stream consumer downstream. */
++    return CHECK_CU(cu->cuMemcpy2DAsync(&c, s->stream));
++}
++
++static int interpolate_frame(AVFilterContext *ctx, int64_t work_pts)
++{
++    SmoothMotionContext *s = ctx->priv;
++    AVFilterLink *outlink = ctx->outputs[0];
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    int ret;
++
++    s->work = ff_get_video_buffer(outlink, outlink->w, outlink->h);
++    if (!s->work)
++        return AVERROR(ENOMEM);
++    av_frame_copy_props(s->work, s->f0);
++
++    if (s->is_yuv || s->is_packed_rgb) {
++        /* pack both frames into their persistent warp (+ luma-grey flow, YUV
++         * only) buffers; the input textures are already bound over these
++         * (setup_graph).  For packed RGB lin_flow* is unallocated (0) and ignored. */
++        if ((ret = launch_pack(ctx, s->f0, s->lin_warp0, s->lin_flow0)) < 0) return ret;
++        if ((ret = launch_pack(ctx, s->f1, s->lin_warp1, s->lin_flow1)) < 0) return ret;
++    } else {
++        /* RGB: bind input textures directly over the source frames (no copy).
++         * downscale reads the same RGB textures as the warp (t_fl* == t_in*). */
++        if ((ret = make_input_tex(ctx, (CUdeviceptr)s->f0->data[0],
++                                  s->f0->linesize[0], &s->t_in0)) < 0) return ret;
++        if ((ret = make_input_tex(ctx, (CUdeviceptr)s->f1->data[0],
++                                  s->f1->linesize[0], &s->t_in1)) < 0) return ret;
++        s->t_fl0 = s->t_in0;
++        s->t_fl1 = s->t_in1;
++    }
++
++    /* fill the graph with the current frames' tex/surf handles; sm_fill_params writes
++     * them into in_tex0/in_tex1/out_surf, so no by-offset patching here.  The flow
++     * (downscale) path uses the luma textures for YUV, == the warp textures for RGB. */
++    SMHandles h = {
++        .flow_tex = { s->t_fl0, s->t_fl1 },
++        .warp_tex = { s->t_in0, s->t_in1 },
++        .out_surf = s->s_out,
++    };
++    sm_fill_params(s->W, s->H, s->gen, s->sb, &h);
++
++    for (int i = 0; i < SM_NLAUNCH; i++) {
++        SMGenLaunch *L = &s->gen[i];
++        void *kp[1] = { L->params };
++
++        ret = CHECK_CU(cu->cuLaunchKernel(s->launch_fn[i],
++                                          L->grid[0], L->grid[1], L->grid[2],
++                                          L->block[0], L->block[1], L->block[2],
++                                          L->smem, s->stream, kp, NULL));
++        if (ret < 0)
++            return ret;
++    }
++
++    /* copy the warp output array back into the work frame */
++    if (!s->direct_out) {
++        /* packed array -> linear -> planar YUV444P, packed 4:4:4, or repacked
++         * x2rgb10 (whichever fn_unpack selects) */
++        if ((ret = copy_array_to_lin(ctx, s->a_out, s->lin_out)) < 0)
++            return ret;
++        if ((ret = launch_unpack(ctx, s->lin_out, s->work)) < 0)
++            return ret;
++    } else {
++        CUDA_MEMCPY2D c = { 0 };
++        c.srcMemoryType = CU_MEMORYTYPE_ARRAY;
++        c.srcArray = s->a_out;
++        c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
++        c.dstDevice = (CUdeviceptr)s->work->data[0];
++        c.dstPitch = s->work->linesize[0];
++        c.WidthInBytes = s->W * s->elem_bytes;
++        c.Height = s->H;
++        if ((ret = CHECK_CU(cu->cuMemcpy2DAsync(&c, s->stream))) < 0)
++            return ret;
++    }
++
++    /* RGB input textures are bound per-frame over the source frames; release them
++     * now that the launches have completed (YUV textures are persistent).  This
++     * is the only sync the filter needs: cuTexObjectDestroy is a host call with
++     * no stream ordering, so the downscale/warp launches that read these textures
++     * must be drained first.  The YUV and packed-RGB paths have persistent
++     * textures (no per-frame destroy) and are fully stream-ordered downstream,
++     * so they return without blocking. */
++    if (!s->is_yuv && !s->is_packed_rgb) {
++        ret = CHECK_CU(cu->cuStreamSynchronize(s->stream));
++        if (s->t_in0) CHECK_CU(cu->cuTexObjectDestroy(s->t_in0));
++        if (s->t_in1) CHECK_CU(cu->cuTexObjectDestroy(s->t_in1));
++        s->t_in0 = s->t_in1 = s->t_fl0 = s->t_fl1 = 0;
++    }
++    return ret;
++}
++
++/* cadence: choose / synthesize the next output frame (from vf_nvoffruc) */
++static int process_work_frame(AVFilterContext *ctx)
++{
++    SmoothMotionContext *s = ctx->priv;
++    int64_t work_pts, interpolate, interpolate8;
++    int ret;
++
++    if (!s->f1)
++        return 0;
++    if (!s->f0 && !s->flush)
++        return 0;
++
++    work_pts = s->start_pts + av_rescale_q(s->n, av_inv_q(s->dest_frame_rate),
++                                           s->dest_time_base);
++    if (work_pts >= s->pts1 && !s->flush)
++        return 0;
++
++    if (!s->f0) {
++        av_assert1(s->flush);
++        ret = passthrough_frame(ctx, s->f1);
++        if (ret < 0)
++            return ret;
++    } else {
++        if (work_pts >= s->pts1 + s->delta && s->flush)
++            return 0;
++
++        interpolate  = av_rescale(work_pts - s->pts0, s->blend_factor_max, s->delta);
++        interpolate8 = av_rescale(work_pts - s->pts0, 256, s->delta);
++
++        if (interpolate >= s->blend_factor_max || interpolate8 > s->interp_end) {
++            ret = passthrough_frame(ctx, s->f1);
++        } else if (interpolate <= 0 || interpolate8 < s->interp_start) {
++            ret = passthrough_frame(ctx, s->f0);
++        } else {
++            ret = interpolate_frame(ctx, work_pts);
++        }
++        if (ret < 0)
++            return ret;
++    }
++
++    if (!s->work)
++        return AVERROR(ENOMEM);
++
++    s->work->pts = work_pts;
++    s->n++;
++    return 1;
++}
++
++static av_cold int init(AVFilterContext *ctx)
++{
++    SmoothMotionContext *s = ctx->priv;
++    s->start_pts = AV_NOPTS_VALUE;
++
++    s->libcuda = dlopen("libcuda.so.1", RTLD_NOW | RTLD_GLOBAL);
++    if (s->libcuda) {
++        s->surfCreate  = (tcuSurfObjectCreate)dlsym(s->libcuda, "cuSurfObjectCreate");
++        s->surfDestroy = (tcuSurfObjectDestroy)dlsym(s->libcuda, "cuSurfObjectDestroy");
++    }
++    if (!s->surfCreate || !s->surfDestroy) {
++        av_log(ctx, AV_LOG_ERROR, "cuSurfObjectCreate unavailable\n");
++        return AVERROR_EXTERNAL;
++    }
++    return 0;
++}
++
++/* Release everything the CUDA setup built, against the context it was built on,
++ * and reset so a graph can be built again.  Safe when nothing is configured.
++ * config_output() may run more than once -- a mid-stream reconfigure, or a media
++ * player rebuilding its filter graph on seek -- so this must leave no leaked
++ * allocation and no stale handle behind.  The rtx_cuda-based sibling filters get
++ * this from ff_rtx_free_graph(); this one owns its CUDA objects directly. */
++static void free_graph(AVFilterContext *ctx)
++{
++    SmoothMotionContext *s = ctx->priv;
++
++    if (s->hwctx) {
++        CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++        CHECK_CU(cu->cuCtxPushCurrent(s->cu_ctx));
++        /* persistent input textures (YUV + packed RGB; direct-RGB textures are
++         * released per-frame).  For packed RGB t_fl* alias t_in*, so destroy
++         * only t_in* to avoid a double free. */
++        if (s->is_yuv) {
++            if (s->t_in0) CHECK_CU(cu->cuTexObjectDestroy(s->t_in0));
++            if (s->t_in1) CHECK_CU(cu->cuTexObjectDestroy(s->t_in1));
++            if (s->t_fl0) CHECK_CU(cu->cuTexObjectDestroy(s->t_fl0));
++            if (s->t_fl1) CHECK_CU(cu->cuTexObjectDestroy(s->t_fl1));
++        } else if (s->is_packed_rgb) {
++            if (s->t_in0) CHECK_CU(cu->cuTexObjectDestroy(s->t_in0));
++            if (s->t_in1) CHECK_CU(cu->cuTexObjectDestroy(s->t_in1));
++        }
++        if (s->s_out) s->surfDestroy(s->s_out);   /* init() proved it resolves */
++        if (s->a_out) CHECK_CU(cu->cuArrayDestroy(s->a_out));
++        if (s->lin_warp0) CHECK_CU(cu->cuMemFree(s->lin_warp0));
++        if (s->lin_warp1) CHECK_CU(cu->cuMemFree(s->lin_warp1));
++        if (s->lin_flow0) CHECK_CU(cu->cuMemFree(s->lin_flow0));
++        if (s->lin_flow1) CHECK_CU(cu->cuMemFree(s->lin_flow1));
++        if (s->lin_out)   CHECK_CU(cu->cuMemFree(s->lin_out));
++        for (int a = 0; a < 4; a++)
++            if (s->scratch[a]) CHECK_CU(cu->cuMemFree(s->scratch[a]));
++        for (int m = 0; m < s->n_modules; m++)
++            if (s->modules[m]) CHECK_CU(cu->cuModuleUnload(s->modules[m]));
++        if (s->cvt_module) CHECK_CU(cu->cuModuleUnload(s->cvt_module));
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    /* Drop every handle: a rebuild writes a fresh set over these, and a second
++     * free must not touch a released object. */
++    s->t_in0 = s->t_in1 = s->t_fl0 = s->t_fl1 = 0;
++    s->s_out = 0;
++    s->a_out = NULL;
++    s->lin_warp0 = s->lin_warp1 = s->lin_flow0 = s->lin_flow1 = s->lin_out = 0;
++    s->lin_pitch = 0;
++    s->cvt_module = NULL;
++    s->fn_pack = s->fn_unpack = NULL;
++    s->n_modules = 0;
++    memset(s->scratch, 0, sizeof(s->scratch));
++    memset(s->sb, 0, sizeof(s->sb));
++    memset(s->modules, 0, sizeof(s->modules));
++    memset(s->mod_names, 0, sizeof(s->mod_names));
++    memset(s->launch_fn, 0, sizeof(s->launch_fn));
++
++    av_buffer_unref(&s->device_ref);
++    s->hwctx  = NULL;
++    s->cu_ctx = NULL;
++    s->stream = NULL;
++}
++
++static av_cold void uninit(AVFilterContext *ctx)
++{
++    SmoothMotionContext *s = ctx->priv;
++
++    free_graph(ctx);
++    av_frame_free(&s->f0);
++    av_frame_free(&s->f1);
++    if (s->libcuda)
++        dlclose(s->libcuda);
++}
++
++static const enum AVPixelFormat supported_formats[] = {
++    /* RGB: fed straight through (the net derives luma internally) */
++    AV_PIX_FMT_RGB0,
++    AV_PIX_FMT_BGR0,
++    AV_PIX_FMT_RGBA,
++    AV_PIX_FMT_BGRA,
++    /* 16-bit packed RGBA (64bpp): same straight-through path, 8 bytes/pixel;
++     * the texture binds as UNSIGNED_INT16 and the output array as UNORM_INT16X4 */
++    AV_PIX_FMT_RGBA64,
++    /* packed 10-bit RGB (2:10:10:10, 32bpp): not byte-separable, so it is
++     * unpacked to RGBA16 on the way in and repacked on the way out (elem_bytes
++     * 8 internally, frame_bytes 4); emitted unchanged (x2rgb10 or x2bgr10) */
++    AV_PIX_FMT_X2RGB10LE,
++    AV_PIX_FMT_X2BGR10LE,
++    /* 8-bit YUV: luma->flow, packed YUV->warp, emitted as planar YUV444P
++     * (NV16 is 4:2:2; chroma upsampled horizontally only) */
++    AV_PIX_FMT_NV12,
++    AV_PIX_FMT_NV16,
++    AV_PIX_FMT_YUV420P,
++    AV_PIX_FMT_YUV444P,
++    /* 16-bit YUV (P010 10-bit, P016 16-bit 4:2:0; P210 10-bit, P212 12-bit,
++     * P216 16-bit 4:2:2; planar 4:4:4 incl. 10/12-bit MSB-aligned which share
++     * YUV444P16's uint16 layout): emitted as YUV444P16 */
++    AV_PIX_FMT_P010,
++    AV_PIX_FMT_P016,
++    AV_PIX_FMT_P210,
++    AV_PIX_FMT_P212,
++    AV_PIX_FMT_P216,
++    AV_PIX_FMT_YUV444P16,
++    AV_PIX_FMT_YUV444P10MSB,
++    AV_PIX_FMT_YUV444P12MSB,
++    /* packed 4:4:4 YUV: one interleaved plane, chroma already full-res.  8-bit
++     * (VUYX/VUYA, UYVA, AYUV), 16-bit (XV48LE, AYUV64LE) and packed 10-bit
++     * (XV30LE, 2:10:10:10 -> RGBA16 internal).  Same is_yuv pack/unpack path;
++     * the alpha/X channel is ignored. */
++    AV_PIX_FMT_VUYX,
++    AV_PIX_FMT_VUYA,
++    AV_PIX_FMT_UYVA,
++    AV_PIX_FMT_AYUV,
++    AV_PIX_FMT_XV48LE,
++    AV_PIX_FMT_AYUV64LE,
++    AV_PIX_FMT_XV30LE,
++    AV_PIX_FMT_NONE
++};
++
++static int format_is_supported(enum AVPixelFormat fmt)
++{
++    for (int i = 0; i < FF_ARRAY_ELEMS(supported_formats); i++)
++        if (supported_formats[i] == fmt)
++            return 1;
++    return 0;
++}
++
++/* planar 16-bit 4:4:4: full-res uint16 planes (incl. 10/12-bit MSB-aligned, which
++ * share YUV444P16's layout; the UNORM_INT16 normalize absorbs the MSB scaling) */
++static int format_is_planar444_16(enum AVPixelFormat fmt)
++{
++    return fmt == AV_PIX_FMT_YUV444P16 ||
++           fmt == AV_PIX_FMT_YUV444P10MSB ||
++           fmt == AV_PIX_FMT_YUV444P12MSB;
++}
++
++/* packed 4:4:4 YUV in one interleaved plane (chroma already full-res); the
++ * 16-bit and 10-bit members are routed through format_is_16bit below */
++static int format_is_packed_yuv(enum AVPixelFormat fmt)
++{
++    return fmt == AV_PIX_FMT_VUYX ||
++           fmt == AV_PIX_FMT_VUYA ||
++           fmt == AV_PIX_FMT_UYVA ||
++           fmt == AV_PIX_FMT_AYUV ||
++           fmt == AV_PIX_FMT_XV48LE ||
++           fmt == AV_PIX_FMT_AYUV64LE ||
++           fmt == AV_PIX_FMT_XV30LE;
++}
++
++static int format_is_16bit(enum AVPixelFormat fmt)
++{
++    return fmt == AV_PIX_FMT_P010 ||
++           fmt == AV_PIX_FMT_P016 ||
++           fmt == AV_PIX_FMT_P210 ||
++           fmt == AV_PIX_FMT_P212 ||
++           fmt == AV_PIX_FMT_P216 ||
++           fmt == AV_PIX_FMT_XV48LE ||     /* packed 4:4:4, 16-bit */
++           fmt == AV_PIX_FMT_AYUV64LE ||
++           fmt == AV_PIX_FMT_XV30LE ||     /* packed 4:4:4, 10-bit -> 16-bit */
++           format_is_planar444_16(fmt);
++}
++
++/* packed RGB that is not byte-separable (bit-packed fields), so it needs an
++ * unpack-to-RGBA16 / repack pass rather than a direct texture bind */
++static int format_is_packed_rgb(enum AVPixelFormat fmt)
++{
++    return fmt == AV_PIX_FMT_X2RGB10LE ||
++           fmt == AV_PIX_FMT_X2BGR10LE;
++}
++
++static int format_is_yuv(enum AVPixelFormat fmt)
++{
++    return fmt == AV_PIX_FMT_NV12 ||
++           fmt == AV_PIX_FMT_NV16 ||
++           fmt == AV_PIX_FMT_YUV420P ||
++           fmt == AV_PIX_FMT_YUV444P ||
++           format_is_packed_yuv(fmt) ||
++           format_is_16bit(fmt);
++}
++
++static int activate(AVFilterContext *ctx)
++{
++    int ret, status;
++    AVFilterLink *inlink = ctx->inputs[0];
++    AVFilterLink *outlink = ctx->outputs[0];
++    SmoothMotionContext *s = ctx->priv;
++    AVFrame *inpicref;
++    int64_t pts;
++    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
++    CUcontext dummy;
++
++    FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
++
++    CHECK_CU(cu->cuCtxPushCurrent(s->cu_ctx));
++
++retry:
++    ret = process_work_frame(ctx);
++    if (ret < 0) {
++        goto exit;
++    } else if (ret == 1) {
++        ret = ff_filter_frame(outlink, s->work);
++        goto exit;
++    }
++
++    ret = ff_inlink_consume_frame(inlink, &inpicref);
++    if (ret < 0)
++        goto exit;
++
++    if (inpicref) {
++        if (inpicref->flags & AV_FRAME_FLAG_INTERLACED)
++            av_log(ctx, AV_LOG_WARNING, "Interlaced frame found - output will not be correct.\n");
++        if (inpicref->pts == AV_NOPTS_VALUE) {
++            av_log(ctx, AV_LOG_WARNING, "Ignoring frame without PTS.\n");
++            av_frame_free(&inpicref);
++        }
++    }
++
++    if (inpicref) {
++        pts = av_rescale_q(inpicref->pts, s->srce_time_base, s->dest_time_base);
++        if (s->f1 && pts == s->pts1) {
++            av_log(ctx, AV_LOG_WARNING, "Ignoring frame with same PTS.\n");
++            av_frame_free(&inpicref);
++        }
++    }
++
++    if (inpicref) {
++        av_frame_free(&s->f0);
++        s->f0 = s->f1;
++        s->pts0 = s->pts1;
++        s->f1 = inpicref;
++        s->pts1 = pts;
++        s->delta = s->pts1 - s->pts0;
++
++        if (s->delta < 0) {
++            av_log(ctx, AV_LOG_WARNING, "PTS discontinuity.\n");
++            s->start_pts = s->pts1;
++            s->n = 0;
++            av_frame_free(&s->f0);
++        }
++        if (s->start_pts == AV_NOPTS_VALUE)
++            s->start_pts = s->pts1;
++        goto retry;
++    }
++
++    if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
++        if (!s->flush) {
++            s->flush = 1;
++            goto retry;
++        }
++        ff_outlink_set_status(outlink, status, pts);
++        ret = 0;
++        goto exit;
++    }
++
++    /* FF_FILTER_FORWARD_WANTED expanded: the macro returns 0 directly, which
++     * would skip the pop below and leave our context on the thread's stack -- on
++     * the most-taken path through activate(), so it would grow once per frame. */
++    if (ff_outlink_frame_wanted(outlink)) {
++        ff_inlink_request_frame(inlink);
++        ret = 0;
++        goto exit;
++    }
++    ret = FFERROR_NOT_READY;
++
++exit:
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    return ret;
++}
++
++static int config_input(AVFilterLink *inlink)
++{
++    AVFilterContext *ctx = inlink->dst;
++    SmoothMotionContext *s = ctx->priv;
++    s->srce_time_base = inlink->time_base;
++    s->blend_factor_max = 1 << (8 - 1);
++    return 0;
++}
++
++static int config_output(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    AVFilterLink *inlink = outlink->src->inputs[0];
++    FilterLink   *il     = ff_filter_link(inlink);
++    FilterLink   *ol     = ff_filter_link(outlink);
++    AVHWFramesContext *in_frames_ctx, *output_frames;
++    SmoothMotionContext *s = ctx->priv;
++    CudaFunctions *cu;
++    CUcontext dummy;
++    int exact, ret;
++
++    /* This can run again on a link reconfigure or a graph rebuild; drop the
++     * previous graph first so the rebuild neither leaks nor inherits stale
++     * device pointers, and drop the buffered source frames with it -- they are
++     * sized for the old configuration. */
++    free_graph(ctx);
++    av_frame_free(&s->f0);
++    av_frame_free(&s->f1);
++    s->start_pts = AV_NOPTS_VALUE;
++    s->n = 0;
++    s->flush = 0;
++
++    /* The network emits the midpoint frame, so the output rate is always 2x. */
++    s->dest_frame_rate = av_mul_q(il->frame_rate, (AVRational){ 2, 1 });
++
++    exact = av_reduce(&s->dest_time_base.num, &s->dest_time_base.den,
++                      av_gcd((int64_t)s->srce_time_base.num * s->dest_frame_rate.num,
++                             (int64_t)s->srce_time_base.den * s->dest_frame_rate.den),
++                      (int64_t)s->srce_time_base.den * s->dest_frame_rate.num, INT_MAX);
++    if (!s->dest_time_base.num || !s->dest_time_base.den) {
++        exact = av_reduce(&s->dest_time_base.num, &s->dest_time_base.den,
++                          s->dest_frame_rate.den, s->dest_frame_rate.num, INT_MAX);
++    }
++    av_log(ctx, AV_LOG_INFO, "time base:%u/%u -> %u/%u exact:%d\n",
++           s->srce_time_base.num, s->srce_time_base.den,
++           s->dest_time_base.num, s->dest_time_base.den, exact);
++
++    ol->frame_rate    = s->dest_frame_rate;
++    outlink->time_base = s->dest_time_base;
++
++    if (!il->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on input\n");
++        return AVERROR(EINVAL);
++    }
++    in_frames_ctx = (AVHWFramesContext*)il->hw_frames_ctx->data;
++    s->format = in_frames_ctx->sw_format;
++    if (!format_is_supported(s->format)) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input format %s\n",
++               av_get_pix_fmt_name(s->format));
++        return AVERROR(ENOSYS);
++    }
++    s->is_yuv = format_is_yuv(s->format);
++    s->is_packed_rgb = format_is_packed_rgb(s->format);
++    /* 8 bytes/pixel for any 16-bit 4-channel INTERNAL path: the 16-bit YUV
++     * formats (routed through format_is_16bit), packed 16-bit RGBA (rgba64), and
++     * x2rgb10 (unpacked to RGBA16).  rgba64/x2rgb10 are RGB not YUV, so they are
++     * kept out of format_is_16bit/format_is_yuv. */
++    s->elem_bytes = (format_is_16bit(s->format) ||
++                     s->format == AV_PIX_FMT_RGBA64 ||
++                     s->is_packed_rgb) ? 2 * SM_CH : SM_CH;
++    /* bytes per pixel of the actual frame; differs from elem_bytes only for
++     * x2rgb10 (a 32-bit packed word that unpacks to 8-byte RGBA16 internally). */
++    s->frame_bytes = s->is_packed_rgb ? 4 : s->elem_bytes;
++    /* output is a plain array->frame copy (no de-interleave kernel) for the
++     * straight-through RGB formats, and for every `packed` request: the network
++     * already writes VUYX / XV48LE (YUV) or RGBA16 (x2rgb10) in the output
++     * frame's byte order, so nothing needs reshuffling. */
++    s->direct_out = (!s->is_yuv && !s->is_packed_rgb) || s->packed;
++    s->W = inlink->w;
++    s->H = inlink->h;
++    if (s->W < 64 || s->H < 64)
++        av_log(ctx, AV_LOG_WARNING, "Very small frame %dx%d; results may be poor.\n",
++               s->W, s->H);
++
++    s->device_ref = av_buffer_ref(in_frames_ctx->device_ref);
++    if (!s->device_ref)
++        return AVERROR(ENOMEM);
++    s->hwctx  = ((AVHWDeviceContext*)s->device_ref->data)->hwctx;
++    s->cu_ctx = s->hwctx->cuda_ctx;
++    s->stream = s->hwctx->stream;
++    cu = s->hwctx->internal->cuda_dl;
++
++    av_buffer_unref(&ol->hw_frames_ctx);
++    ol->hw_frames_ctx = av_hwframe_ctx_alloc(s->device_ref);
++    if (!ol->hw_frames_ctx)
++        return AVERROR(ENOMEM);
++    output_frames = (AVHWFramesContext*)ol->hw_frames_ctx->data;
++    output_frames->format            = AV_PIX_FMT_CUDA;
++    /* YUV inputs are emitted as planar 4:4:4 (no output-side chroma downsample);
++     * the network produces packed 4:4:4 and we de-interleave it.  16-bit inputs
++     * (P010/P016) keep full precision via YUV444P16.  With `packed`, the network
++     * buffer is emitted directly: packed 4:4:4 (VUYX / XV48LE) for YUV, and the
++     * native RGBA16 (rgba64) for x2rgb10/x2bgr10. */
++    if (s->is_yuv)
++        output_frames->sw_format = s->packed ?
++            (s->elem_bytes == 8 ? AV_PIX_FMT_XV48LE : AV_PIX_FMT_VUYX) :
++            (s->elem_bytes == 8 ? AV_PIX_FMT_YUV444P16 : AV_PIX_FMT_YUV444P);
++    else if (s->is_packed_rgb && s->packed)
++        output_frames->sw_format = AV_PIX_FMT_RGBA64;
++    else
++        output_frames->sw_format = s->format;
++    output_frames->width             = ctx->inputs[0]->w;
++    output_frames->height            = ctx->inputs[0]->h;
++    output_frames->initial_pool_size = 4;
++
++    ret = ff_filter_init_hw_frames(ctx, outlink, 0);
++    if (ret < 0)
++        return ret;
++    ret = av_hwframe_ctx_init(ol->hw_frames_ctx);
++    if (ret < 0) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to init CUDA frame context: %d\n", ret);
++        return ret;
++    }
++
++    outlink->w = inlink->w;
++    outlink->h = inlink->h;
++
++    ret = CHECK_CU(cu->cuCtxPushCurrent(s->cu_ctx));
++    if (ret < 0)
++        return ret;
++    ret = setup_graph(ctx);
++    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    if (ret < 0) {
++        av_log(ctx, AV_LOG_ERROR, "Smooth Motion graph setup failed (%d)\n", ret);
++        return ret;
++    }
++
++    return 0;
++}
++
++static const AVFilterPad smoothmotion_cuda_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_input },
++};
++
++static const AVFilterPad smoothmotion_cuda_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_output },
++};
++
++const FFFilter ff_vf_smoothmotion_cuda = {
++    .p.name        = "smoothmotion_cuda",
++    .p.description  = NULL_IF_CONFIG_SMALL("Frame-rate up-conversion using NVIDIA Smooth Motion CUDA kernels"),
++    .p.priv_class   = &smoothmotion_cuda_class,
++    .priv_size     = sizeof(SmoothMotionContext),
++    .init          = init,
++    .uninit        = uninit,
++    .activate      = activate,
++    FILTER_INPUTS(smoothmotion_cuda_inputs),
++    FILTER_OUTPUTS(smoothmotion_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+diff --git a/libavfilter/vf_smoothmotion_cuda.cu b/libavfilter/vf_smoothmotion_cuda.cu
+new file mode 100644
+index 0000000000..3c7128390a
+--- /dev/null
++++ b/libavfilter/vf_smoothmotion_cuda.cu
+@@ -0,0 +1,462 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/*
++ * Pack/unpack kernels for native-YUV support in vf_smoothmotion_cuda.
++ *
++ * The Smooth Motion network consumes two packed UNORM_INT8X4 input textures and
++ * writes a packed UNORM_INT8X4 output surface.  To run it on YUV without any RGB
++ * colorspace conversion we exploit that the inputs are read in only two kernels:
++ *   - downscale (feeds the optical-flow backbone) gets a LUMA-grey texture
++ *     (Y,Y,Y,255) so the RGB-trained net estimates flow from true luminance;
++ *   - warp_coarse (renders the output by a per-channel flow-guided blend, which
++ *     is colorspace-agnostic) gets the actual packed (Y,U,V,255) texture.
++ * The output surface is then packed (Y,U,V,A) and we de-interleave it to planar
++ * YUV444P.  4:2:0 inputs are chroma-upsampled here (YUV-internal bilinear, no RGB
++ * matrix); the filter advertises a YUV444P output so there is no output-side
++ * chroma downsample.
++ *
++ * These write to linear scratch buffers (the network I/O lives in CUDA arrays,
++ * which the filter fills via cuMemcpy2D); pitches are in BYTES.
++ */
++
++#include "cuda/vector_helpers.cuh"
++
++static inline __device__ int clampi(int v, int lo, int hi)
++{
++    return v < lo ? lo : (v > hi ? hi : v);
++}
++
++static inline __device__ unsigned char to_u8(float v)
++{
++    int i = (int)(v + 0.5f);
++    return (unsigned char)clampi(i, 0, 255);
++}
++
++/* bilinear sample of a single-byte plane (element stride 1 byte) */
++static inline __device__ float bilin1(const unsigned char *p, int pitch,
++                                      int cw, int ch, float fx, float fy)
++{
++    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
++    float ax = fx - x0, ay = fy - y0;
++    int x1 = x0 + 1, y1 = y0 + 1;
++    x0 = clampi(x0, 0, cw - 1); x1 = clampi(x1, 0, cw - 1);
++    y0 = clampi(y0, 0, ch - 1); y1 = clampi(y1, 0, ch - 1);
++    float c00 = p[y0 * pitch + x0], c10 = p[y0 * pitch + x1];
++    float c01 = p[y1 * pitch + x0], c11 = p[y1 * pitch + x1];
++    return (c00 * (1 - ax) + c10 * ax) * (1 - ay) + (c01 * (1 - ax) + c11 * ax) * ay;
++}
++
++/* bilinear sample of an interleaved 2-byte plane (NV12 UV), byte offset off */
++static inline __device__ float bilin2(const unsigned char *p, int pitch,
++                                      int cw, int ch, float fx, float fy, int off)
++{
++    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
++    float ax = fx - x0, ay = fy - y0;
++    int x1 = x0 + 1, y1 = y0 + 1;
++    x0 = clampi(x0, 0, cw - 1); x1 = clampi(x1, 0, cw - 1);
++    y0 = clampi(y0, 0, ch - 1); y1 = clampi(y1, 0, ch - 1);
++    float c00 = p[y0 * pitch + x0 * 2 + off], c10 = p[y0 * pitch + x1 * 2 + off];
++    float c01 = p[y1 * pitch + x0 * 2 + off], c11 = p[y1 * pitch + x1 * 2 + off];
++    return (c00 * (1 - ax) + c10 * ax) * (1 - ay) + (c01 * (1 - ax) + c11 * ax) * ay;
++}
++
++/* The warp texture is stored in VUYX byte order (V,U,Y,X), not Y,U,V - the warp
++ * applies one per-pixel flow to all channels identically, so the channel order
++ * is free, and matching a real packed layout lets `packed` output be a plain
++ * array->frame copy (no repack).  The flow texture must keep luma in the R,G,B
++ * slots (the downscale derives luminance from them), so it stays (Y,Y,Y,X). */
++static inline __device__ void store(uchar4 *warp, int pw, uchar4 *flow, int pf,
++                                    int x, int y, int yy, int u, int v)
++{
++    uchar4 *wr = (uchar4 *)((char *)warp + (long)y * pw);
++    wr[x] = make_uchar4(v, u, yy, 255);
++    if (flow) {
++        uchar4 *fr = (uchar4 *)((char *)flow + (long)y * pf);
++        fr[x] = make_uchar4(yy, yy, yy, 255);
++    }
++}
++
++/* ---- 16-bit (P010/P016) variants: same logic on uint16 samples ---- */
++
++static inline __device__ unsigned short to_u16(float v)
++{
++    int i = (int)(v + 0.5f);
++    return (unsigned short)clampi(i, 0, 65535);
++}
++
++/* bilinear sample of an interleaved 2-component uint16 plane (P0xx UV),
++ * short offset off (0=U, 1=V); pitch in bytes */
++static inline __device__ float bilin2_16(const unsigned char *p, int pitch,
++                                         int cw, int ch, float fx, float fy, int off)
++{
++    int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
++    float ax = fx - x0, ay = fy - y0;
++    int x1 = x0 + 1, y1 = y0 + 1;
++    x0 = clampi(x0, 0, cw - 1); x1 = clampi(x1, 0, cw - 1);
++    y0 = clampi(y0, 0, ch - 1); y1 = clampi(y1, 0, ch - 1);
++    const unsigned short *r0 = (const unsigned short *)(p + (long)y0 * pitch);
++    const unsigned short *r1 = (const unsigned short *)(p + (long)y1 * pitch);
++    float c00 = r0[x0 * 2 + off], c10 = r0[x1 * 2 + off];
++    float c01 = r1[x0 * 2 + off], c11 = r1[x1 * 2 + off];
++    return (c00 * (1 - ax) + c10 * ax) * (1 - ay) + (c01 * (1 - ax) + c11 * ax) * ay;
++}
++
++/* 16-bit warp texture is stored in XV48LE byte order (U,Y,V,X) - see store();
++ * the flow texture keeps luma in the R,G,B slots as (Y,Y,Y,X). */
++static inline __device__ void store16(ushort4 *warp, int pw, ushort4 *flow, int pf,
++                                      int x, int y, int yy, int u, int v)
++{
++    ushort4 *wr = (ushort4 *)((char *)warp + (long)y * pw);
++    wr[x] = make_ushort4(u, yy, v, 0xffff);
++    if (flow) {
++        ushort4 *fr = (ushort4 *)((char *)flow + (long)y * pf);
++        fr[x] = make_ushort4(yy, yy, yy, 0xffff);
++    }
++}
++
++extern "C" {
++
++/* YUV420P (3 planes, 4:2:0) -> packed (Y,U,V,255) warp + (Y,Y,Y,255) flow */
++__global__ void Pack_yuv420p(const unsigned char *Y, int pY,
++                             const unsigned char *U, int pU,
++                             const unsigned char *V, int pV,
++                             uchar4 *warp, int pw, uchar4 *flow, int pf,
++                             int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    int cw = (W + 1) / 2, ch = (H + 1) / 2;
++    float fx = (x - 0.5f) * 0.5f, fy = (y - 0.5f) * 0.5f;
++    int yy = Y[(long)y * pY + x];
++    int u  = to_u8(bilin1(U, pU, cw, ch, fx, fy));
++    int v  = to_u8(bilin1(V, pV, cw, ch, fx, fy));
++    store(warp, pw, flow, pf, x, y, yy, u, v);
++}
++
++/* NV12 (Y plane + interleaved UV, 4:2:0) -> packed warp + flow */
++__global__ void Pack_nv12(const unsigned char *Y, int pY,
++                          const unsigned char *UV, int pUV,
++                          uchar4 *warp, int pw, uchar4 *flow, int pf,
++                          int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    int cw = (W + 1) / 2, ch = (H + 1) / 2;
++    float fx = (x - 0.5f) * 0.5f, fy = (y - 0.5f) * 0.5f;
++    int yy = Y[(long)y * pY + x];
++    int u  = to_u8(bilin2(UV, pUV, cw, ch, fx, fy, 0));
++    int v  = to_u8(bilin2(UV, pUV, cw, ch, fx, fy, 1));
++    store(warp, pw, flow, pf, x, y, yy, u, v);
++}
++
++/* NV16 (Y plane + interleaved UV, 4:2:2) -> packed warp + flow.  Chroma is
++ * subsampled horizontally only (full vertical resolution), so fy == y. */
++__global__ void Pack_nv16(const unsigned char *Y, int pY,
++                          const unsigned char *UV, int pUV,
++                          uchar4 *warp, int pw, uchar4 *flow, int pf,
++                          int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    int cw = (W + 1) / 2, ch = H;
++    float fx = (x - 0.5f) * 0.5f, fy = y;
++    int yy = Y[(long)y * pY + x];
++    int u  = to_u8(bilin2(UV, pUV, cw, ch, fx, fy, 0));
++    int v  = to_u8(bilin2(UV, pUV, cw, ch, fx, fy, 1));
++    store(warp, pw, flow, pf, x, y, yy, u, v);
++}
++
++/* YUV444P (3 full-res planes) -> packed warp + flow (no chroma resample) */
++__global__ void Pack_yuv444p(const unsigned char *Y, int pY,
++                             const unsigned char *U, int pU,
++                             const unsigned char *V, int pV,
++                             uchar4 *warp, int pw, uchar4 *flow, int pf,
++                             int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    int yy = Y[(long)y * pY + x];
++    int u  = U[(long)y * pU + x];
++    int v  = V[(long)y * pV + x];
++    store(warp, pw, flow, pf, x, y, yy, u, v);
++}
++
++/* packed (Y,U,V,A) -> planar YUV444P (3 planes) */
++__global__ void Unpack_yuv444p(const uchar4 *src, int ps,
++                               unsigned char *Y, int pY,
++                               unsigned char *U, int pU,
++                               unsigned char *V, int pV,
++                               int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    const uchar4 *sr = (const uchar4 *)((const char *)src + (long)y * ps);
++    uchar4 p = sr[x];   /* VUYX: V,U,Y,X */
++    Y[(long)y * pY + x] = p.z;
++    U[(long)y * pU + x] = p.y;
++    V[(long)y * pV + x] = p.x;
++}
++
++/* P010/P016 (uint16 Y plane + interleaved uint16 UV, 4:2:0) -> packed ushort4
++ * warp (Y,U,V,0xffff) + grey flow (Y,Y,Y,0xffff).  One kernel serves both: the
++ * UNORM_INT16 array normalize absorbs P010's 10-bits-in-MSB scaling. */
++__global__ void Pack_p016(const unsigned char *Y, int pY,
++                          const unsigned char *UV, int pUV,
++                          ushort4 *warp, int pw, ushort4 *flow, int pf,
++                          int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    int cw = (W + 1) / 2, ch = (H + 1) / 2;
++    float fx = (x - 0.5f) * 0.5f, fy = (y - 0.5f) * 0.5f;
++    int yy = ((const unsigned short *)(Y + (long)y * pY))[x];
++    int u  = to_u16(bilin2_16(UV, pUV, cw, ch, fx, fy, 0));
++    int v  = to_u16(bilin2_16(UV, pUV, cw, ch, fx, fy, 1));
++    store16(warp, pw, flow, pf, x, y, yy, u, v);
++}
++
++/* P210/P212 (uint16 Y plane + interleaved uint16 UV, 4:2:2) -> packed ushort4
++ * warp + grey flow.  Like Pack_p016 but chroma is full-height (fy == y); the
++ * UNORM_INT16 normalize absorbs the 10/12-bits-in-MSB scaling for both. */
++__global__ void Pack_p216(const unsigned char *Y, int pY,
++                          const unsigned char *UV, int pUV,
++                          ushort4 *warp, int pw, ushort4 *flow, int pf,
++                          int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    int cw = (W + 1) / 2, ch = H;
++    float fx = (x - 0.5f) * 0.5f, fy = y;
++    int yy = ((const unsigned short *)(Y + (long)y * pY))[x];
++    int u  = to_u16(bilin2_16(UV, pUV, cw, ch, fx, fy, 0));
++    int v  = to_u16(bilin2_16(UV, pUV, cw, ch, fx, fy, 1));
++    store16(warp, pw, flow, pf, x, y, yy, u, v);
++}
++
++/* YUV444P16 (3 full-res uint16 planes) -> packed ushort4 warp + grey flow
++ * (no chroma resample) */
++__global__ void Pack_yuv444p16(const unsigned char *Y, int pY,
++                               const unsigned char *U, int pU,
++                               const unsigned char *V, int pV,
++                               ushort4 *warp, int pw, ushort4 *flow, int pf,
++                               int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    int yy = ((const unsigned short *)(Y + (long)y * pY))[x];
++    int u  = ((const unsigned short *)(U + (long)y * pU))[x];
++    int v  = ((const unsigned short *)(V + (long)y * pV))[x];
++    store16(warp, pw, flow, pf, x, y, yy, u, v);
++}
++
++/* packed ushort4 (Y,U,V,A) -> planar YUV444P16 (3 uint16 planes) */
++__global__ void Unpack_yuv444p16(const ushort4 *src, int ps,
++                                 unsigned char *Y, int pY,
++                                 unsigned char *U, int pU,
++                                 unsigned char *V, int pV,
++                                 int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    const ushort4 *sr = (const ushort4 *)((const char *)src + (long)y * ps);
++    ushort4 p = sr[x];   /* XV48: U,Y,V,X */
++    ((unsigned short *)(Y + (long)y * pY))[x] = p.y;
++    ((unsigned short *)(U + (long)y * pU))[x] = p.x;
++    ((unsigned short *)(V + (long)y * pV))[x] = p.z;
++}
++
++/* ---- packed 4:4:4 YUV input: one interleaved plane -> warp + luma-grey flow.
++ * These read the packed source, extract Y,U,V (full-res, no chroma resample)
++ * and hand them to store()/store16(), which lay the warp buffer out in the
++ * internal VUYX / XV48 order and the flow buffer as luma-grey. ---- */
++
++/* VUYX / VUYA (byte order V,U,Y,X|A) -> warp + flow */
++__global__ void Pack_vuyx(const unsigned char *src, int ps,
++                          uchar4 *warp, int pw, uchar4 *flow, int pf, int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    uchar4 p = ((const uchar4 *)(src + (long)y * ps))[x];   /* V,U,Y,* */
++    store(warp, pw, flow, pf, x, y, p.z, p.y, p.x);
++}
++
++/* UYVA (byte order U,Y,V,A) -> warp + flow */
++__global__ void Pack_uyva(const unsigned char *src, int ps,
++                          uchar4 *warp, int pw, uchar4 *flow, int pf, int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    uchar4 p = ((const uchar4 *)(src + (long)y * ps))[x];   /* U,Y,V,A */
++    store(warp, pw, flow, pf, x, y, p.y, p.x, p.z);
++}
++
++/* AYUV (byte order A,Y,U,V) -> warp + flow */
++__global__ void Pack_ayuv(const unsigned char *src, int ps,
++                          uchar4 *warp, int pw, uchar4 *flow, int pf, int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    uchar4 p = ((const uchar4 *)(src + (long)y * ps))[x];   /* A,Y,U,V */
++    store(warp, pw, flow, pf, x, y, p.y, p.z, p.w);
++}
++
++/* XV48LE (short order U,Y,V,X) -> warp + flow */
++__global__ void Pack_xv48(const unsigned char *src, int ps,
++                          ushort4 *warp, int pw, ushort4 *flow, int pf, int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    ushort4 p = ((const ushort4 *)(src + (long)y * ps))[x];   /* U,Y,V,X */
++    store16(warp, pw, flow, pf, x, y, p.y, p.x, p.z);
++}
++
++/* AYUV64LE (short order A,Y,U,V) -> warp + flow */
++__global__ void Pack_ayuv64(const unsigned char *src, int ps,
++                            ushort4 *warp, int pw, ushort4 *flow, int pf, int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    ushort4 p = ((const ushort4 *)(src + (long)y * ps))[x];   /* A,Y,U,V */
++    store16(warp, pw, flow, pf, x, y, p.y, p.z, p.w);
++}
++
++/* XV30LE (2:10:10:10 LE word: X[31:30] V[29:20] Y[19:10] U[9:0]) -> warp + flow.
++ * The 10-bit channels are bit-replicated to 16-bit to match the UNORM_INT16
++ * normalize (as for P010 / x2rgb10). */
++__global__ void Pack_xv30(const unsigned char *src, int ps,
++                          ushort4 *warp, int pw, ushort4 *flow, int pf, int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    unsigned int w = ((const unsigned int *)(src + (long)y * ps))[x];
++    unsigned int u = (w        & 0x3ff), yy = (w >> 10) & 0x3ff, v = (w >> 20) & 0x3ff;
++    store16(warp, pw, flow, pf, x, y, (yy << 6) | (yy >> 4),
++                                      (u  << 6) | (u  >> 4),
++                                      (v  << 6) | (v  >> 4));
++}
++
++/* x2rgb10 (packed 2:10:10:10 in a 32-bit LE word: X[31:30] R[29:20] G[19:10]
++ * B[9:0]) -> packed ushort4 RGBA warp buffer.  The three 10-bit channels are
++ * bit-replicated to 16-bit so the UNORM_INT16 texture normalize maps them to
++ * the same [0,1] as the native 8-bit RGB path.  RGB needs no separate luma-grey
++ * flow texture (the net derives luma internally, as for RGB0/RGBA), so the
++ * filter aliases the flow texture to this warp buffer and no flow store is
++ * emitted here. */
++__global__ void Pack_x2rgb10(const unsigned char *src, int ps,
++                             ushort4 *warp, int pw,
++                             int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    unsigned int w = ((const unsigned int *)(src + (long)y * ps))[x];
++    unsigned int r = (w >> 20) & 0x3ff;
++    unsigned int g = (w >> 10) & 0x3ff;
++    unsigned int b =  w        & 0x3ff;
++    ushort4 *wr = (ushort4 *)((char *)warp + (long)y * pw);
++    wr[x] = make_ushort4((r << 6) | (r >> 4),
++                         (g << 6) | (g >> 4),
++                         (b << 6) | (b >> 4), 0xffff);
++}
++
++/* packed ushort4 RGBA (network output) -> x2rgb10 (2:10:10:10 LE word).  Each
++ * 16-bit channel is truncated to its top 10 bits; the 2 pad bits are 0. */
++__global__ void Unpack_x2rgb10(const ushort4 *src, int ps,
++                               unsigned char *dst, int pd,
++                               int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    const ushort4 *sr = (const ushort4 *)((const char *)src + (long)y * ps);
++    ushort4 p = sr[x];
++    unsigned int r = p.x >> 6, g = p.y >> 6, b = p.z >> 6;
++    ((unsigned int *)(dst + (long)y * pd))[x] = (r << 20) | (g << 10) | b;
++}
++
++/* x2bgr10: the R/B-swapped sibling of x2rgb10 (LE word: X[31:30] B[29:20]
++ * G[19:10] R[9:0]).  Warp buffer stays R,G,B order like the native RGB path. */
++__global__ void Pack_x2bgr10(const unsigned char *src, int ps,
++                             ushort4 *warp, int pw,
++                             int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    unsigned int w = ((const unsigned int *)(src + (long)y * ps))[x];
++    unsigned int b = (w >> 20) & 0x3ff;
++    unsigned int g = (w >> 10) & 0x3ff;
++    unsigned int r =  w        & 0x3ff;
++    ushort4 *wr = (ushort4 *)((char *)warp + (long)y * pw);
++    wr[x] = make_ushort4((r << 6) | (r >> 4),
++                         (g << 6) | (g >> 4),
++                         (b << 6) | (b >> 4), 0xffff);
++}
++
++/* packed ushort4 RGBA (network output) -> x2bgr10 (R in the low 10 bits) */
++__global__ void Unpack_x2bgr10(const ushort4 *src, int ps,
++                               unsigned char *dst, int pd,
++                               int W, int H)
++{
++    int x = blockIdx.x * blockDim.x + threadIdx.x;
++    int y = blockIdx.y * blockDim.y + threadIdx.y;
++    if (x >= W || y >= H)
++        return;
++    const ushort4 *sr = (const ushort4 *)((const char *)src + (long)y * ps);
++    ushort4 p = sr[x];
++    unsigned int r = p.x >> 6, g = p.y >> 6, b = p.z >> 6;
++    ((unsigned int *)(dst + (long)y * pd))[x] = (b << 20) | (g << 10) | r;
++}
++
++}

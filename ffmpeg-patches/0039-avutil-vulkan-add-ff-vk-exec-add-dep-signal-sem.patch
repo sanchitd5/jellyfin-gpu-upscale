@@ -1,0 +1,55 @@
+From 0b8913d087b3157351409d856e42715a07f8f74f Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Sun, 28 Jun 2026 13:03:15 -0700
+Subject: [PATCH] avutil/vulkan: add ff_vk_exec_add_dep_signal_sem
+
+Add a helper to register a timeline-semaphore signal with an explicit value on
+an execution context, mirroring ff_vk_exec_add_dep_wait_sem() on the wait side.
+
+The fruc_vulkan filter will use this to chain timeline semaphores across its
+pipelined cross-queue submissions, where an interpolation must signal a
+specific (generation-keyed) value rather than the implicit binary signal.
+---
+ libavutil/vulkan.c | 14 ++++++++++++++
+ libavutil/vulkan.h |  3 +++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/libavutil/vulkan.c b/libavutil/vulkan.c
+index ec908940de..b2e575c131 100644
+--- a/libavutil/vulkan.c
++++ b/libavutil/vulkan.c
+@@ -836,6 +836,20 @@ void ff_vk_exec_add_dep_wait_sem(FFVulkanContext *s, FFVkExecContext *e,
+     };
+ }
+ 
++void ff_vk_exec_add_dep_signal_sem(FFVulkanContext *s, FFVkExecContext *e,
++                                   VkSemaphore sem, uint64_t val,
++                                   VkPipelineStageFlagBits2 stage)
++{
++    av_assert1(e->sem_sig_cnt < FF_VK_EXEC_MAX_SEM_OPS);
++
++    e->sem_sig[e->sem_sig_cnt++] = (VkSemaphoreSubmitInfo) {
++        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
++        .semaphore = sem,
++        .value = val,
++        .stageMask = stage,
++    };
++}
++
+ void ff_vk_exec_add_dep_bool_sem(FFVulkanContext *s, FFVkExecContext *e,
+                                  VkSemaphore *sem, int nb,
+                                  VkPipelineStageFlagBits2 stage,
+diff --git a/libavutil/vulkan.h b/libavutil/vulkan.h
+index 1952965c89..e92b8dffb9 100644
+--- a/libavutil/vulkan.h
++++ b/libavutil/vulkan.h
+@@ -525,6 +525,9 @@ void ff_vk_exec_add_dep_obj(FFVulkanContext *s, FFVkExecContext *e,
+ void ff_vk_exec_add_dep_wait_sem(FFVulkanContext *s, FFVkExecContext *e,
+                                  VkSemaphore sem, uint64_t val,
+                                  VkPipelineStageFlagBits2 stage);
++void ff_vk_exec_add_dep_signal_sem(FFVulkanContext *s, FFVkExecContext *e,
++                                   VkSemaphore sem, uint64_t val,
++                                   VkPipelineStageFlagBits2 stage);
+ void ff_vk_exec_add_dep_bool_sem(FFVulkanContext *s, FFVkExecContext *e,
+                                  VkSemaphore *sem, int nb,
+                                  VkPipelineStageFlagBits2 stage,

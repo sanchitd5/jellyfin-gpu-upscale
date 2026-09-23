@@ -1,0 +1,44 @@
+From a7a40351bfc6929227ec2defeeb6d3ec32c7ae7d Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Sat, 01 Feb 2025 14:42:48 -0800
+Subject: [PATCH] avfilter/vf_nvoffruc: update to use FFFilter
+
+
+---
+ libavfilter/allfilters.c  | 2 +-
+ libavfilter/vf_nvoffruc.c | 8 ++++----
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index ab995b2c45..ab1035a3ad 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -390,7 +390,7 @@ extern const FFFilter ff_vf_noformat;
+ extern const FFFilter ff_vf_noise;
+ extern const FFFilter ff_vf_normalize;
+ extern const FFFilter ff_vf_null;
+-extern const AVFilter ff_vf_nvoffruc;
++extern const FFFilter ff_vf_nvoffruc;
+ extern const FFFilter ff_vf_ocr;
+ extern const FFFilter ff_vf_ocv;
+ extern const FFFilter ff_vf_oscilloscope;
+diff --git a/libavfilter/vf_nvoffruc.c b/libavfilter/vf_nvoffruc.c
+index 3a5623d918..421b64dcb1 100644
+--- a/libavfilter/vf_nvoffruc.c
++++ b/libavfilter/vf_nvoffruc.c
+@@ -673,11 +673,11 @@ static const AVFilterPad framerate_outputs[] = {
+     },
+ };
+ 
+-const AVFilter ff_vf_nvoffruc = {
+-    .name          = "nvoffruc",
+-    .description   = NULL_IF_CONFIG_SMALL("Upsamples progressive source to specified frame rates with nvidia FRUC"),
++const FFFilter ff_vf_nvoffruc = {
++    .p.name          = "nvoffruc",
++    .p.description   = NULL_IF_CONFIG_SMALL("Upsamples progressive source to specified frame rates with nvidia FRUC"),
++    .p.priv_class    = &nvoffruc_class,
+     .priv_size     = sizeof(FRUCContext),
+-    .priv_class    = &nvoffruc_class,
+     .init          = init,
+     .uninit        = uninit,
+     .activate      = activate,

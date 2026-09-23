@@ -1,0 +1,68 @@
+From 3d92d5b14421af94c404a17ecef1d8adc83cfb67 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Sun, 18 Aug 2019 18:41:36 -0700
+Subject: [PATCH] nvdec: Attempt to support h.263 decoding
+
+
+---
+ libavcodec/h263dec.c     | 2 ++
+ libavcodec/nvdec.c       | 1 +
+ libavcodec/nvdec_mpeg4.c | 9 ++++++---
+ 3 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/libavcodec/h263dec.c b/libavcodec/h263dec.c
+index 9fc30f7b1b..b899117717 100644
+--- a/libavcodec/h263dec.c
++++ b/libavcodec/h263dec.c
+@@ -503,9 +503,11 @@ int ff_h263_decode_frame(AVCodecContext *avctx, AVFrame *pict,
+     }
+ 
+     if (!h->c.context_initialized) {
++        ff_set_dimensions(avctx, s->width, s->height);
+         avctx->pix_fmt = h263_get_format(avctx);
+         if ((ret = ff_mpv_common_init(s)) < 0)
+             return ret;
++        s->context_reinit = 1;
+     }
+ 
+     avctx->has_b_frames = !h->c.low_delay;
+diff --git a/libavcodec/nvdec.c b/libavcodec/nvdec.c
+index 0065834f06..f30c0e1671 100644
+--- a/libavcodec/nvdec.c
++++ b/libavcodec/nvdec.c
+@@ -79,6 +79,7 @@ static int map_avcodec_id(enum AVCodecID id)
+ #if CONFIG_AV1_NVDEC_HWACCEL
+     case AV_CODEC_ID_AV1:        return cudaVideoCodec_AV1;
+ #endif
++    case AV_CODEC_ID_H263:       return cudaVideoCodec_MPEG4;
+     case AV_CODEC_ID_H264:       return cudaVideoCodec_H264;
+     case AV_CODEC_ID_HEVC:       return cudaVideoCodec_HEVC;
+     case AV_CODEC_ID_MJPEG:      return cudaVideoCodec_JPEG;
+diff --git a/libavcodec/nvdec_mpeg4.c b/libavcodec/nvdec_mpeg4.c
+index cda04edfd2..4583075be7 100644
+--- a/libavcodec/nvdec_mpeg4.c
++++ b/libavcodec/nvdec_mpeg4.c
+@@ -69,9 +69,11 @@ static int nvdec_mpeg4_start_frame(AVCodecContext *avctx,
+ 
+             .video_object_layer_width     = s->width,
+             .video_object_layer_height    = s->height,
+-            .vop_time_increment_bitcount  = m->time_increment_bits,
++            .vop_time_increment_bitcount  = avctx->codec->id == AV_CODEC_ID_MPEG4 ?
++                                            m->time_increment_bits : 0,
+             .top_field_first              = s->top_field_first,
+-            .resync_marker_disable        = !m->resync_marker,
++            .resync_marker_disable        = avctx->codec->id == AV_CODEC_ID_MPEG4 ?
++                                            !m->resync_marker : 0,
+             .quant_type                   = m->mpeg_quant,
+             .quarter_sample               = s->quarter_sample,
+             .short_video_header           = avctx->codec->id == AV_CODEC_ID_H263,
+@@ -87,7 +89,8 @@ static int nvdec_mpeg4_start_frame(AVCodecContext *avctx,
+             .trd                          = { s->pp_time, s->pp_field_time >> 1 },
+             .trb                          = { s->pb_time, s->pb_field_time >> 1 },
+ 
+-            .gmc_enabled                  = s->pict_type == AV_PICTURE_TYPE_S &&
++            .gmc_enabled                  = avctx->codec->id == AV_CODEC_ID_MPEG4 &&
++                                            s->pict_type == AV_PICTURE_TYPE_S &&
+                                             m->vol_sprite_usage == GMC_SPRITE,
+         }
+     };

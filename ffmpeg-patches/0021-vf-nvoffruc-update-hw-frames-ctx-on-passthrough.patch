@@ -1,0 +1,40 @@
+From d42a94ccd889c7caf14479912bd64f5b5fb7dad9 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Tue, 30 Jun 2026 18:26:23 -0700
+Subject: [PATCH] vf_nvoffruc: update hw_frames_ctx on passthrough frames
+
+Fixes frame context mismatch when passthrough or cloned frames
+don't inherit the output link's hw_frames_ctx, causing hwdownload
+to fail with 'No frames received' errors.
+---
+ libavfilter/vf_nvoffruc.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/libavfilter/vf_nvoffruc.c b/libavfilter/vf_nvoffruc.c
+index 2b7c487dfa..c5e811cab7 100644
+--- a/libavfilter/vf_nvoffruc.c
++++ b/libavfilter/vf_nvoffruc.c
+@@ -265,6 +265,7 @@ static int blend_frames(AVFilterContext *ctx, int64_t work_pts)
+ static int process_work_frame(AVFilterContext *ctx)
+ {
+     FRUCContext *s = ctx->priv;
++    AVFilterLink *outlink = ctx->outputs[0];
+     int64_t work_pts;
+     int64_t interpolate, interpolate8;
+     int ret;
+@@ -307,6 +308,15 @@ static int process_work_frame(AVFilterContext *ctx)
+     if (!s->work)
+         return AVERROR(ENOMEM);
+ 
++    /* Update hw_frames_ctx on passthrough/cloned frames to match output context */
++    {
++        FilterLink *ol = ff_filter_link(outlink);
++        if (s->work->hw_frames_ctx != ol->hw_frames_ctx) {
++            av_buffer_unref(&s->work->hw_frames_ctx);
++            s->work->hw_frames_ctx = av_buffer_ref(ol->hw_frames_ctx);
++        }
++    }
++
+     s->work->pts = work_pts;
+     s->n++;
+ 

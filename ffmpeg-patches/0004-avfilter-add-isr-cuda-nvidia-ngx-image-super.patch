@@ -1,0 +1,460 @@
+From 5664364466e924a14139df0af662a731856f7acd Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:09 +0800
+Subject: [PATCH] avfilter: add isr_cuda, NVIDIA NGX Image Super Resolution
+
+Runs the NGX Image Super Resolution network (the NvDLISR snippet
+nvngx_dlisr.dll), a fidelity-oriented still-image upscaler at a fixed integer
+2x, 4x or 8x.  It is a different network from vsr_cuda's and is structured
+differently: it is resolution-independent, running on fixed 256x256 tiles with a
+16-pixel overlap, so every per-tile launch carries identical grids, blocks and
+argument bytes at every input size and only the device pointers differ.
+
+Because the scale set is exactly what the snippet validates and there is no
+resampling path in the graph, the output is always scale x the input -- there is
+no w/h expression pair as on the VSR filters.
+
+Input and output are plain linear device buffers rather than textures and
+surfaces, so frames are staged through packed scratch; the conversion and tiling
+kernels are CUDA-runtime functions living in the snippet's fat binaries rather
+than as loose cubins.  Everything else -- module loading, the arena, the weights
+upload and the output hwframe -- is the shared rtx_cuda core.
+---
+ configure                 |   1 +
+ doc/filters.texi          |  35 +++++
+ libavfilter/Makefile      |   1 +
+ libavfilter/allfilters.c  |   1 +
+ libavfilter/vf_isr_cuda.c | 343 ++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 381 insertions(+)
+
+diff --git a/configure b/configure
+index 69e594d5ab..f8b1e2ba2b 100755
+--- a/configure
++++ b/configure
+@@ -4222,6 +4222,7 @@ iccgen_filter_deps="lcms2"
+ identity_filter_select="scene_sad"
+ interlace_filter_deps="gpl"
+ interlace_vulkan_filter_deps="vulkan spirv_compiler"
++isr_cuda_filter_deps="ffnvcodec nvfdata_isr"
+ kerndeint_filter_deps="gpl"
+ ladspa_filter_deps="ladspa libdl"
+ lcevc_filter_deps="liblcevc_dec"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index f17469fc96..ee0fdf2236 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27483,6 +27483,41 @@ JPEG (full) range
+ 
+ @end table
+ 
++@section isr_cuda
++
++Upscale with NVIDIA's NGX Image Super Resolution network, running it directly
++on CUDA.
++
++This is a still-image upscaler, not one of the video super-resolution networks
++that @ref{vsr_cuda} and @code{dlpp_drv_cuda} drive.  It is fidelity-oriented and
++considerably heavier: the network runs on overlapping 256x256 tiles which are
++stitched back together, so cost grows with area rather than with a per-frame
++fixed graph.  It has no resampling path, so the output is always exactly
++@option{scale} times the input; there is no @option{w}/@option{h} pair.
++
++It accepts the following options:
++
++@table @option
++@item scale
++Integer upscale factor: @code{2}, @code{4} or @code{8}.  Default @code{2}.
++Each is a separate network; a factor the installed data has no network for is
++rejected at configuration time.
++
++@item data
++Directory holding the extracted cubins, fat binaries and per-scale weights.
++@end table
++
++@subsection Supported formats
++
++8-bit R-first packed RGB CUDA frames only: @code{rgba} or @code{rgb0}, in and
++out.  The captured graph has a single format enum and no R@math{<->}B swap, so
++a B-first or high-bit-depth input has to be converted first.
++
++The cubins and weights are extracted from the proprietary NVIDIA libraries and
++are @emph{not} shipped: the filter is only built when an
++@code{nvidia-video-filters} package carrying the ISR data is installed, and
++@option{data} defaults to that package's data directory.
++
+ @anchor{overlay_cuda}
+ @section overlay_cuda
+ 
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 1643686b57..9f955565b2 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -366,6 +366,7 @@ OBJS-$(CONFIG_INFLATE_FILTER)                += vf_neighbor.o
+ OBJS-$(CONFIG_INTERLACE_FILTER)              += vf_tinterlace.o
+ OBJS-$(CONFIG_INTERLACE_VULKAN_FILTER)       += vf_interlace_vulkan.o vulkan.o vulkan_filter.o
+ OBJS-$(CONFIG_INTERLEAVE_FILTER)             += f_interleave.o
++OBJS-$(CONFIG_ISR_CUDA_FILTER)               += vf_isr_cuda.o rtx_cuda.o
+ OBJS-$(CONFIG_KERNDEINT_FILTER)              += vf_kerndeint.o
+ OBJS-$(CONFIG_KIRSCH_FILTER)                 += vf_convolution.o
+ OBJS-$(CONFIG_LAGFUN_FILTER)                 += vf_lagfun.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 3c1e879806..35629fe1c3 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -340,6 +340,7 @@ extern const FFFilter ff_vf_inflate;
+ extern const FFFilter ff_vf_interlace;
+ extern const FFFilter ff_vf_interlace_vulkan;
+ extern const FFFilter ff_vf_interleave;
++extern const FFFilter ff_vf_isr_cuda;
+ extern const FFFilter ff_vf_kerndeint;
+ extern const FFFilter ff_vf_kirsch;
+ extern const FFFilter ff_vf_lagfun;
+diff --git a/libavfilter/vf_isr_cuda.c b/libavfilter/vf_isr_cuda.c
+new file mode 100644
+index 0000000000..5aa5458e34
+--- /dev/null
++++ b/libavfilter/vf_isr_cuda.c
+@@ -0,0 +1,343 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Image super-resolution filter driving NVIDIA's NGX Image Super Resolution
++ * network (the snippet NvDLISR/nvngx_dlisr.dll shipped with the driver / NVIDIA
++ * App).  Distinct from vf_vsr_cuda and vf_dlpp_drv_cuda, which run the *video*
++ * super-resolution networks: ISR is a fidelity-oriented still-image upscaler at
++ * fixed integer 2x/4x/8x, and its graph is structured very differently.
++ *
++ * The forward pass was reverse-engineered by running the snippet on Linux via
++ * the NGX loader and intercepting the live CUDA Driver-API launches
++ * (rtx-video-re docs/FINDINGS-dlisr.md).  Unlike the VSR graphs, ISR's network is
++ * RESOLUTION-INDEPENDENT: it runs on fixed 256x256 tiles, so all of its per-tile
++ * launches carry identical grids, blocks and argument bytes at every input size
++ * and only device pointers differ.  Nothing has to be fitted -- isr_cuda_gen.h
++ * holds the captured graph plus closed forms for the handful of whole-image
++ * quantities, verified against captures at many resolutions and all three scales.
++ *
++ * Pipeline (see isr_cuda_gen.h):
++ *
++ *      convertTypetoHalf         whole image, RGBA8 -> fp16 NHWC
++ *      splitTilesType            -> batch of 256x256 tiles, stride 240 (overlap 16)
++ *      for each tile:
++ *          F16NHWC_append_gpu    tile i of the batch -> network input
++ *          <network launches>    fixed grids/blocks/args
++ *          F16NHWC_slice_gpu     network output -> tile i of the output batch
++ *      stitchTilesType           -> whole fp16 image
++ *      convertHalftoType         fp16 -> RGBA8
++ *
++ * The conversion and tiling kernels are CUDA-runtime (__global__) functions and
++ * live in the snippet's .nv_fatb fat binaries rather than as loose cubins; the
++ * generator extracts them alongside the network's own cubins.
++ *
++ * Scale is 2, 4 or 8 -- the snippet validates exactly that set and has no
++ * resampling path, so unlike the VSR filters there is no arbitrary output size:
++ * the output is always scale x the input.  Input/output are plain linear device
++ * buffers (not textures/surfaces), so frames are staged through packed scratch.
++ * Everything else -- module loading, the arena, the weights upload, the output
++ * hwframe plumbing -- is the shared rtx_cuda.c core.
++ *
++ * The cubins, fat binaries and per-scale weights blob are external files (the
++ * "data" option), extracted from the proprietary snippet and not shipped with
++ * FFmpeg.
++ */
++
++#include "libavutil/hwcontext.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "filters.h"
++#include "rtx_cuda.h"
++#include "video.h"
++
++/* Generated by rtx-video-re from the proprietary NVIDIA library, and
++ * installed rather than carried here -- located, together with the cubins and
++ * weights it names, through pkg-config (see configure's nvfdata_* checks). */
++#include <isr_cuda_gen.h>
++
++FF_RTX_ASSERT_MODULE_LAYOUT(IsrModule);
++FF_RTX_ASSERT_FUNC_LAYOUT(IsrFunc);
++
++/* ISR's module tables index modules and kernels densely from 0, and its graph is
++ * captured rather than fitted, so the generated header carries no MAX_MID/FID. */
++#define ISR_MAX_MID 64
++#define ISR_MAX_FID 128
++
++/* IsrGenLaunch is the odd one out: no psize (every launch uses the captured
++ * argsize), and three extra fields carrying the per-tile pointer cursor, which
++ * is the one thing that still advances per tile at frame time rather than once
++ * at config time.  So this filter drives ff_rtx_launch() itself instead of
++ * handing the whole list to ff_rtx_launch_all(). */
++
++typedef struct IsrCudaContext {
++    const AVClass *class;
++
++    FFRtxCuda   r;
++    FFRtxImage *in_buf, *out_buf;    ///< packed RGBA8 staging (the graph's IO)
++
++    const FFRtxPixFmt *pf;
++    int W, H, oW, oH;
++    int tiles;                       ///< Tx*Ty for this input size
++    int cfg;                         ///< index into isr_configs
++
++    int   scale;
++    char *data_dir;
++} IsrCudaContext;
++
++#define OFFSET(x) offsetof(IsrCudaContext, x)
++#define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
++
++static const AVOption isr_cuda_options[] = {
++    /* The snippet validates Scale to exactly {2,4,8} (CreateFeature rejects
++     * anything else with 0xBAD00005) and has no resampling path, so the output is
++     * always scale x the input -- there is deliberately no w/h expression here. */
++    { "scale", "integer upscale factor (2, 4 or 8)", OFFSET(scale),
++      AV_OPT_TYPE_INT, {.i64 = 2}, 2, 8, FLAGS },
++    { "data", "directory with the extracted ISR cubins, fat binaries and weights",
++      OFFSET(data_dir), AV_OPT_TYPE_STRING,
++      {.str = ISR_DEFAULT_DATA_DIR}, 0, 0, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(isr_cuda);
++
++FF_RTX_ASSERT_PRIV_LAYOUT(IsrCudaContext);
++
++/* The snippet keeps a separate class variant per architecture (sm_75 / _86 /
++ * _89 / _120 / _120 PTX), so a capture only ever yields the capturing GPU's
++ * images.  `rtxv extract isr` lifts the other arches straight out of the DLL --
++ * they are named there, so the correspondence is exact -- and bundles each
++ * kernel as a sm_75+86+89+120 fatbin that cuModuleLoadData picks from.  A data
++ * dir built that way covers Turing through Blackwell; one that was not still
++ * holds bare single-arch cubins, hence this hint. */
++#define ISR_LOAD_HINT \
++    "Re-run `rtxv extract isr <nvngx_dlisr.dll>` and `rtxv install`: the " \
++    "generator bundles the sm_75/86/89/120 images the snippet ships. " \
++    "Newer architectures than sm_120 need a capture on that GPU."
++
++/* ------------------------------------------------------------------------- *
++ * Resolution model -- the same closed forms rtx-video-re's rtxv.gen.isr verifies
++ * against live captures.
++ * ------------------------------------------------------------------------- */
++static int isr_tiles_axis(int n)
++{
++    return n <= ISR_TILE ? 1 : 1 + (n - ISR_TILE + ISR_STRIDE - 1) / ISR_STRIDE;
++}
++
++/* ------------------------------------------------------------------------- */
++static av_cold int init(AVFilterContext *ctx)
++{
++    IsrCudaContext *s = ctx->priv;
++    if (s->scale != 2 && s->scale != 4 && s->scale != 8) {
++        av_log(ctx, AV_LOG_ERROR,
++               "scale must be 2, 4 or 8 (the snippet accepts no other "
++               "factor and has no resampling path); got %d\n", s->scale);
++        return AVERROR(EINVAL);
++    }
++    return 0;
++}
++
++static void fill_sizes(AVFilterContext *ctx, long long *sz)
++{
++    IsrCudaContext *s = ctx->priv;
++    isr_fill_allocs(s->cfg, s->W, s->H, s->scale, sz);
++}
++
++static int setup_graph(AVFilterContext *ctx)
++{
++    IsrCudaContext *s = ctx->priv;
++    const IsrConfig *c = &isr_configs[s->cfg];
++    FFRtxUpload *up;
++    int ret;
++
++    if ((ret = ff_rtx_load_modules(ctx, &s->r, s->data_dir,
++                                   (const FFRtxModule *)c->modules, c->nmod, ISR_MAX_MID,
++                                   (const FFRtxFunc *)c->funcs, c->nfunc, ISR_MAX_FID,
++                                   ISR_LOAD_HINT)) < 0)
++        return ret;
++    if ((ret = ff_rtx_alloc_arena(ctx, &s->r, c->nalloc, fill_sizes, 0)) < 0)
++        return ret;
++
++    /* Packed RGBA8 staging: the graph's convert kernels read/write a tightly
++     * packed buffer, while AVFrame CUDA planes are pitched. */
++    s->in_buf  = ff_rtx_image_linear(ctx, &s->r, (size_t)s->W * s->H * 4,
++                                     (size_t)s->W * 4);
++    s->out_buf = ff_rtx_image_linear(ctx, &s->r, (size_t)s->oW * s->oH * 4,
++                                     (size_t)s->oW * 4);
++    if (!s->in_buf || !s->out_buf)
++        return AVERROR_EXTERNAL;
++
++    /* Unlike the fitted features, ISR's uploads are a literal table addressed by
++     * allocation ordinal and byte offset rather than a generated fill. */
++    up = av_calloc(c->nupload, sizeof(*up));
++    if (!up)
++        return AVERROR(ENOMEM);
++    for (int i = 0; i < c->nupload; i++) {
++        up[i].file_off = c->uploads[i].file_off;
++        up[i].size     = c->uploads[i].size;
++        up[i].dst      = s->r.alloc[c->uploads[i].ord] + c->uploads[i].dst_off;
++    }
++    ret = ff_rtx_upload_weights(ctx, &s->r, s->data_dir, c->weights, up, c->nupload);
++    av_freep(&up);
++    if (ret < 0)
++        return ret;
++
++    /* Materialise every launch: template args, scalar patches, pointer fixups.
++     * isr_fill_graph() is generated from the same capture as the tables above and
++     * assigns every field through its named isr_*_params struct, so the argument
++     * blocks are constructed rather than patched by offset.  The casts are only
++     * `unsigned long long` vs `uint64_t` on LP64. */
++    if ((ret = ff_rtx_alloc_launches(ctx, &s->r, c->nlaunch, sizeof(IsrGenLaunch))) < 0)
++        return ret;
++    if (isr_fill_graph(s->cfg, s->W, s->H, s->scale, (const isr_devptr *)s->r.alloc,
++                       (isr_devptr)s->in_buf->ptr, (isr_devptr)s->out_buf->ptr,
++                       s->r.launches) != c->nlaunch) {
++        av_log(ctx, AV_LOG_ERROR, "generated fill disagrees with the config tables\n");
++        return AVERROR_BUG;
++    }
++
++    s->tiles = isr_tiles_axis(s->W) * isr_tiles_axis(s->H);
++    av_log(ctx, AV_LOG_VERBOSE,
++           "%dx%d -> %dx%d (scale %d), %d tiles of %d, %d launches/tile\n",
++           s->W, s->H, s->oW, s->oH, s->scale, s->tiles, ISR_TILE, c->body_n);
++    return 0;
++}
++
++static int isr_launch(AVFilterContext *ctx, IsrGenLaunch *r, int tile)
++{
++    IsrCudaContext *s = ctx->priv;
++
++    /* The per-tile launches differ only in where they read from / write to in the
++     * tile batch, so point the cursor at this tile rather than rebuilding args. */
++    if (r->cur_off >= 0) {
++        CUdeviceptr p = r->cur_base + r->cur_stride * tile;
++        memcpy(r->params + r->cur_off, &p, 8);
++    }
++    return ff_rtx_launch(ctx, &s->r, r->fnid, r->grid, r->block, r->smem,
++                         r->params, r->argsize);
++}
++
++static int isr_run(AVFilterContext *ctx)
++{
++    IsrCudaContext *s = ctx->priv;
++    const IsrConfig *c = &isr_configs[s->cfg];
++    IsrGenLaunch *rl = s->r.launches;
++    int ret;
++
++    /* whole-image pre-pass: convert to fp16, split into the tile batch */
++    for (int i = 0; i < c->pre_n; i++)
++        if ((ret = isr_launch(ctx, &rl[i], 0)) < 0)
++            return ret;
++
++    /* the network body runs once per tile, in full, before moving to the next --
++     * every tile reuses the same scratch buffers, so the order matters */
++    for (int t = 0; t < s->tiles; t++)
++        for (int i = 0; i < c->body_n; i++)
++            if ((ret = isr_launch(ctx, &rl[c->pre_n + i], t)) < 0)
++                return ret;
++
++    /* whole-image post-pass: stitch the tiles, convert back to RGBA8 */
++    for (int i = 0; i < c->post_n; i++)
++        if ((ret = isr_launch(ctx, &rl[c->pre_n + c->body_n + i], 0)) < 0)
++            return ret;
++    return 0;
++}
++
++static int filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    IsrCudaContext *s = inlink->dst->priv;
++    /* isr_run() replaces the plain launch list: the per-tile pointer cursor is
++     * the one thing that still advances at frame time. */
++    const FFRtxFrameOp op = {
++        .in_img = s->in_buf,   .iW = s->W,  .iH = s->H,  .ibpp = s->pf->bpp,
++        .out_img = s->out_buf, .oW = s->oW, .oH = s->oH, .obpp = s->pf->bpp,
++        .run = isr_run,
++    };
++
++    return ff_rtx_filter_frame(inlink, in, &s->r, &op, NULL);
++}
++
++static int config_output(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    AVFilterLink *inlink = ctx->inputs[0];
++    IsrCudaContext *s = ctx->priv;
++    AVHWFramesContext *in_frames_ctx;
++    /* The captured graph is RGBA8 -- the snippet's format enum 4 -- with no
++     * R<->B swap, so only the shared table's R-first 8-bit rows fit.  Output is
++     * the input format. */
++    const FFRtxFormats fmts = {
++        .in_tbl = ff_rtx_packed_rgb_fmts, .n_in = FF_RTX_N_RGB8_R_FIRST,
++        .hint   = "insert format=rgba",
++    };
++    int ret;
++
++    ff_rtx_free_graph(ctx, &s->r);
++
++    if ((ret = ff_rtx_config_formats(ctx, inlink, &fmts, &in_frames_ctx,
++                                     &s->pf, NULL)) < 0)
++        return ret;
++
++    s->W = inlink->w;
++    s->H = inlink->h;
++    s->oW = s->W * s->scale;
++    s->oH = s->H * s->scale;
++
++    s->cfg = -1;
++    for (int i = 0; i < ISR_NCONFIG; i++)
++        if (isr_configs[i].scale == s->scale) { s->cfg = i; break; }
++    if (s->cfg < 0) {
++        av_log(ctx, AV_LOG_ERROR, "no graph for scale %d in this build\n", s->scale);
++        return AVERROR(EINVAL);
++    }
++
++    if ((ret = ff_rtx_bind_device(ctx, &s->r, in_frames_ctx)) < 0)
++        return ret;
++    if ((ret = ff_rtx_config_hwframes(ctx, outlink, &s->r, s->oW, s->oH,
++                                      s->pf->f)) < 0)
++        return ret;
++    return ff_rtx_setup(ctx, &s->r, "isr_cuda", setup_graph);
++}
++
++static const AVFilterPad isr_cuda_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .filter_frame = filter_frame },
++};
++
++static const AVFilterPad isr_cuda_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_output },
++};
++
++const FFFilter ff_vf_isr_cuda = {
++    .p.name        = "isr_cuda",
++    .p.description = NULL_IF_CONFIG_SMALL("NVIDIA NGX Image Super Resolution (2x/4x/8x) in CUDA"),
++    .p.priv_class  = &isr_cuda_class,
++    .priv_size     = sizeof(IsrCudaContext),
++    .init          = init,
++    .uninit        = ff_rtx_uninit,
++    FILTER_INPUTS(isr_cuda_inputs),
++    FILTER_OUTPUTS(isr_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};

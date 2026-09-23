@@ -1,0 +1,41 @@
+From b4937a4fbb4f72132b00186055d60818599c7bdc Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Sun, 28 May 2023 09:38:57 -0700
+Subject: [PATCH] lavu/hwcontext: reverse order of teardown of frames context and pool
+
+This avoids a validation failure saying an image is still in use by a
+command buffer when the image is destroyed. Reversing the order
+ensures the command pool and buffers are drained before images are
+destroyed.
+
+It's unclear if this is truly an error - as all the indications are
+that the buffer in question is properly submitted and completed at
+the time the image is freed.
+
+This change obviously would impact all hwcontexts, but at a glance,
+no context implementation seems to rely on the pool being freed before
+the frames context.
+---
+ libavutil/hwcontext.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/libavutil/hwcontext.c b/libavutil/hwcontext.c
+index 83bd7457e8..f4e5cc36a8 100644
+--- a/libavutil/hwcontext.c
++++ b/libavutil/hwcontext.c
+@@ -243,12 +243,12 @@ static void hwframe_ctx_free(void *opaque, uint8_t *data)
+     FFHWFramesContext *ctxi = (FFHWFramesContext*)data;
+     AVHWFramesContext *ctx  = &ctxi->p;
+ 
+-    if (ctxi->pool_internal)
+-        av_buffer_pool_uninit(&ctxi->pool_internal);
+-
+     if (ctxi->hw_type->frames_uninit)
+         ctxi->hw_type->frames_uninit(ctx);
+ 
++    if (ctxi->pool_internal)
++        av_buffer_pool_uninit(&ctxi->pool_internal);
++
+     if (ctx->free)
+         ctx->free(ctx);
+ 

@@ -1,0 +1,80 @@
+From 404b97e55176a266600d878d661a8ef6ed7c38df Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:09 +0800
+Subject: [PATCH] avfilter: add vsr_cuda, NVIDIA RTX Video Super Resolution
+
+Upscales packed RGB CUDA frames with the RTX VSR network from the NGX SDK
+snippet nvngx_vsr.dll, replayed directly on libcuda -- no DLL is loaded at run
+time.  vsr_cuda_gen.h describes the captured graph as a function of the input
+and output size; the filter evaluates it in config_output() and then hands the
+result to the rtx_cuda core, which does the loading, allocation and replay.
+
+What is specific to VSR and therefore lives here: the quality/scale option pair
+that picks a generated config, the packed-RGB format selectors patched into the
+argument blocks, and the input-texture/output-surface binding.
+
+Quality 0-4 are the upscaling models (0 is a plain bicubic reference, 2x is fixed
+for low/medium, and high/ultra upscale natively by 2x/3x/4x), 5 and 6 are
+native-resolution restoration networks forced to 1x, and 7 is a pass-through.
+Output sizes other than the network's native factor resample that result with the
+graph's own bicubic compose.
+
+Not every model exists in every extraction: the Windows nvngx_vsr.dll carries
+0-4 at 2x, and the native Linux library adds the restoration and lossless models
+and the 3x/4x heads.  The option ranges cover the union, and a model the
+installed data has no network for is refused at config time by name.
+
+The cubins and weights are not shipped; the filter is built only when an
+installed nvidia-video-filters package provides the VSR data.
+---
+ configure                 |   1 +
+ doc/filters.texi          | 222 +++++++++++++++++++++++++++
+ libavfilter/Makefile      |   1 +
+ libavfilter/allfilters.c  |   1 +
+ libavfilter/vf_vsr_cuda.c | 373 ++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 598 insertions(+)
+
+diff --git a/configure b/configure
+index 2a6d0e9725..69e594d5ab 100755
+--- a/configure
++++ b/configure
+@@ -4322,6 +4322,7 @@ scale_vt_filter_deps="videotoolbox VTPixelTransferSessionCreate"
+ scale_vulkan_filter_deps="vulkan spirv_compiler swscale"
+ vpp_qsv_filter_deps="libmfx"
+ vpp_qsv_filter_select="qsvvpp"
++vsr_cuda_filter_deps="ffnvcodec nvfdata_vsr"
+ xfade_opencl_filter_deps="opencl"
+ xfade_vulkan_filter_deps="vulkan spirv_compiler"
+ yadif_cuda_filter_deps="ffnvcodec"
+[... doc/filters.texi hunk: adds a "vsr_cuda" section documenting options quality/scale/w/h/format/data, quality-level table, supported pixel formats, libplacebo colorspace/HDR usage notes and example ffmpeg command lines for zero-copy Vulkan/nvdec/nvenc pipelines ...]
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index daa4d552f0..1643686b57 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -575,6 +575,7 @@ OBJS-$(CONFIG_VPP_AMF_FILTER)                += vf_vpp_amf.o scale_eval.o vf_amf
+ OBJS-$(CONFIG_FRC_AMF_FILTER)                += vf_frc_amf.o vf_amf_common.o
+ OBJS-$(CONFIG_VQE_AMF_FILTER)                += vf_vqe_amf.o vf_amf_common.o
+ OBJS-$(CONFIG_VPP_QSV_FILTER)                += vf_vpp_qsv.o
++OBJS-$(CONFIG_VSR_CUDA_FILTER)               += vf_vsr_cuda.o rtx_cuda.o
+ OBJS-$(CONFIG_VSTACK_FILTER)                 += vf_stack.o framesync.o
+ OBJS-$(CONFIG_W3FDIF_FILTER)                 += vf_w3fdif.o
+ OBJS-$(CONFIG_WAVEFORM_FILTER)               += vf_waveform.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 4af7a3bbbf..3c1e879806 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -539,6 +539,7 @@ extern const FFFilter ff_vf_vif;
+ extern const FFFilter ff_vf_vignette;
+ extern const FFFilter ff_vf_vmafmotion;
+ extern const FFFilter ff_vf_vpp_qsv;
++extern const FFFilter ff_vf_vsr_cuda;
+ extern const FFFilter ff_vf_vstack;
+ extern const FFFilter ff_vf_w3fdif;
+ extern const FFFilter ff_vf_waveform;
+diff --git a/libavfilter/vf_vsr_cuda.c b/libavfilter/vf_vsr_cuda.c
+new file mode 100644
+index 0000000000..be0e3ae308
+--- /dev/null
++++ b/libavfilter/vf_vsr_cuda.c
+@@ -0,0 +1,373 @@
+[... new 373-line file vf_vsr_cuda.c: LGPL license header; file doc-comment explaining the vsr_cuda_gen.h captured-graph approach and quality/scale semantics; VsrCudaContext struct and AVOption table (quality, scale, w, h, data, format); setup_graph()/fill_sizes() building the CUDA launch graph from vsr_configs; filter_frame() driving ff_rtx_filter_frame(); config_output() computing output size, picking the native pixel_shuffle factor and vsr_config_index(), forcing 1x for the denoise/deblur restoration models; AVFilterPad input/output tables; ff_vf_vsr_cuda FFFilter registration ...]

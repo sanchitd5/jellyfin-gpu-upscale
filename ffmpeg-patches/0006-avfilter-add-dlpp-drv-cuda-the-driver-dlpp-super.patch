@@ -1,0 +1,526 @@
+From ee8579987dbe5120e74199a99a883369ece37b44 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:10 +0800
+Subject: [PATCH] avfilter: add dlpp_drv_cuda, the driver DLPP super-resolution network
+
+The third super-resolution network in the driver stack: ppe/features/DLPP,
+driven directly rather than through the AIVP plugin that vsr_drv_cuda uses.  It
+exposes DLPP's own quality levels, which include two high-quality models the
+AIVP path does not reach.
+
+Quality 1 and 2 are the fixed-2x base models and behave like vsr_drv_cuda.
+Quality 3/4 are the high-quality models, which upscale natively at a chosen
+integer factor -- the scale option is the driver's own params[0x38] float, which
+selects the pixel_shuffle2/3/4 super-resolution head.  For both, an output at
+exactly the native factor stores directly and any other size resamples the
+native result to the requested rectangle.
+
+As on vsr_drv_cuda the driver's index 0 is a byte-identical duplicate -- of 1
+here rather than of 4 -- and is likewise not exposed, so quality runs 1-4 and
+defaults to 1.
+
+It shares vsr_drv_cuda's two DLPP quirks: launches are issued with the kernel's
+EIATTR_CBANK_PARAM_SIZE rather than the over-reported driver argsize, and the
+whole graph has just the two bindless slots.
+---
+ configure                      |   1 +
+ doc/filters.texi               |  71 ++++++++
+ libavfilter/Makefile           |   1 +
+ libavfilter/allfilters.c       |   1 +
+ libavfilter/vf_dlpp_drv_cuda.c | 370 +++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 444 insertions(+)
+
+diff --git a/configure b/configure
+index 32ed6f6836..7403274fbc 100755
+--- a/configure
++++ b/configure
+@@ -4194,6 +4194,7 @@ derain_filter_select="dnn"
+ deshake_filter_select="pixelutils"
+ deshake_opencl_filter_deps="opencl"
+ dilation_opencl_filter_deps="opencl"
++dlpp_drv_cuda_filter_deps="ffnvcodec nvfdata_dlpp_drv"
+ dnn_classify_filter_select="dnn"
+ dnn_detect_filter_select="dnn"
+ dnn_processing_filter_select="dnn"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index d7870e6827..1f61ee1185 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27483,6 +27483,77 @@ JPEG (full) range
+ 
+ @end table
+ 
++@section dlpp_drv_cuda
++
++Upscale video with the NVIDIA driver's DLPP super-resolution network, running
++it directly on CUDA.
++
++This is one of three super-resolution filters and they drive three different
++networks: @ref{vsr_cuda} runs the NGX SDK's, @ref{vsr_drv_cuda} runs the
++driver's AIVP plugin, and this one drives DLPP directly.  DLPP exposes two
++high-quality models the AIVP path does not reach.  They do not produce the same
++picture, so it is worth trying more than one.
++
++It accepts the following options:
++
++@table @option
++@item quality
++Which model to run: @code{1} base, @code{2} deeper base, @code{3} and @code{4}
++the high-quality models.  Default @code{1}.
++
++@item scale
++Native integer upscale factor for @option{quality} @code{3} and @code{4}:
++@code{2}, @code{3} or @code{4}.  Default @code{2}.  Ignored by the base models,
++which always super-resolve 2x internally.
++
++@item w
++@item h
++Output width and height, as expressions (as in @ref{scale}); the variables
++@var{iw}/@var{in_w} and @var{ih}/@var{in_h} hold the input size.  Unset (the
++default) means the native factor times the input -- @option{scale} for the
++high-quality models, 2x for the base models.  Any other size resamples the
++network's native result to the requested rectangle with a bicubic compose.
++
++@item format
++Output pixel format.  Empty (the default) keeps the input format.
++
++@item wipe
++Split-screen comparison wipe, @code{0} to @code{1}.  Default @code{0}, the real
++full-resolution output.  Above @code{0}, the leftmost fraction of the frame
++shows the plain bicubic reference instead of the network's output -- the
++before/after slider from NVIDIA's own UI.  A diagnostic control, not a quality
++knob.
++
++@item data
++Directory holding the extracted cubins and the shared @file{weights.bin}.
++
++@item experimental_arch
++Allow GPU architectures whose cubins were matched statically rather than
++exercised.  Ada (sm_89) and Blackwell do not need this.
++@end table
++
++@subsection Supported formats
++
++Packed RGB formats are accepted for both input and output: @code{rgb0},
++@code{rgba}, @code{bgr0}, @code{bgra} (8-bit) and @code{rgba64le} (16-bit).
++Input and output formats are chosen independently (see the @option{format}
++option).  16-bit carries the network's full internal precision and avoids
++banding.
++
++The kernels branch on a format selector that exposes an R@math{<->}B swap only
++on the 8-bit path, so the B-first @code{bgr0}/@code{bgra} are handled natively.
++That swap does not exist on the high-bit-depth path, which packs in array-native
++order, so 16-bit is R-first only (@code{rgba64le}).
++
++This filter does @strong{not} do YUV@math{<->}RGB conversion or tone mapping;
++see @ref{vsr_cuda} for the @code{libplacebo} pipeline that feeds these filters
++from real video and for the hardware decode/encode combinations.
++
++The cubins and weights are extracted from the proprietary NVIDIA libraries and
++are @emph{not} shipped: the filter is only built when an
++@code{nvidia-video-filters} package carrying the DLPP data is installed, and
++@option{data} defaults to that package's data directory.
++
+ @section isr_cuda
+ 
+ Upscale with NVIDIA's NGX Image Super Resolution network, running it directly
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index ffba98faca..c7a2504cc4 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -291,6 +291,7 @@ OBJS-$(CONFIG_DILATION_FILTER)               += vf_neighbor.o
+ OBJS-$(CONFIG_DILATION_OPENCL_FILTER)        += vf_neighbor_opencl.o opencl.o \
+                                                 opencl/neighbor.o
+ OBJS-$(CONFIG_DISPLACE_FILTER)               += vf_displace.o framesync.o
++OBJS-$(CONFIG_DLPP_DRV_CUDA_FILTER)          += vf_dlpp_drv_cuda.o rtx_cuda.o
+ OBJS-$(CONFIG_DNN_CLASSIFY_FILTER)           += vf_dnn_classify.o
+ OBJS-$(CONFIG_DNN_DETECT_FILTER)             += vf_dnn_detect.o
+ OBJS-$(CONFIG_DNN_PROCESSING_FILTER)         += vf_dnn_processing.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 7e4bc775f5..942818e448 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -265,6 +265,7 @@ extern const FFFilter ff_vf_detelecine;
+ extern const FFFilter ff_vf_dilation;
+ extern const FFFilter ff_vf_dilation_opencl;
+ extern const FFFilter ff_vf_displace;
++extern const FFFilter ff_vf_dlpp_drv_cuda;
+ extern const FFFilter ff_vf_dnn_classify;
+ extern const FFFilter ff_vf_dnn_detect;
+ extern const FFFilter ff_vf_dnn_processing;
+diff --git a/libavfilter/vf_dlpp_drv_cuda.c b/libavfilter/vf_dlpp_drv_cuda.c
+new file mode 100644
+index 0000000000..9f5e99cf05
+--- /dev/null
++++ b/libavfilter/vf_dlpp_drv_cuda.c
+@@ -0,0 +1,370 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Super-resolution filter driving the NVIDIA *driver* DLPP super-resolution
++ * network (the DXVA/PPE plugin, ppe/features/DLPP) -- distinct from vf_vsr_cuda,
++ * which runs the NGX SDK snippet (nvngx_vsr.dll), and from vf_vsr_drv_cuda,
++ * which runs the AIVP plugin over the same DLPP kernels.  The cubins were
++ * extracted and the forward pass reverse-engineered by running the plugin on
++ * Linux via loader_ppe and intercepting the live CUDA Driver-API launches.
++ * dlpp_drv_cuda_gen.h encodes, per quality and scaling path, how the whole graph
++ * (grids, scratch allocations, packed arg-buffer scalars incl. division-magic
++ * constants and float32 resample steps, weight-upload targets, pointer fixups)
++ * scales with the input W,H and output oW,oH -- derived and validated byte-exact
++ * against the loader (rtx-video-re).  The filter evaluates that at config time
++ * and replays the graph with libcuda; no DLL is needed at run time.  The replay
++ * machinery itself is rtx_cuda.c.
++ *
++ * Base models (quality 1/2) perform a fixed internal 2x super-resolution: exact
++ * isotropic 2x output takes the "fast" path (direct dlpp_postProcess store); any
++ * other factor takes the "resample" path (dlpp_ResampleAndComposeFP16 to the rect).
++ * The high-quality models 5/6 (quality 3/4) instead do NATIVE integer upscaling at
++ * a chosen scale (the `scale` opt = the driver's params[0x38] float, which selects
++ * the pixel_shuffle2/3/4 SR head): exact scale-x output takes the fast path, any
++ * other output size resamples the native-Nx result to the requested rect.
++ *
++ * Like vf_vsr_drv_cuda, each launch is issued with the kernel's
++ * EIATTR_CBANK_PARAM_SIZE rather than the captured driver argsize (the driver
++ * over-reports by 8 bytes for the two DLPP tex/surf kernels, which makes
++ * cuLaunchKernel return CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES), and the graph has
++ * only two bindless slots: the input tex at dlpp_preProcess and the output surf
++ * at dlpp_postProcess / ResampleAndComposeFP16.
++ *
++ * The cubins and the shared weights blob are external files (the "data" option),
++ * extracted from the proprietary driver and not shipped with FFmpeg.
++ */
++
++#include "libavutil/hwcontext.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "filters.h"
++#include "rtx_cuda.h"
++#include "rtx_dlpp_abi.h"
++#include "video.h"
++
++/* Generated by rtx-video-re from the proprietary NVIDIA library, and
++ * installed rather than carried here -- located, together with the cubins and
++ * weights it names, through pkg-config (see configure's nvfdata_* checks). */
++#include <dlpp_drv_cuda_gen.h>
++
++FF_RTX_ASSERT_MODULE_LAYOUT(DlppModule);
++FF_RTX_ASSERT_FUNC_LAYOUT(DlppFunc);
++FF_RTX_ASSERT_UPLOAD_LAYOUT(DlppGenUpload);
++FF_RTX_ASSERT_LAUNCH_LAYOUT(DlppGenLaunch);
++
++/* Split-screen comparison wipe (params +0x10). The driver marshals round(oW*wipe)
++ * into the SR-head kernel (conv3x3_fuse_conv1x1_with_pixel_shuffle*..Bicubic*, the
++ * last conv before the output store) at arg offset 0x498: columns [0, oW*wipe)
++ * render the plain bicubic reference, the rest render the SR result -- the RTX-Video
++ * UI "before/after" slider.  0 (default) = full SR everywhere (the real output);
++ * NOT a quality knob (see rtx-video-re + loader_ppe run_process_dlpp). */
++#define DLPPDRV_SRC_HEAD_KERNEL  "conv3x3_fuse_conv1x1_with_pixel_shuffle"
++#define DLPPDRV_WIPE_ARG_OFF     0x498
++/* The format selectors sit on the DLPP glue kernels this filter shares with
++ * vf_vsr_drv_cuda, so their offsets live in rtx_dlpp_abi.h. */
++
++typedef struct DlppDrvCudaContext {
++    const AVClass *class;
++
++    FFRtxCuda   r;
++    FFRtxImage *in_img, *out_img;
++
++    int W, H, oW, oH;                 ///< input / output size
++    int cfg;                          ///< index into dlppdrv_configs
++
++    const FFRtxPixFmt *inpf, *outpf;
++
++    int   quality;
++    int   scale;                      ///< native SR scale for q3/q4 (2/3/4; params +0x38)
++    float wipe;                       ///< split-screen compare wipe (params +0x10)
++    char *w_expr;
++    char *h_expr;
++    char *data_dir;
++    char *out_format;                 ///< output pixel format (empty = same as input)
++    int   experimental_arch;          ///< allow the unverified sub-Blackwell (sm_75/sm_80) path
++} DlppDrvCudaContext;
++
++#define OFFSET(x) offsetof(DlppDrvCudaContext, x)
++#define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
++
++static const AVOption dlpp_drv_cuda_options[] = {
++    /* DLPP quality selects the internal SR network (model index via params +0xc).
++     * q1 -> base model 1; q2 -> deeper model 2 (both do a fixed internal 2x +
++     * resample for other ratios). q3/q4 -> the high-quality models 5/6, which do
++     * NATIVE integer upscaling at the `scale` factor (2/3/4) and require output =
++     * scale x input. Default 1.
++     *
++     * The driver's own index 0 selects the same model 1 as index 1, and produces a
++     * byte-identical graph.  It is not exposed: one model under two numbers only
++     * invites someone to A/B them and find no difference. */
++    { "quality", "DLPP quality (1=base, 2=deeper; 3/4=native-scale high quality)", OFFSET(quality), AV_OPT_TYPE_INT, {.i64=1}, 1, 4, FLAGS },
++    /* Native SR scale for quality 3/4 only (ignored for 1/2): 2/3/4 -> the driver's
++     * pixel_shuffle2/3/4 head (params[0x38]). Exact scale x input output uses the
++     * native fast path; any other output size resamples the native-Nx result. */
++    { "scale", "native integer SR scale for quality 3/4 (2/3/4)", OFFSET(scale), AV_OPT_TYPE_INT, {.i64=2}, 2, 4, FLAGS },
++    /* Split-screen comparison wipe (driver params +0x10).  0 (default) = the real
++     * full-SR output, byte-exact with the DLL.  In (0,1]: the left oW*wipe columns
++     * show the plain bicubic reference instead of SR (the RTX-Video "before/after"
++     * slider).  A diagnostic/demo control, NOT a quality knob. */
++    { "wipe", "compare wipe: left fraction shown as bicubic ref (0=off/full SR)", OFFSET(wipe), AV_OPT_TYPE_FLOAT, {.dbl=0}, 0, 1, FLAGS },
++    /* Output size. Unset (default) = the native integer scale: quality 3/4 -> the
++     * `scale` factor (2/3/4), base quality 1/2 -> 2x. Set either to any expression
++     * for non-integer scaling (the network resamples its native-scale result to the
++     * requested rect), e.g. w=iw*3/2, or w=1920:h=1080. */
++    { "w", "output width expression (default: scale x input)",  OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
++    { "h", "output height expression (default: scale x input)", OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
++    { "data", "directory with extracted driver DLPP cubins + the shared weights.bin",
++      OFFSET(data_dir), AV_OPT_TYPE_STRING, {.str=DLPPDRV_DEFAULT_DATA_DIR}, 0, 0, FLAGS },
++    { "format", "output pixel format (empty = same as input); e.g. bgra, rgba64le",
++      OFFSET(out_format), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
++    /* The cubins ship as multi-arch fatbins (sm_75/sm_80/sm_120); cuModuleLoadData
++     * picks the image for the running GPU.  Blackwell (sm_120) is validated byte-
++     * exact; Ada (sm_89) is verified on an RTX 4060 Ti -- the sm_80 slice loaded
++     * there is byte-identical to the driver DLL's own sm_80 cubin for all 94
++     * kernels, with an identical param layout.  Other sub-Blackwell arches run that
++     * same image but were never exercised on real silicon, hence the opt-in.
++     * (Turing/older can't run DLPP at all -- its conv kernels are sm_80+; refused
++     * unconditionally.) */
++    { "experimental_arch", "allow the unverified sub-Blackwell path (sm_89/Ada does not need this)",
++      OFFSET(experimental_arch), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(dlpp_drv_cuda);
++
++FF_RTX_ASSERT_PRIV_LAYOUT(DlppDrvCudaContext);
++
++static const FFRtxArchGate dlppdrv_gate = {
++    /* The all_fuse_with_pooling conv kernels use the sm_80+ tensor-core MMA
++     * (m16n8k16 / HMMA.16816), which Turing/Volta/Pascal tensor cores cannot
++     * execute -- so the driver ships no cc<8 image for them and cuModuleLoadData
++     * would fail (CUDA_ERROR_NO_BINARY_FOR_GPU).  NVIDIA's real Turing DLPP path
++     * uses a different (HMMA.1688) kernel set and launch graph, which we captured
++     * only on Blackwell -- so it cannot be driven here.  experimental_arch cannot
++     * help, so this refusal is unconditional. */
++    .hard_min_major = 8,
++    .hard_msg =
++        "dlpp_drv_cuda cannot run on this GPU (cc %d.%d): DLPP's conv kernels "
++        "require sm_80+ (Ampere) tensor cores (the m16n8k16 MMA), so the driver "
++        "ships no image for Turing/Volta/Pascal.  NVIDIA's Turing DLPP uses a "
++        "different kernel set and graph that is not captured here -- needs "
++        "Ampere or newer.\n",
++    .gate_msg =
++        "dlpp_drv_cuda is validated on Blackwell (cc 12.x) and Ada (cc 8.9); this "
++        "GPU is cc %d.%d.  Other Ampere/Ada support is unverified (they run the "
++        "sm_80 image) -- set experimental_arch=1 to attempt it.\n",
++    .warn_msg =
++        "dlpp_drv_cuda: EXPERIMENTAL sub-Blackwell (cc %d.%d) path -- it runs the "
++        "sm_80 image, unverified on real hardware.\n",
++};
++
++/* ------------------------------------------------------------------------- *
++ * One-time graph setup for the selected config + W,H,oW,oH (context current).
++ * ------------------------------------------------------------------------- */
++static void fill_sizes(AVFilterContext *ctx, long long *sz)
++{
++    DlppDrvCudaContext *s = ctx->priv;
++    dlppdrv_fill_allocs(s->cfg, s->W, s->H, s->oW, s->oH, sz);
++}
++
++static int setup_graph(AVFilterContext *ctx)
++{
++    DlppDrvCudaContext *s = ctx->priv;
++    const DlppConfig *c = &dlppdrv_configs[s->cfg];
++    const FFRtxFunc *funcs = (const FFRtxFunc *)c->funcs;
++    DlppGenUpload *up;
++    int ret, nup, pre, srchead;
++
++    if ((ret = ff_rtx_arch_gate(ctx, &s->r, &dlppdrv_gate, s->experimental_arch)) < 0)
++        return ret;
++    if ((ret = ff_rtx_load_modules(ctx, &s->r, s->data_dir,
++                                   (const FFRtxModule *)c->modules, c->nmod, DLPPDRV_MAX_MID,
++                                   funcs, c->nfunc, DLPPDRV_MAX_FID, NULL)) < 0)
++        return ret;
++    if ((ret = ff_rtx_alloc_arena(ctx, &s->r, c->nalloc, fill_sizes, 0)) < 0)
++        return ret;
++
++    up = av_calloc(c->nupload, sizeof(*up));
++    if (!up)
++        return AVERROR(ENOMEM);
++    nup = dlppdrv_fill_uploads(s->cfg, s->W, s->H, s->oW, s->oH,
++                               (const dlppdrv_devptr *)s->r.alloc, up);
++    ret = ff_rtx_upload_weights(ctx, &s->r, s->data_dir, "weights.bin",
++                                (const FFRtxUpload *)up, nup);
++    av_freep(&up);
++    if (ret < 0)
++        return ret;
++
++    /* input array + texture (linear/normalized/clamp; the frame is copied in
++     * each frame), and the output array + surface (the SUST.P target). */
++    s->in_img = ff_rtx_image_array(ctx, &s->r, s->W, s->H, s->inpf->cufmt,
++                                   FF_RTX_TEX | FF_RTX_CLAMP);
++    s->out_img = ff_rtx_image_array(ctx, &s->r, s->oW, s->oH, s->outpf->cufmt,
++                                    FF_RTX_SURF | FF_RTX_LDST);
++    if (!s->in_img || !s->out_img)
++        return AVERROR_EXTERNAL;
++
++    /* Build the graph.  dlppdrv_fill_graph() is generated from the same fit as
++     * the tables above and assigns every field through its named
++     * dlppdrv_*_params struct, so the argument blocks are constructed rather
++     * than patched.  The casts are only `unsigned long long *` vs `uint64_t *`
++     * on LP64. */
++    if ((ret = ff_rtx_alloc_launches(ctx, &s->r, c->nlaunch, sizeof(DlppGenLaunch))) < 0)
++        return ret;
++    if (dlppdrv_fill_graph(s->cfg, s->W, s->H, s->oW, s->oH,
++                           (const dlppdrv_devptr *)s->r.alloc,
++                           (dlppdrv_devptr)s->in_img->tex, (dlppdrv_devptr)s->out_img->surf,
++                           s->r.launches) != c->nlaunch) {
++        av_log(ctx, AV_LOG_ERROR, "generated fill disagrees with the config tables\n");
++        return AVERROR_BUG;
++    }
++
++    /* Format selectors, on the shared DLPP glue kernels. */
++    if ((ret = ff_dlpp_patch_selectors(ctx, &s->r, funcs, c->nfunc,
++                                       s->inpf, s->outpf, c->tag, &pre)) < 0)
++        return ret;
++    srchead = ff_rtx_find_launch_prefix(&s->r, funcs, c->nfunc, DLPPDRV_SRC_HEAD_KERNEL);
++
++    /* Split-screen comparison wipe (params +0x10 -> SR-head kernel arg @0x498 =
++     * round(oW*wipe)).  0 (default) leaves the byte-exact-with-the-DLL full-SR
++     * output; >0 shows the left oW*wipe columns as the bicubic reference. */
++    if (s->wipe > 0) {
++        uint32_t col = (uint32_t)(s->wipe * (float)s->oW + 0.5f);
++        if (srchead < 0) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "no SR-head kernel for config %s; wipe cannot be applied\n", c->tag);
++            return AVERROR_BUG;
++        }
++        memcpy(ff_rtx_launch_at(&s->r, srchead)->params + DLPPDRV_WIPE_ARG_OFF, &col, 4);
++        av_log(ctx, AV_LOG_VERBOSE, "compare wipe: %g -> %u cols bicubic (SR-head launch %d)\n",
++               s->wipe, col, srchead);
++    }
++
++    /* Sub-Blackwell (Ampere/Ada) path.  An earlier build inferred that the sm_75/
++     * sm_80 tex/surf glue kernels took an 8-byte-larger param struct and spliced a
++     * reserved field in.  Verified WRONG on real sm_89 (RTX 4060 Ti): every DLPP
++     * kernel's EIATTR_CBANK_PARAM_SIZE is identical across sm_80 and sm_120
++     * (preProcess 0x38, postProcess 0x48, ResampleAndComposeFP16 0x58, pixelFold
++     * 0x28), and the genuine driver DLL launches them with the sm_120-sized param
++     * buffer on sm_89.  The 8-byte splice made cuLaunchKernel return
++     * OUT_OF_RESOURCES on Ada.  So the sm_120 arg layout is used unchanged on all
++     * architectures -- no fix-up.  (experimental_arch still gates the path only
++     * because the SASS itself is NVIDIA's own multi-arch cubin, not ours.) */
++
++    av_log(ctx, AV_LOG_INFO,
++           "driver DLPP graph ready: quality %d [%s]  %dx%d -> %dx%d  "
++           "(%d launches, %d buffers)\n",
++           s->quality, c->tag, s->W, s->H, s->oW, s->oH,
++           s->r.nlaunch, s->r.nalloc);
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Per-frame: bind the input frame as a texture, replay the graph, copy out.
++ * ------------------------------------------------------------------------- */
++static int filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    DlppDrvCudaContext *s = inlink->dst->priv;
++    /* psize is the kernel's own cbank size, NOT the captured argsize */
++    const FFRtxFrameOp op = {
++        .in_img = s->in_img,  .iW = s->W,  .iH = s->H,  .ibpp = s->inpf->bpp,
++        .out_img = s->out_img, .oW = s->oW, .oH = s->oH, .obpp = s->outpf->bpp,
++        .flags = FF_RTX_OP_PSIZE |
++                 (s->outpf->sel == 2 ? FF_RTX_OP_OPAQUE_ALPHA : 0),
++    };
++
++    return ff_rtx_filter_frame(inlink, in, &s->r, &op, NULL);
++}
++
++static int config_output(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    AVFilterLink *inlink = ctx->inputs[0];
++    DlppDrvCudaContext *s = ctx->priv;
++    AVHWFramesContext *in_frames_ctx;
++    FFRtxFormats fmts = {
++        .in_tbl  = ff_rtx_packed_rgb_fmts, .n_in  = FF_ARRAY_ELEMS(ff_rtx_packed_rgb_fmts),
++        .out_tbl = ff_rtx_packed_rgb_fmts, .n_out = FF_ARRAY_ELEMS(ff_rtx_packed_rgb_fmts),
++    };
++    int nscale, fast, ret;
++
++    ff_rtx_free_graph(ctx, &s->r);
++
++    fmts.out_format = s->out_format;
++    if ((ret = ff_rtx_config_formats(ctx, inlink, &fmts, &in_frames_ctx,
++                                     &s->inpf, &s->outpf)) < 0)
++        return ret;
++
++    s->W = inlink->w;
++    s->H = inlink->h;
++    /* Default (unset w/h) = the native integer scale: quality 3/4 uses the
++     * `scale` factor, base quality 1/2 uses 2x.  An explicit expression
++     * overrides per-axis (any ratio -> the resample path). */
++    nscale = (s->quality >= 3) ? s->scale : 2;
++    if ((ret = ff_rtx_eval_dims(ctx, inlink, s->w_expr, s->h_expr, nscale,
++                                &s->oW, &s->oH)) < 0)
++        return ret;
++
++    /* Config key = (quality, native-scale, path). Base models (q1/q2) have
++     * scale 0 and a fixed internal 2x: fast when out==2x, else resample. The
++     * high-quality models 5/6 (q3/q4) do NATIVE integer upscaling at 2x/3x/4x
++     * (the `scale` opt -> the driver's params[0x38] head selector, baked into the
++     * captured config); only the exact-Nx fast path is shipped for them. */
++    fast = (s->oW == nscale * s->W && s->oH == nscale * s->H);
++    s->cfg = dlppdrv_config_index(s->quality, s->quality >= 3 ? s->scale : 0,
++                                  fast ? 0 : 1);
++    if (s->cfg < 0) {
++        av_log(ctx, AV_LOG_ERROR, "no config for quality %d scale %d %s path\n",
++               s->quality, s->quality >= 3 ? s->scale : 0, fast ? "fast" : "resample");
++        return AVERROR(ENOSYS);
++    }
++
++    if ((ret = ff_rtx_bind_device(ctx, &s->r, in_frames_ctx)) < 0)
++        return ret;
++    if ((ret = ff_rtx_config_hwframes(ctx, outlink, &s->r, s->oW, s->oH,
++                                      s->outpf->f)) < 0)
++        return ret;
++    return ff_rtx_setup(ctx, &s->r, "driver DLPP", setup_graph);
++}
++
++static const AVFilterPad dlpp_drv_cuda_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .filter_frame = filter_frame },
++};
++
++static const AVFilterPad dlpp_drv_cuda_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_output },
++};
++
++const FFFilter ff_vf_dlpp_drv_cuda = {
++    .p.name        = "dlpp_drv_cuda",
++    .p.description = NULL_IF_CONFIG_SMALL("NVIDIA driver RTX Video DLPP super-resolution (CUDA)"),
++    .p.priv_class  = &dlpp_drv_cuda_class,
++    .priv_size     = sizeof(DlppDrvCudaContext),
++    .uninit        = ff_rtx_uninit,
++    FILTER_INPUTS(dlpp_drv_cuda_inputs),
++    FILTER_OUTPUTS(dlpp_drv_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};

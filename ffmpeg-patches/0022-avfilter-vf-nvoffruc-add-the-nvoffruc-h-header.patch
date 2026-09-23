@@ -1,0 +1,12 @@
+From ebcbde82969f6bdf57c6b369676500580c41dedc Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Mon, 02 Jan 2023 11:48:02 -0800
+Subject: [PATCH] avfilter/vf_nvoffruc: Add the NvOFFRUC.h header
+
+This is not redistributable
+---
+ libavfilter/NvOFFRUC.h | 388 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 388 insertions(+)
+
+Files changed: libavfilter/NvOFFRUC.h
+[NVIDIA proprietary header, author notes "not redistributable" -- diff intentionally omitted here, see URL above]

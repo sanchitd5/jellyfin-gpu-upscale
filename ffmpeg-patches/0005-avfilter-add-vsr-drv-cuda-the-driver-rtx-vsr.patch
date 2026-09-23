@@ -1,0 +1,515 @@
+From 47d0aa27ab1029b24e64596773211f1c3e143eb2 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:10 +0800
+Subject: [PATCH] avfilter: add vsr_drv_cuda, the driver RTX VSR network
+
+The video super-resolution the NVIDIA driver itself runs (the DXVA/PPE plugin
+nvaivpx.dll, ppe/features/AIVP), as opposed to the NGX SDK snippet that
+vsr_cuda drives.  It is a newer and heavier network over the same DLPP kernels,
+with its own quality levels and tunables, and it is worth having both: they do
+not produce the same picture.
+
+The driver numbers its networks 0-4, but they are not ordered by strength and
+index 0 is a byte-identical duplicate of index 4.  Only 1-4 are exposed here:
+one network reachable under two numbers is a usability trap, not a feature.  By
+fidelity the order runs q1 (most faithful) > q3 > q4 > q2 (most aggressive
+detail synthesis), so the default is q1.
+
+Two things differ from vsr_cuda beyond the tables, and both are visible here:
+each launch is issued with the kernel's own EIATTR_CBANK_PARAM_SIZE rather than
+the captured driver argsize, because the driver over-reports by 8 bytes for the
+two DLPP tex/surf kernels and cuLaunchKernel then fails with
+CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES; and the graph has only two bindless slots in
+total -- the input texture at dlpp_preProcess and the output surface at
+dlpp_postProcess or ResampleAndComposeFP16 -- with no internal surfaces.
+
+The graph super-resolves 2x internally: an exact isotropic 2x output stores
+directly, anything else composes to the requested rectangle.
+---
+ configure                     |   1 +
+ doc/filters.texi              |  77 ++++++++++
+ libavfilter/Makefile          |   1 +
+ libavfilter/allfilters.c      |   1 +
+ libavfilter/vf_vsr_drv_cuda.c | 350 ++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 430 insertions(+)
+
+diff --git a/configure b/configure
+index f8b1e2ba2b..32ed6f6836 100755
+--- a/configure
++++ b/configure
+@@ -4324,6 +4324,7 @@ scale_vulkan_filter_deps="vulkan spirv_compiler swscale"
+ vpp_qsv_filter_deps="libmfx"
+ vpp_qsv_filter_select="qsvvpp"
+ vsr_cuda_filter_deps="ffnvcodec nvfdata_vsr"
++vsr_drv_cuda_filter_deps="ffnvcodec nvfdata_vsr_drv"
+ xfade_opencl_filter_deps="opencl"
+ xfade_vulkan_filter_deps="vulkan spirv_compiler"
+ yadif_cuda_filter_deps="ffnvcodec"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index ee0fdf2236..d7870e6827 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -28014,6 +28014,83 @@ ingest @strong{YCbCr only}.  The Vulkan encoders reject every RGB pixel format
+ likewise takes @code{nv12}/@code{p010}, so @code{vsr_cuda}'s RGB output cannot be
+ fed to an encoder directly.
+ 
++@anchor{vsr_drv_cuda}
++@section vsr_drv_cuda
++
++Upscale video with the NVIDIA driver's RTX Video Super Resolution network,
++running it directly on CUDA.
++
++This is the driver's AIVP plugin, not the NGX SDK network that @ref{vsr_cuda}
++drives -- a newer and heavier network over the same underlying kernels.  The
++two do not produce the same picture, and neither is uniformly better, so it is
++worth comparing them on your own content.  @code{dlpp_drv_cuda} is a third
++option again.
++
++The graph super-resolves 2x internally.  An exact isotropic 2x output stores
++directly; any other size resamples that result to the requested rectangle with
++a bicubic compose.
++
++It accepts the following options:
++
++@table @option
++@item quality
++Which of the driver's four networks to run, @code{1} to @code{4}.  Default
++@code{1}.
++
++They are @strong{not} ordered by strength.  By fidelity, from the most faithful
++to the most aggressive at synthesizing detail, the order is @code{1}, @code{3},
++@code{4}, @code{2}.  The default @code{1} is the least grainy and the closest
++to a faithful upscale; @code{2} invents the most.
++
++@item detail
++@item smooth
++Perceptual pre-processing of the input, each @code{0} to @code{16} and
++defaulting to @code{0}, which is neutral and byte-exact against the driver.
++@option{detail} raises high-frequency content and @option{smooth} lowers it --
++an unsharp/denoise pair applied before the network.  They tune the look, not
++the fidelity.
++
++@item w
++@item h
++Output width and height, as expressions (as in @ref{scale}); the variables
++@var{iw}/@var{in_w} and @var{ih}/@var{in_h} hold the input size.  Defaults
++@code{iw*2} and @code{ih*2}.
++
++@item format
++Output pixel format.  Empty (the default) keeps the input format.
++
++@item data
++Directory holding the extracted cubins and the shared @file{weights.bin}.
++
++@item experimental_arch
++Allow GPU architectures whose cubins were matched statically rather than
++exercised.  Ada (sm_89) and Blackwell do not need this.  Turing and older
++cannot run this network at all -- its convolution kernels need sm_80 tensor
++cores -- and are refused unconditionally.
++@end table
++
++@subsection Supported formats
++
++Packed RGB formats are accepted for both input and output: @code{rgb0},
++@code{rgba}, @code{bgr0}, @code{bgra} (8-bit) and @code{rgba64le} (16-bit).
++Input and output formats are chosen independently (see the @option{format}
++option).  16-bit carries the network's full internal precision and avoids
++banding.
++
++The kernels branch on a format selector that exposes an R@math{<->}B swap only
++on the 8-bit path, so the B-first @code{bgr0}/@code{bgra} are handled natively.
++That swap does not exist on the high-bit-depth path, which packs in array-native
++order, so 16-bit is R-first only (@code{rgba64le}).
++
++This filter does @strong{not} do YUV@math{<->}RGB conversion or tone mapping;
++see @ref{vsr_cuda} for the @code{libplacebo} pipeline that feeds these filters
++from real video and for the hardware decode/encode combinations.
++
++The cubins and weights are extracted from the proprietary NVIDIA libraries and
++are @emph{not} shipped: the filter is only built when an
++@code{nvidia-video-filters} package carrying the driver VSR data is installed, and
++@option{data} defaults to that package's data directory.
++
+ @section yadif_cuda
+ 
+ Deinterlace the input video using the @ref{yadif} algorithm, but implemented
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 9f955565b2..ffba98faca 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -577,6 +577,7 @@ OBJS-$(CONFIG_FRC_AMF_FILTER)                += vf_frc_amf.o vf_amf_common.o
+ OBJS-$(CONFIG_VQE_AMF_FILTER)                += vf_vqe_amf.o vf_amf_common.o
+ OBJS-$(CONFIG_VPP_QSV_FILTER)                += vf_vpp_qsv.o
+ OBJS-$(CONFIG_VSR_CUDA_FILTER)               += vf_vsr_cuda.o rtx_cuda.o
++OBJS-$(CONFIG_VSR_DRV_CUDA_FILTER)           += vf_vsr_drv_cuda.o rtx_cuda.o
+ OBJS-$(CONFIG_VSTACK_FILTER)                 += vf_stack.o framesync.o
+ OBJS-$(CONFIG_W3FDIF_FILTER)                 += vf_w3fdif.o
+ OBJS-$(CONFIG_WAVEFORM_FILTER)               += vf_waveform.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 35629fe1c3..7e4bc775f5 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -541,6 +541,7 @@ extern const FFFilter ff_vf_vignette;
+ extern const FFFilter ff_vf_vmafmotion;
+ extern const FFFilter ff_vf_vpp_qsv;
+ extern const FFFilter ff_vf_vsr_cuda;
++extern const FFFilter ff_vf_vsr_drv_cuda;
+ extern const FFFilter ff_vf_vstack;
+ extern const FFFilter ff_vf_w3fdif;
+ extern const FFFilter ff_vf_waveform;
+diff --git a/libavfilter/vf_vsr_drv_cuda.c b/libavfilter/vf_vsr_drv_cuda.c
+new file mode 100644
+index 0000000000..62fb7f7b49
+--- /dev/null
++++ b/libavfilter/vf_vsr_drv_cuda.c
+@@ -0,0 +1,350 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Super-resolution filter driving the NVIDIA *driver* RTX Video Super Resolution
++ * network (the DXVA/PPE plugin nvaivpx.dll, ppe/features/AIVP) -- distinct from
++ * vf_vsr_cuda, which runs the NGX SDK snippet (nvngx_vsr.dll).  The driver graph
++ * is a newer/heavier network; its cubins were extracted and the forward pass
++ * reverse-engineered by running the plugin on Linux via loader_ppe and
++ * intercepting the live CUDA Driver-API launches.  vsr_drv_cuda_gen.h encodes,
++ * per quality and scaling path, how the whole graph (grids, scratch allocations,
++ * packed arg-buffer scalars incl. division-magic constants and float32 resample
++ * steps, weight-upload targets, pointer fixups) scales with the input W,H and
++ * output oW,oH -- derived and validated byte-exact against the loader
++ * (rtx-video-re).
++ * The filter evaluates that at config time and replays the graph with libcuda; no
++ * DLL is needed at run time.  The replay machinery itself is rtx_cuda.c.
++ *
++ * The graph performs a fixed internal 2x super-resolution.  Exact isotropic 2x
++ * output takes the "fast" path (direct dlpp_postProcess store); any other factor
++ * takes the "resample" path (dlpp_ResampleAndComposeFP16 to the requested rect).
++ *
++ * Differences from vf_vsr_cuda:
++ *   - Each launch is issued with the kernel's EIATTR_CBANK_PARAM_SIZE (psize) as
++ *     CU_LAUNCH_PARAM_BUFFER_SIZE, NOT the captured driver argsize (the driver
++ *     over-reports by 8 bytes for the two DLPP tex/surf kernels, which makes
++ *     cuLaunchKernel return CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES).
++ *   - Only two bindless slots in the whole graph (input tex @ dlpp_preProcess,
++ *     output surf @ dlpp_postProcess/ResampleAndComposeFP16); no internal surfaces.
++ *
++ * The cubins and the shared weights blob are external files (the "data" option),
++ * extracted from the proprietary driver and not shipped with FFmpeg.
++ */
++
++#include "libavutil/hwcontext.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "filters.h"
++#include "rtx_cuda.h"
++#include "rtx_dlpp_abi.h"
++#include "video.h"
++
++/* Generated by rtx-video-re from the proprietary NVIDIA library, and
++ * installed rather than carried here -- located, together with the cubins and
++ * weights it names, through pkg-config (see configure's nvfdata_* checks). */
++#include <vsr_drv_cuda_gen.h>
++
++FF_RTX_ASSERT_MODULE_LAYOUT(VsrDrvModule);
++FF_RTX_ASSERT_FUNC_LAYOUT(VsrDrvFunc);
++FF_RTX_ASSERT_UPLOAD_LAYOUT(VsrDrvGenUpload);
++FF_RTX_ASSERT_LAUNCH_LAYOUT(VsrDrvGenLaunch);
++
++/* preProcess arg-buffer offsets of the two input pre-processing floats (params
++ * +0x3c/+0x40, direct copies; located by sentinel probe -- both inside its 64-byte
++ * param cbank).  preProcess is the first launch in every config. */
++#define VSRDRV_PRE_DETAIL_OFF 0x38
++#define VSRDRV_PRE_SMOOTH_OFF 0x3c
++/* The format selectors -- the 3-way enum documented on ff_rtx_packed_rgb_fmts,
++ * sentinel-probed at the driver's params +0x30/+0x34 (see rtx-video-re
++ * docs/FINDINGS-vsr-drv-params.md) -- sit on the DLPP glue kernels this filter
++ * shares with vf_dlpp_drv_cuda, so their offsets live in rtx_dlpp_abi.h. */
++
++typedef struct VsrDrvCudaContext {
++    const AVClass *class;
++
++    FFRtxCuda   r;
++    FFRtxImage *in_img, *out_img;
++
++    int W, H, oW, oH;                 ///< input / output size
++    int cfg;                          ///< index into vsrdrv_configs
++
++    const FFRtxPixFmt *inpf, *outpf;
++
++    int   quality;
++    float detail;                     ///< preProcess detail gain (params +0x3c -> arg@0x38)
++    float smooth;                     ///< preProcess smoothing   (params +0x40 -> arg@0x3c)
++    char *w_expr;
++    char *h_expr;
++    char *data_dir;
++    char *out_format;                 ///< output pixel format (empty = same as input)
++    int   experimental_arch;          ///< allow the unverified sub-Blackwell (sm_75/sm_80) path
++} VsrDrvCudaContext;
++
++#define OFFSET(x) offsetof(VsrDrvCudaContext, x)
++#define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
++
++static const AVOption vsr_drv_cuda_options[] = {
++    /* Driver quality selects the internal network; they are NOT ordered by index.
++     * By fidelity/gentleness: q1 (most faithful) > q3 > q4 > q2 (most aggressive
++     * detail synthesis).  Default q1 -- the least grainy, closest to a faithful
++     * upscale.
++     *
++     * The driver's own index 0 selects the same network as 4, byte-identically.
++     * It is not exposed: one model under two numbers only invites someone to A/B
++     * them and find no difference. */
++    { "quality", "driver VSR quality level (1=gentlest .. 2=strongest)", OFFSET(quality), AV_OPT_TYPE_INT, {.i64=1}, 1, 4, FLAGS },
++    /* Perceptual input pre-processing (driver params +0x3c/+0x40, fed to
++     * dlpp_preProcess). 0 = neutral (byte-exact with the DLL); >0 only.  detail
++     * raises high-frequency, smooth lowers it -- an unsharp/denoise pair.  These
++     * tune look, NOT fidelity (see rtx-video-re docs/FINDINGS-vsr-drv-params.md). */
++    { "detail", "input detail gain (0=neutral, higher=sharper)", OFFSET(detail), AV_OPT_TYPE_FLOAT, {.dbl=0}, 0, 16, FLAGS },
++    { "smooth", "input smoothing (0=neutral, higher=softer)",    OFFSET(smooth), AV_OPT_TYPE_FLOAT, {.dbl=0}, 0, 16, FLAGS },
++    { "w", "output width expression (default: 2x input)",  OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
++    { "h", "output height expression (default: 2x input)", OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
++    { "data", "directory with extracted driver VSR cubins + the shared weights.bin",
++      OFFSET(data_dir), AV_OPT_TYPE_STRING, {.str=VSRDRV_DEFAULT_DATA_DIR}, 0, 0, FLAGS },
++    { "format", "output pixel format (empty = same as input); e.g. bgra, rgba64le",
++      OFFSET(out_format), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
++    /* The cubins ship as multi-arch fatbins (sm_75/sm_80/sm_120); cuModuleLoadData
++     * picks the image for the running GPU.  Blackwell (sm_120) is validated byte-
++     * exact; Ada (sm_89) is verified on an RTX 4060 Ti -- the sm_80 slice loaded
++     * there is byte-identical to the driver DLL's own sm_80 cubin for all 53
++     * kernels.  Other sub-Blackwell arches run that same sm_80 image but were never
++     * exercised on real silicon, hence the opt-in.  (Turing/older can't run VSR at
++     * all -- its conv kernels are sm_80+; refused unconditionally.) */
++    { "experimental_arch", "allow the unverified sub-Blackwell path (sm_89/Ada does not need this)",
++      OFFSET(experimental_arch), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(vsr_drv_cuda);
++
++FF_RTX_ASSERT_PRIV_LAYOUT(VsrDrvCudaContext);
++
++static const FFRtxArchGate vsrdrv_gate = {
++    /* The all_fuse_with_pooling conv kernels use the sm_80+ tensor-core MMA
++     * (m16n8k16 / HMMA.16816), which Turing/Volta/Pascal tensor cores cannot
++     * execute -- so the driver ships no cc<8 image for them and cuModuleLoadData
++     * would fail (CUDA_ERROR_NO_BINARY_FOR_GPU).  NVIDIA's real Turing VSR path
++     * uses a different (HMMA.1688) kernel set and launch graph, which we captured
++     * only on Blackwell -- so it cannot be driven here.  experimental_arch cannot
++     * help, so this refusal is unconditional. */
++    .hard_min_major = 8,
++    .hard_msg =
++        "vsr_drv_cuda cannot run on this GPU (cc %d.%d): VSR's conv kernels "
++        "require sm_80+ (Ampere) tensor cores (the m16n8k16 MMA), so the driver "
++        "ships no image for Turing/Volta/Pascal.  NVIDIA's Turing VSR uses a "
++        "different kernel set and graph that is not captured here -- needs "
++        "Ampere or newer.\n",
++    .gate_msg =
++        "vsr_drv_cuda is validated on Blackwell (cc 12.x) and Ada (cc 8.9); this "
++        "GPU is cc %d.%d.  Other Ampere/Ada support is unverified (they run the "
++        "sm_80 image) -- set experimental_arch=1 to attempt it.\n",
++    .warn_msg =
++        "vsr_drv_cuda: EXPERIMENTAL sub-Blackwell (cc %d.%d) path -- it runs the "
++        "sm_80 image, unverified on real hardware.\n",
++};
++
++/* ------------------------------------------------------------------------- *
++ * One-time graph setup for the selected config + W,H,oW,oH (context current).
++ * ------------------------------------------------------------------------- */
++static void fill_sizes(AVFilterContext *ctx, long long *sz)
++{
++    VsrDrvCudaContext *s = ctx->priv;
++    vsrdrv_fill_allocs(s->cfg, s->W, s->H, s->oW, s->oH, sz);
++}
++
++static int setup_graph(AVFilterContext *ctx)
++{
++    VsrDrvCudaContext *s = ctx->priv;
++    const VsrDrvConfig *c = &vsrdrv_configs[s->cfg];
++    VsrDrvGenUpload *up;
++    int ret, nup, pre;
++
++    if ((ret = ff_rtx_arch_gate(ctx, &s->r, &vsrdrv_gate, s->experimental_arch)) < 0)
++        return ret;
++    if ((ret = ff_rtx_load_modules(ctx, &s->r, s->data_dir,
++                                   (const FFRtxModule *)c->modules, c->nmod, VSRDRV_MAX_MID,
++                                   (const FFRtxFunc *)c->funcs, c->nfunc, VSRDRV_MAX_FID,
++                                   NULL)) < 0)
++        return ret;
++    if ((ret = ff_rtx_alloc_arena(ctx, &s->r, c->nalloc, fill_sizes, 0)) < 0)
++        return ret;
++
++    up = av_calloc(c->nupload, sizeof(*up));
++    if (!up)
++        return AVERROR(ENOMEM);
++    nup = vsrdrv_fill_uploads(s->cfg, s->W, s->H, s->oW, s->oH,
++                              (const vsrdrv_devptr *)s->r.alloc, up);
++    ret = ff_rtx_upload_weights(ctx, &s->r, s->data_dir, "weights.bin",
++                                (const FFRtxUpload *)up, nup);
++    av_freep(&up);
++    if (ret < 0)
++        return ret;
++
++    /* input array + texture (linear/normalized/clamp; the frame is copied in
++     * each frame), and the output array + surface (the SUST.P target). */
++    s->in_img = ff_rtx_image_array(ctx, &s->r, s->W, s->H, s->inpf->cufmt,
++                                   FF_RTX_TEX | FF_RTX_CLAMP);
++    s->out_img = ff_rtx_image_array(ctx, &s->r, s->oW, s->oH, s->outpf->cufmt,
++                                    FF_RTX_SURF | FF_RTX_LDST);
++    if (!s->in_img || !s->out_img)
++        return AVERROR_EXTERNAL;
++
++    /* Build the graph.  vsrdrv_fill_graph() is generated from the same fit as the
++     * tables above and assigns every field through its named vsrdrv_*_params
++     * struct, so the argument blocks are constructed rather than patched.
++     * CUdeviceptr and vsrdrv_devptr are both 64-bit device addresses; the casts
++     * are only to satisfy `unsigned long long *` vs `uint64_t *` on LP64. */
++    if ((ret = ff_rtx_alloc_launches(ctx, &s->r, c->nlaunch, sizeof(VsrDrvGenLaunch))) < 0)
++        return ret;
++    if (vsrdrv_fill_graph(s->cfg, s->W, s->H, s->oW, s->oH,
++                          (const vsrdrv_devptr *)s->r.alloc,
++                          (vsrdrv_devptr)s->in_img->tex, (vsrdrv_devptr)s->out_img->surf,
++                          s->r.launches) != c->nlaunch) {
++        av_log(ctx, AV_LOG_ERROR, "generated fill disagrees with the config tables\n");
++        return AVERROR_BUG;
++    }
++
++    /* Format selectors, on the shared DLPP glue kernels.  preProcess is also
++     * where this filter's own tunables sit, so keep its launch index. */
++    if ((ret = ff_dlpp_patch_selectors(ctx, &s->r, (const FFRtxFunc *)c->funcs,
++                                       c->nfunc, s->inpf, s->outpf, c->tag, &pre)) < 0)
++        return ret;
++
++    /* Perceptual tunables: overwrite the two preProcess input pre-processing floats
++     * (params +0x3c/+0x40 -> its arg @0x38/@0x3c) when set non-zero.  0 leaves the
++     * byte-exact-with-the-DLL default. */
++    if (s->detail != 0 || s->smooth != 0) {
++        uint8_t *a;
++        if (pre < 0) {
++            av_log(ctx, AV_LOG_ERROR,
++                   "no input pre-process kernel for config %s; detail/smooth "
++                   "cannot be applied\n", c->tag);
++            return AVERROR_BUG;
++        }
++        a = ff_rtx_launch_at(&s->r, pre)->params;
++        if (s->detail != 0) memcpy(a + VSRDRV_PRE_DETAIL_OFF, &s->detail, 4);
++        if (s->smooth != 0) memcpy(a + VSRDRV_PRE_SMOOTH_OFF, &s->smooth, 4);
++        av_log(ctx, AV_LOG_VERBOSE, "preProcess tunables: detail=%g smooth=%g (launch %d)\n",
++               s->detail, s->smooth, pre);
++    }
++
++    /* No sub-Blackwell param-size fix-up.  This filter used to append 8 zero bytes
++     * to the three tex/surf glue kernels' param buffers on cc < 12, on the theory
++     * that their sm_80 build declares a larger cbank than the sm_120 one.  That is
++     * wrong, and vf_dlpp_drv_cuda.c -- the same kernels, driven from the other
++     * plugin -- dropped the identical splice for the same reason: every kernel's
++     * EIATTR_CBANK_PARAM_SIZE is the same across sm_80 and sm_120, so growing the
++     * buffer makes cuLaunchKernel disagree with the cbank and fail
++     * CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES on Ada.  The generator settles it either
++     * way: psize comes from the loaded cubin's own EIATTR, and for every vsr_drv
++     * config it equals the argsize the driver itself launched with. */
++
++    av_log(ctx, AV_LOG_INFO,
++           "driver VSR graph ready: quality %d [%s]  %dx%d -> %dx%d  "
++           "(%d launches, %d buffers)\n",
++           s->quality, c->tag, s->W, s->H, s->oW, s->oH,
++           s->r.nlaunch, s->r.nalloc);
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Per-frame: bind the input frame as a texture, replay the graph, copy out.
++ * ------------------------------------------------------------------------- */
++static int filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    VsrDrvCudaContext *s = inlink->dst->priv;
++    /* psize is the kernel's own cbank size, NOT the captured argsize */
++    const FFRtxFrameOp op = {
++        .in_img = s->in_img,  .iW = s->W,  .iH = s->H,  .ibpp = s->inpf->bpp,
++        .out_img = s->out_img, .oW = s->oW, .oH = s->oH, .obpp = s->outpf->bpp,
++        .flags = FF_RTX_OP_PSIZE |
++                 (s->outpf->sel == 2 ? FF_RTX_OP_OPAQUE_ALPHA : 0),
++    };
++
++    return ff_rtx_filter_frame(inlink, in, &s->r, &op, NULL);
++}
++
++static int config_output(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    AVFilterLink *inlink = ctx->inputs[0];
++    VsrDrvCudaContext *s = ctx->priv;
++    AVHWFramesContext *in_frames_ctx;
++    FFRtxFormats fmts = {
++        .in_tbl  = ff_rtx_packed_rgb_fmts, .n_in  = FF_ARRAY_ELEMS(ff_rtx_packed_rgb_fmts),
++        .out_tbl = ff_rtx_packed_rgb_fmts, .n_out = FF_ARRAY_ELEMS(ff_rtx_packed_rgb_fmts),
++    };
++    int fast, ret;
++
++    ff_rtx_free_graph(ctx, &s->r);
++
++    fmts.out_format = s->out_format;
++    if ((ret = ff_rtx_config_formats(ctx, inlink, &fmts, &in_frames_ctx,
++                                     &s->inpf, &s->outpf)) < 0)
++        return ret;
++
++    s->W = inlink->w;
++    s->H = inlink->h;
++    if ((ret = ff_rtx_eval_dims(ctx, inlink, s->w_expr, s->h_expr, 2,
++                                &s->oW, &s->oH)) < 0)
++        return ret;
++
++    fast = (s->oW == 2 * s->W && s->oH == 2 * s->H);
++    s->cfg = vsrdrv_config_index(s->quality, fast ? 0 : 1);
++    if (s->cfg < 0) {
++        av_log(ctx, AV_LOG_ERROR, "no config for quality %d %s path\n",
++               s->quality, fast ? "fast" : "resample");
++        return AVERROR(ENOSYS);
++    }
++
++    if ((ret = ff_rtx_bind_device(ctx, &s->r, in_frames_ctx)) < 0)
++        return ret;
++    if ((ret = ff_rtx_config_hwframes(ctx, outlink, &s->r, s->oW, s->oH,
++                                      s->outpf->f)) < 0)
++        return ret;
++    return ff_rtx_setup(ctx, &s->r, "driver VSR", setup_graph);
++}
++
++static const AVFilterPad vsr_drv_cuda_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .filter_frame = filter_frame },
++};
++
++static const AVFilterPad vsr_drv_cuda_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_output },
++};
++
++const FFFilter ff_vf_vsr_drv_cuda = {
++    .p.name        = "vsr_drv_cuda",
++    .p.description = NULL_IF_CONFIG_SMALL("NVIDIA driver RTX Video Super Resolution (CUDA)"),
++    .p.priv_class  = &vsr_drv_cuda_class,
++    .priv_size     = sizeof(VsrDrvCudaContext),
++    .uninit        = ff_rtx_uninit,
++    FILTER_INPUTS(vsr_drv_cuda_inputs),
++    FILTER_OUTPUTS(vsr_drv_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};

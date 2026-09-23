@@ -1,0 +1,14 @@
+From acddf16353d1755052dc49391e906e139a9bf4c0 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Sun, 28 Jun 2026 13:23:10 -0700
+Subject: [PATCH] avfilter/fruc_vulkan: copy vf_framerate.c verbatim to vf_fruc_vulkan.c
+
+The fruc_vulkan filter will re-use the frame timing logic from vf_framerate -
+it works so we don't need to do something different. To maximise reviewability,
+this commit simply copies the file into place, so that all the changes in the
+subsequent commits can be more easily understood.
+---
+ libavfilter/{vf_framerate.c => vf_fruc_vulkan.c} | 0
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
+Files changed: libavfilter/vf_framerate.c -> libavfilter/vf_fruc_vulkan.c (pure rename, no content change)

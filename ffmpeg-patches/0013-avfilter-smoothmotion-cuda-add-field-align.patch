@@ -1,0 +1,65 @@
+From 1f7d511a250ae9f5d0974f2bbd706ac8c67a26f8 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Wed, 19 Aug 2026 18:25:44 -0700
+Subject: [PATCH] avfilter/smoothmotion_cuda: add field_align, defaulting to exact
+
+The generated table can now emit either flow-field geometry.  The driver's own
+is inconsistent at any dimension that is not a multiple of 40: the network built
+the field at a fixed 10 px per texel, spanning 2.5*L0 pixels, and the warp reads
+it back as if it spanned the frame, so the flow lands up to 2.5*L0 - dim pixels
+(worst case 39) from where it was computed -- a ramp, worst at the right/bottom
+edge.  Motion boundaries are what pay for it: measured at 1600x900, 3.2 dB of
+Y-PSNR frame-wide and 6.9 dB on the leading edge of a moving object.
+
+field_align=exact uses the geometry the network actually produced and is the
+default, since it emits bytes identical to the driver's at every multiple-of-40
+size -- which is every display mode Smooth Motion runs at in the driver, and
+where the whole table was validated.  field_align=driver reproduces the driver
+at the other sizes too, and is what comparing against a capture needs.
+
+See docs/smoothmotion/field-alignment.md in the rtx-video-re tree for the
+measurements and how to repeat them.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AGq45TEwHmDoHnSzCYJuP7
+---
+ libavfilter/vf_smoothmotion_cuda.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+diff --git a/libavfilter/vf_smoothmotion_cuda.c b/libavfilter/vf_smoothmotion_cuda.c
+index 3ce8eed6e9..e812f29419 100644
+--- a/libavfilter/vf_smoothmotion_cuda.c
++++ b/libavfilter/vf_smoothmotion_cuda.c
+@@ -121,6 +121,7 @@ typedef struct SmoothMotionContext {
+     int   interp_start;
+     int   interp_end;
+     int   packed;                       ///< emit the network's packed output directly
++    int   field_align;                  ///< SM_FIELD_DRIVER or SM_FIELD_EXACT
+ 
+     /* cadence state (from vf_framerate / vf_nvoffruc) */
+     AVRational dest_frame_rate;
+@@ -155,6 +156,16 @@ static const AVOption smoothmotion_cuda_options[] = {
+                                                                   OFFSET(data_dir),             AV_OPT_TYPE_STRING, {.str=SM_DEFAULT_DATA_DIR}, 0, 0, V|F },
+     /* Emit native packed buffer (rgba64 for RGB/x2rgb10, VUYX/XV48LE for YUV). */
+     { "packed",       "emit the network's packed output directly", OFFSET(packed),              AV_OPT_TYPE_BOOL,   {.i64=0},     0, 1,   V|F },
++    /* The driver stretches the flow field over the frame while the network built
++     * it at a fixed 10 px/texel; the two agree only when the dimension is a
++     * multiple of 40.  See docs/smoothmotion/field-alignment.md.  Default is the
++     * consistent geometry: identical to the driver at multiple-of-40 sizes, and
++     * worth several dB at motion boundaries anywhere else.  Reproducing a driver
++     * capture byte for byte needs field_align=driver. */
++    { "field_align",  "flow-field alignment when a dimension is not a multiple of 40",
++                                                                  OFFSET(field_align),          AV_OPT_TYPE_INT,    {.i64=SM_FIELD_EXACT},  0, 1, V|F, .unit = "field_align" },
++    {   "driver",     "reproduce the driver exactly, its misalignment included",   0,           AV_OPT_TYPE_CONST,  {.i64=SM_FIELD_DRIVER}, 0, 0, V|F, .unit = "field_align" },
++    {   "exact",      "align the field to the 10 px/texel the network computed",   0,           AV_OPT_TYPE_CONST,  {.i64=SM_FIELD_EXACT},  0, 0, V|F, .unit = "field_align" },
+     { NULL }
+ };
+ 
+@@ -522,7 +533,7 @@ static int interpolate_frame(AVFilterContext *ctx, int64_t work_pts)
+         .warp_tex = { s->t_in0, s->t_in1 },
+         .out_surf = s->out_img->surf,
+     };
+-    sm_fill_params(s->W, s->H, s->gen, s->sb, &h);
++    sm_fill_params(s->W, s->H, s->gen, s->sb, &h, s->field_align);
+ 
+     for (int i = 0; i < SM_NLAUNCH; i++) {
+         SMGenLaunch *L = &s->gen[i];

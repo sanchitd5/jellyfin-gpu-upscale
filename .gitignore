@@ -17,3 +17,4 @@ shaders/Anime4K_*.glsl
 *.swp
 __pycache__/
 *.pyc
+livetestbox.md

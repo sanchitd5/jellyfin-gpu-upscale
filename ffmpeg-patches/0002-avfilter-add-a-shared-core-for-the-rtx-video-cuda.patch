@@ -1,0 +1,1501 @@
+From 5b8190461c4eefbf63a77ee88ad20469872fa8bc Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:09 +0800
+Subject: [PATCH] avfilter: add a shared core for the RTX Video CUDA filters
+
+Seven of the filters that follow replay a captured NVIDIA kernel graph, and all
+seven are 1:1 filters built the same way.  A <feature>_cuda_gen.h describes one
+feature's graph -- which cubins to load, how big each scratch buffer is at a
+given frame size, where the weights go, and every launch's grid, block and
+argument block -- and the filter's job is to turn that into CUDA calls.  That
+job is the same every time: gate the GPU architecture, load the modules, lay out
+one contiguous arena, upload the weights, bind the input and output images, then
+replay the launch list once per frame.  This is that job, written once.
+
+What stays in each vf_*.c is what genuinely differs: its AVOptions, which
+generated config the options select, the shape of its I/O binding, and the named
+tunable offsets it patches into the argument blocks.
+
+The generated headers are per-feature and expose everything as static, so the
+core never includes them.  Each filter instead passes its tables in through
+layout-compatible views and proves the cast with a static_assert, so a generator
+change that broke the assumption fails the build rather than corrupting a
+launch.
+
+Two decisions here are load-bearing rather than tidiness, and are commented as
+such in the source: the arena is one contiguous allocation because several
+kernels do a tile/halo read a little past the logical end of their input buffer,
+which is harmless inside an arena and becomes an illegal access once the heap
+fragments; and cuSurfObjectCreate/Destroy are resolved out of libcuda directly,
+once per process, because they are the one pair ffnvcodec's loader does not
+export.
+---
+ libavfilter/rtx_cuda.c     | 846 +++++++++++++++++++++++++++++++++++++++++++++
+ libavfilter/rtx_cuda.h     | 498 ++++++++++++++++++++++++++
+ libavfilter/rtx_dlpp_abi.h | 102 ++++++
+ 3 files changed, 1446 insertions(+)
+
+diff --git a/libavfilter/rtx_cuda.c b/libavfilter/rtx_cuda.c
+new file mode 100644
+index 0000000000..18dc71d1dc
+--- /dev/null
++++ b/libavfilter/rtx_cuda.c
+@@ -0,0 +1,846 @@
++/*
++ * Shared core for the NVIDIA RTX Video CUDA filters.
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++#include <dlfcn.h>
++#include <math.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "libavutil/eval.h"
++#include "libavutil/file.h"
++#include "libavutil/macros.h"
++#include "libavutil/mem.h"
++#include "libavutil/pixdesc.h"
++#include "libavutil/thread.h"
++
++#include "filters.h"
++#include "rtx_cuda.h"
++#include "video.h"
++
++#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, r->hwctx->internal->cuda_dl, x)
++
++/* Arena sub-buffer alignment (>= cuMemAlloc's own guarantee, which the
++ * per-buffer allocations used to rely on) and a trailing guard covering the
++ * tile/halo over-read past the final buffer described in the header. */
++#define RTX_ALLOC_ALIGN 512
++#define RTX_ALLOC_GUARD (1 << 20)
++
++const FFRtxPixFmt ff_rtx_packed_rgb_fmts[5] = {
++    { AV_PIX_FMT_RGB0,     CU_AD_FORMAT_UNSIGNED_INT8, 4, 0 },
++    { AV_PIX_FMT_RGBA,     CU_AD_FORMAT_UNSIGNED_INT8, 4, 0 },
++    { AV_PIX_FMT_BGR0,     CU_AD_FORMAT_UNSIGNED_INT8, 4, 1 },
++    { AV_PIX_FMT_BGRA,     CU_AD_FORMAT_UNSIGNED_INT8, 4, 1 },
++    { AV_PIX_FMT_RGBA64LE, CU_AD_FORMAT_UNORM_INT16X4, 8, 2 },
++};
++
++const FFRtxPixFmt *ff_rtx_find_fmt(const FFRtxPixFmt *tbl, int n,
++                                   enum AVPixelFormat f)
++{
++    for (int i = 0; i < n; i++)
++        if (tbl[i].f == f)
++            return &tbl[i];
++    return NULL;
++}
++
++/* ------------------------------------------------------------------------- *
++ * cuSurfObjectCreate/Destroy
++ *
++ * The only pair ffnvcodec's dynlink loader does not export, so it comes
++ * straight out of libcuda -- once per process.  libcuda is already loaded (the
++ * hwcontext holds it) and lives for the process, so this neither dlcloses nor
++ * refcounts.
++ * ------------------------------------------------------------------------- */
++typedef CUresult (*tcuSurfObjectCreate)(FFCUsurfObject *, const CUDA_RESOURCE_DESC *);
++typedef CUresult (*tcuSurfObjectDestroy)(FFCUsurfObject);
++
++static tcuSurfObjectCreate  rtx_surf_create;
++static tcuSurfObjectDestroy rtx_surf_destroy;
++
++static void rtx_load_surf_fns(void)
++{
++    void *libcuda = dlopen("libcuda.so.1", RTLD_NOW | RTLD_GLOBAL);
++    if (!libcuda)
++        return;
++    rtx_surf_create  = (tcuSurfObjectCreate)dlsym(libcuda, "cuSurfObjectCreate");
++    rtx_surf_destroy = (tcuSurfObjectDestroy)dlsym(libcuda, "cuSurfObjectDestroy");
++}
++
++static int rtx_surf_fns(AVFilterContext *ctx)
++{
++    static AVOnce once = AV_ONCE_INIT;
++    ff_thread_once(&once, rtx_load_surf_fns);
++    if (!rtx_surf_create || !rtx_surf_destroy) {
++        av_log(ctx, AV_LOG_ERROR, "cuSurfObjectCreate unavailable\n");
++        return AVERROR_EXTERNAL;
++    }
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Device binding and output plumbing
++ * ------------------------------------------------------------------------- */
++void ff_rtx_uninit(AVFilterContext *ctx)
++{
++    FFRtxPriv *p = ctx->priv;
++    ff_rtx_free_graph(ctx, &p->r);
++}
++
++int ff_rtx_config_formats(AVFilterContext *ctx, AVFilterLink *inlink,
++                          const FFRtxFormats *f,
++                          AVHWFramesContext **in_frames_ctx,
++                          const FFRtxPixFmt **inpf, const FFRtxPixFmt **outpf)
++{
++    FilterLink *il = ff_filter_link(inlink);
++    const char *hint = f->hint ? f->hint : "";
++    const char *open = f->hint ? " (" : "", *close = f->hint ? ")" : "";
++    enum AVPixelFormat fmt;
++
++    if (!il->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw context provided on input\n");
++        return AVERROR(EINVAL);
++    }
++    *in_frames_ctx = (AVHWFramesContext *)il->hw_frames_ctx->data;
++
++    fmt   = (*in_frames_ctx)->sw_format;
++    *inpf = ff_rtx_find_fmt(f->in_tbl, f->n_in, fmt);
++    if (!*inpf) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported input format %s%s%s%s\n",
++               av_get_pix_fmt_name(fmt), open, hint, close);
++        return AVERROR(ENOSYS);
++    }
++    if (!outpf)
++        return 0;
++
++    /* av_get_pix_fmt() strcmps its argument, so an option cleared to NULL --
++     * av_opt_set(..., "format", NULL, 0) is legal for a string option -- must
++     * not reach it. */
++    if (f->out_format && *f->out_format) {
++        fmt = av_get_pix_fmt(f->out_format);
++        if (fmt == AV_PIX_FMT_NONE) {
++            av_log(ctx, AV_LOG_ERROR, "invalid output format '%s'\n", f->out_format);
++            return AVERROR(EINVAL);
++        }
++    }
++    *outpf = ff_rtx_find_fmt(f->out_tbl ? f->out_tbl : f->in_tbl,
++                             f->out_tbl ? f->n_out : f->n_in, fmt);
++    if (!*outpf) {
++        av_log(ctx, AV_LOG_ERROR, "Unsupported output format %s%s%s%s\n",
++               av_get_pix_fmt_name(fmt), open, hint, close);
++        return AVERROR(ENOSYS);
++    }
++    return 0;
++}
++
++int ff_rtx_bind_device(AVFilterContext *ctx, FFRtxCuda *r,
++                       AVHWFramesContext *in_frames_ctx)
++{
++    r->device_ref = av_buffer_ref(in_frames_ctx->device_ref);
++    if (!r->device_ref)
++        return AVERROR(ENOMEM);
++    r->hwctx  = ((AVHWDeviceContext *)r->device_ref->data)->hwctx;
++    r->cu_ctx = r->hwctx->cuda_ctx;
++    r->stream = r->hwctx->stream;
++    return 0;
++}
++
++int ff_rtx_config_hwframes(AVFilterContext *ctx, AVFilterLink *outlink,
++                           FFRtxCuda *r, int oW, int oH,
++                           enum AVPixelFormat sw_format)
++{
++    FilterLink *ol = ff_filter_link(outlink);
++    AVHWFramesContext *out_frames_ctx;
++    int ret;
++
++    outlink->w = oW;
++    outlink->h = oH;
++
++    av_buffer_unref(&ol->hw_frames_ctx);
++    ol->hw_frames_ctx = av_hwframe_ctx_alloc(r->device_ref);
++    if (!ol->hw_frames_ctx)
++        return AVERROR(ENOMEM);
++    out_frames_ctx = (AVHWFramesContext *)ol->hw_frames_ctx->data;
++    out_frames_ctx->format            = AV_PIX_FMT_CUDA;
++    out_frames_ctx->sw_format         = sw_format;
++    out_frames_ctx->width             = oW;
++    out_frames_ctx->height            = oH;
++    out_frames_ctx->initial_pool_size = 4;
++
++    if ((ret = ff_filter_init_hw_frames(ctx, outlink, 4)) < 0)
++        return ret;
++    ret = av_hwframe_ctx_init(ol->hw_frames_ctx);
++    if (ret < 0)
++        av_log(ctx, AV_LOG_ERROR, "Failed to init CUDA frame context: %d\n", ret);
++    return ret;
++}
++
++int ff_rtx_setup(AVFilterContext *ctx, FFRtxCuda *r, const char *what,
++                 int (*setup_graph)(AVFilterContext *ctx))
++{
++    CUcontext dummy;
++    int ret;
++
++    if ((ret = CHECK_CU(r->hwctx->internal->cuda_dl->cuCtxPushCurrent(r->cu_ctx))) < 0)
++        return ret;
++    ret = setup_graph(ctx);
++    CHECK_CU(r->hwctx->internal->cuda_dl->cuCtxPopCurrent(&dummy));
++    if (ret < 0) {
++        av_log(ctx, AV_LOG_ERROR, "%s graph setup failed (%d)\n", what, ret);
++        return ret;
++    }
++    r->ready = 1;
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Graph setup
++ * ------------------------------------------------------------------------- */
++int ff_rtx_arch_gate(AVFilterContext *ctx, FFRtxCuda *r,
++                     const FFRtxArchGate *gate, int experimental)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    CUdevice dev = 0;
++    int cc_major = 0, cc_minor = 0, ret;
++
++    if ((ret = CHECK_CU(cu->cuCtxGetDevice(&dev))) < 0)
++        return ret;
++    if ((ret = CHECK_CU(cu->cuDeviceGetAttribute(&cc_major,
++            CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev))) < 0)
++        return ret;
++    if ((ret = CHECK_CU(cu->cuDeviceGetAttribute(&cc_minor,
++            CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev))) < 0)
++        return ret;
++
++    if (gate->hard_min_major && cc_major < gate->hard_min_major) {
++        av_log(ctx, AV_LOG_ERROR, gate->hard_msg, cc_major, cc_minor);
++        return AVERROR(ENOSYS);
++    }
++    /* Blackwell (cc 12.x) and Ada (cc 8.9) are the two the cubins were verified
++     * byte-exact on; everything else needs the opt-in. */
++    if (cc_major >= 12 || (cc_major == 8 && cc_minor == 9))
++        return 0;
++    if (!experimental) {
++        av_log(ctx, AV_LOG_ERROR, gate->gate_msg, cc_major, cc_minor);
++        return AVERROR(ENOSYS);
++    }
++    av_log(ctx, AV_LOG_WARNING, gate->warn_msg, cc_major, cc_minor);
++    return 0;
++}
++
++int ff_rtx_load_modules(AVFilterContext *ctx, FFRtxCuda *r, const char *dir,
++                        const FFRtxModule *mods, int nmod, int max_mid,
++                        const FFRtxFunc *funcs, int nfunc, int max_fid,
++                        const char *load_hint)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    char path[1024];
++    int ret;
++
++    r->max_mid = max_mid;
++    r->max_fid = max_fid;
++    r->mod = av_calloc(max_mid + 1, sizeof(*r->mod));
++    r->fn  = av_calloc(max_fid + 1, sizeof(*r->fn));
++    if (!r->mod || !r->fn)
++        return AVERROR(ENOMEM);
++
++    for (int i = 0; i < nmod; i++) {
++        uint8_t *buf = NULL;
++        size_t bsz = 0;
++
++        if (mods[i].mid < 0 || mods[i].mid > max_mid) {
++            av_log(ctx, AV_LOG_ERROR, "%s has module id %d, past the %d these "
++                   "tables were sized for\n", mods[i].file, mods[i].mid, max_mid);
++            return AVERROR_BUG;
++        }
++        snprintf(path, sizeof(path), "%s/%s", dir, mods[i].file);
++        ret = av_file_map(path, &buf, &bsz, 0, ctx);
++        if (ret < 0) {
++            av_log(ctx, AV_LOG_ERROR, "cannot read cubin %s\n", path);
++            return ret;
++        }
++        /* Every cubin is a multi-arch fatbin; cuModuleLoadData picks the image
++         * for the running GPU, so a failure here means this data dir carries
++         * none. */
++        ret = CHECK_CU(cu->cuModuleLoadData(&r->mod[mods[i].mid], buf));
++        av_file_unmap(buf, bsz);
++        if (ret < 0) {
++            if (load_hint) {
++                CUdevice dev = 0;
++                int cc_major = 0, cc_minor = 0;
++                cu->cuCtxGetDevice(&dev);
++                cu->cuDeviceGetAttribute(&cc_major,
++                    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
++                cu->cuDeviceGetAttribute(&cc_minor,
++                    CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
++                av_log(ctx, AV_LOG_ERROR, "%s has no image for this GPU (cc %d.%d).  %s\n",
++                       mods[i].file, cc_major, cc_minor, load_hint);
++            }
++            return ret;
++        }
++    }
++    for (int i = 0; i < nfunc; i++) {
++        if (funcs[i].fid < 0 || funcs[i].fid > max_fid ||
++            funcs[i].mid < 0 || funcs[i].mid > max_mid) {
++            av_log(ctx, AV_LOG_ERROR, "kernel %s has ids %d/%d, past the %d/%d "
++                   "these tables were sized for\n", funcs[i].name,
++                   funcs[i].fid, funcs[i].mid, max_fid, max_mid);
++            return AVERROR_BUG;
++        }
++        ret = CHECK_CU(cu->cuModuleGetFunction(&r->fn[funcs[i].fid],
++                                               r->mod[funcs[i].mid], funcs[i].name));
++        if (ret < 0) {
++            av_log(ctx, AV_LOG_ERROR, "missing kernel %s\n", funcs[i].name);
++            return ret;
++        }
++    }
++    return 0;
++}
++
++int ff_rtx_alloc_arena(AVFilterContext *ctx, FFRtxCuda *r, int nalloc,
++                       void (*fill_sizes)(AVFilterContext *ctx, long long *sz),
++                       unsigned flags)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    long long *sz;
++    size_t total = 0;
++    int ret;
++
++    r->nalloc = nalloc;
++    r->alloc = av_calloc(nalloc, sizeof(*r->alloc));
++    sz       = av_calloc(nalloc, sizeof(*sz));
++    if (!r->alloc || !sz) {
++        av_freep(&sz);
++        return AVERROR(ENOMEM);
++    }
++
++    fill_sizes(ctx, sz);
++    /* Lay the arena out in one pass, parking each ordinal's offset in alloc[]
++     * until there is a base address to add it to. */
++    for (int a = 0; a < nalloc; a++) {
++        r->alloc[a] = total;
++        total += FFALIGN(sz[a] > 0 ? (size_t)sz[a] : 1, RTX_ALLOC_ALIGN);
++    }
++    av_freep(&sz);
++    total += RTX_ALLOC_GUARD;
++
++    if ((ret = CHECK_CU(cu->cuMemAlloc(&r->arena, total))) < 0)
++        return ret;
++    r->arena_size = total;
++    for (int a = 0; a < nalloc; a++)
++        r->alloc[a] += r->arena;
++
++    if (flags & FF_RTX_ARENA_ZERO) {
++        /* cuMemAlloc does not zero.  Start from a known-zero arena so any
++         * scratch a kernel reads before writing is deterministically 0, as in a
++         * fresh loader process; the weight uploads then fill their buffers. */
++        if ((ret = CHECK_CU(cu->cuMemsetD8Async(r->arena, 0, total, r->stream))) < 0)
++            return ret;
++        if ((ret = CHECK_CU(cu->cuStreamSynchronize(r->stream))) < 0)
++            return ret;
++    }
++    return 0;
++}
++
++int ff_rtx_snapshot_arena(AVFilterContext *ctx, FFRtxCuda *r)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    int ret;
++
++    if (!r->arena_uploaded)     /* nothing to preserve; the reset is a pure memset */
++        return 0;
++    if ((ret = CHECK_CU(cu->cuMemAlloc(&r->arena_template, r->arena_uploaded))) < 0)
++        return ret;
++    return CHECK_CU(cu->cuMemcpyDtoDAsync(r->arena_template, r->arena,
++                                          r->arena_uploaded, r->stream));
++}
++
++int ff_rtx_reset_arena(AVFilterContext *ctx, FFRtxCuda *r)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    int ret;
++
++    if (r->arena_uploaded) {
++        ret = CHECK_CU(cu->cuMemcpyDtoDAsync(r->arena, r->arena_template,
++                                             r->arena_uploaded, r->stream));
++        if (ret < 0)
++            return ret;
++    }
++    return CHECK_CU(cu->cuMemsetD8Async(r->arena + r->arena_uploaded, 0,
++                                        r->arena_size - r->arena_uploaded,
++                                        r->stream));
++}
++
++int ff_rtx_upload_weights(AVFilterContext *ctx, FFRtxCuda *r, const char *dir,
++                          const char *file, const FFRtxUpload *up, int nup)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    uint8_t *weights = NULL;
++    size_t wsz = 0, end;
++    char path[1024];
++    int ret;
++
++    snprintf(path, sizeof(path), "%s/%s", dir, file);
++    if ((ret = av_file_map(path, &weights, &wsz, 0, ctx)) < 0) {
++        av_log(ctx, AV_LOG_ERROR, "cannot read weights %s\n", path);
++        return ret;
++    }
++    for (int i = 0; i < nup; i++) {
++        if (up[i].file_off + up[i].size > (long long)wsz) {
++            av_log(ctx, AV_LOG_ERROR, "%s is too small\n", path);
++            ret = AVERROR_INVALIDDATA;
++            break;
++        }
++        /* Async: a graph carries hundreds of small uploads (dlpp_drv: 525
++         * averaging 8.8 KiB) and the blocking form pays its round trip on every
++         * one of them.  The source is the mapping below, which has to stay put
++         * until the copies land -- hence the synchronize before it is dropped. */
++        ret = CHECK_CU(cu->cuMemcpyHtoDAsync((CUdeviceptr)up[i].dst,
++                                             weights + up[i].file_off, up[i].size,
++                                             r->stream));
++        if (ret < 0)
++            break;
++        /* Track how far into the arena the uploads reach, so a later
++         * ff_rtx_snapshot_arena() only has to preserve that much. */
++        end = (size_t)((CUdeviceptr)up[i].dst + up[i].size - r->arena);
++        if (end > r->arena_uploaded)
++            r->arena_uploaded = end;
++    }
++    /* The copies read from the mapping, so they must complete before it goes. */
++    if (ret >= 0)
++        ret = CHECK_CU(cu->cuStreamSynchronize(r->stream));
++    else
++        cu->cuStreamSynchronize(r->stream);
++    av_file_unmap(weights, wsz);
++    return ret < 0 ? ret : 0;
++}
++
++int ff_rtx_alloc_launches(AVFilterContext *ctx, FFRtxCuda *r,
++                          int nlaunch, size_t launch_size)
++{
++    r->launches = av_calloc(nlaunch, launch_size);
++    if (!r->launches)
++        return AVERROR(ENOMEM);
++    r->nlaunch     = nlaunch;
++    r->launch_size = launch_size;
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Image binding
++ * ------------------------------------------------------------------------- */
++static FFRtxImage *rtx_image_slot(AVFilterContext *ctx, FFRtxCuda *r)
++{
++    if (r->nimage >= FF_RTX_MAX_IMAGES) {
++        av_log(ctx, AV_LOG_ERROR, "too many graph images\n");
++        return NULL;
++    }
++    return &r->image[r->nimage++];
++}
++
++/* The descriptor every captured graph samples with: linear filtering over
++ * normalized coordinates.  Only the address mode varies. */
++static CUDA_TEXTURE_DESC rtx_tex_desc(unsigned flags)
++{
++    CUDA_TEXTURE_DESC td = { 0 };
++    if (flags & FF_RTX_CLAMP)
++        td.addressMode[0] = td.addressMode[1] = td.addressMode[2] =
++            CU_TR_ADDRESS_MODE_CLAMP;
++    td.filterMode = CU_TR_FILTER_MODE_LINEAR;
++    td.flags      = CU_TRSF_NORMALIZED_COORDINATES;
++    return td;
++}
++
++static int rtx_bind_handles(AVFilterContext *ctx, FFRtxCuda *r, FFRtxImage *img,
++                            const CUDA_RESOURCE_DESC *rd, unsigned flags)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    int ret;
++
++    if (flags & FF_RTX_TEX) {
++        CUDA_TEXTURE_DESC td = rtx_tex_desc(flags);
++        if ((ret = CHECK_CU(cu->cuTexObjectCreate(&img->tex, rd, &td, NULL))) < 0)
++            return ret;
++    }
++    if (flags & FF_RTX_SURF) {
++        if ((ret = rtx_surf_fns(ctx)) < 0)
++            return ret;
++        if (rtx_surf_create(&img->surf, rd) != CUDA_SUCCESS) {
++            av_log(ctx, AV_LOG_ERROR, "cuSurfObjectCreate failed\n");
++            return AVERROR_EXTERNAL;
++        }
++    }
++    return 0;
++}
++
++FFRtxImage *ff_rtx_image_array(AVFilterContext *ctx, FFRtxCuda *r, int W, int H,
++                               CUarray_format cufmt, unsigned flags)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    FFRtxImage *img = rtx_image_slot(ctx, r);
++    CUDA_ARRAY3D_DESCRIPTOR ad = { 0 };
++    CUDA_RESOURCE_DESC rd = { 0 };
++
++    if (!img)
++        return NULL;
++
++    ad.Width = W; ad.Height = H; ad.Depth = 0;
++    ad.Format = cufmt;
++    ad.NumChannels = 4;
++    ad.Flags = (flags & FF_RTX_LDST) ? CUDA_ARRAY3D_SURFACE_LDST : 0;
++    if (CHECK_CU(cu->cuArray3DCreate(&img->arr, &ad)) < 0)
++        return NULL;
++
++    rd.resType = CU_RESOURCE_TYPE_ARRAY;
++    rd.res.array.hArray = img->arr;
++    return rtx_bind_handles(ctx, r, img, &rd, flags) < 0 ? NULL : img;
++}
++
++FFRtxImage *ff_rtx_image_pitch(AVFilterContext *ctx, FFRtxCuda *r, int W, int H,
++                               CUarray_format cufmt, int bpp, unsigned flags)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    FFRtxImage *img = rtx_image_slot(ctx, r);
++    CUDA_RESOURCE_DESC rd = { 0 };
++
++    if (!img)
++        return NULL;
++
++    if (CHECK_CU(cu->cuMemAllocPitch(&img->ptr, &img->pitch,
++                                     (size_t)W * bpp, H, 16)) < 0)
++        return NULL;
++    if (flags & FF_RTX_ZERO) {
++        if (CHECK_CU(cu->cuMemsetD8Async(img->ptr, 0, img->pitch * H, r->stream)) < 0)
++            return NULL;
++    }
++
++    rd.resType = CU_RESOURCE_TYPE_PITCH2D;
++    rd.res.pitch2D.devPtr       = img->ptr;
++    rd.res.pitch2D.format       = cufmt;
++    rd.res.pitch2D.numChannels  = 4;
++    rd.res.pitch2D.width        = W;
++    rd.res.pitch2D.height       = H;
++    rd.res.pitch2D.pitchInBytes = img->pitch;
++    return rtx_bind_handles(ctx, r, img, &rd, flags) < 0 ? NULL : img;
++}
++
++FFRtxImage *ff_rtx_image_linear(AVFilterContext *ctx, FFRtxCuda *r,
++                                size_t size, size_t pitch)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    FFRtxImage *img = rtx_image_slot(ctx, r);
++
++    if (!img)
++        return NULL;
++    if (CHECK_CU(cu->cuMemAlloc(&img->ptr, size)) < 0)
++        return NULL;
++    img->pitch = pitch;
++    return img;
++}
++
++/* Resolve each launch's fnid back to a kernel name rather than the name to a
++ * single fid: one kernel name can appear under several fids (the per-layer
++ * k_conv modules all export k_conv_fp16_nhwc), so only the launch list says
++ * which one the graph actually runs.  @p n limits the comparison to a prefix. */
++static int rtx_find_launch(const FFRtxCuda *r, const FFRtxFunc *funcs, int nfunc,
++                           const char *name, size_t n)
++{
++    for (int li = 0; li < r->nlaunch; li++) {
++        int fnid = ff_rtx_launch_at(r, li)->fnid;
++        for (int i = 0; i < nfunc; i++)
++            if (funcs[i].fid == fnid && !strncmp(funcs[i].name, name, n))
++                return li;
++    }
++    return -1;
++}
++
++int ff_rtx_find_launch(const FFRtxCuda *r, const FFRtxFunc *funcs, int nfunc,
++                       const char *name)
++{
++    return rtx_find_launch(r, funcs, nfunc, name, strlen(name) + 1);
++}
++
++int ff_rtx_find_launch_prefix(const FFRtxCuda *r, const FFRtxFunc *funcs, int nfunc,
++                              const char *prefix)
++{
++    return rtx_find_launch(r, funcs, nfunc, prefix, strlen(prefix));
++}
++
++/* ------------------------------------------------------------------------- *
++ * Per-frame replay
++ *
++ * None of this synchronizes.  Every op -- the input copy, all the launches, the
++ * output copy -- is issued on the shared device stream (hwctx->stream), and
++ * every consumer runs on it too: a downstream CUDA filter, or hwcontext_cuda's
++ * transfer path, which copies on that same stream and syncs itself.  So stream
++ * issue-order already orders our output before any read of it, and orders the
++ * next producer's reuse of the freed input buffer after our read.  Blocking per
++ * frame would only bound errors to this frame, at the cost of all CPU/GPU
++ * overlap.  This relies on the single-shared-stream contract: a consumer on its
++ * own context/stream would need an event at that boundary.
++ * ------------------------------------------------------------------------- */
++int ff_rtx_filter_frame(AVFilterLink *inlink, AVFrame *in, FFRtxCuda *r,
++                        const FFRtxFrameOp *op,
++                        void (*retag)(AVFilterContext *ctx, AVFrame *out))
++{
++    AVFilterContext *ctx = inlink->dst;
++    AVFilterLink *outlink = ctx->outputs[0];
++    CudaFunctions *cu = r->hwctx ? r->hwctx->internal->cuda_dl : NULL;
++    CUcontext dummy;
++    AVFrame *out;
++    int ret;
++
++    if (!r->ready) {
++        av_frame_free(&in);
++        return AVERROR(EINVAL);
++    }
++
++    out = ff_get_video_buffer(outlink, op->oW, op->oH);
++    if (!out) {
++        av_frame_free(&in);
++        return AVERROR(ENOMEM);
++    }
++    av_frame_copy_props(out, in);
++    if (retag)
++        retag(ctx, out);
++
++    ret = FF_CUDA_CHECK_DL(ctx, cu, cu->cuCtxPushCurrent(r->cu_ctx));
++    if (ret < 0)
++        goto fail;
++
++    /* Restore the arena to its post-upload state for a graph that reads scratch
++     * before writing it: a fresh process gets zeroed pages, a long-running host
++     * recycles dirty memory. */
++    if (op->flags & FF_RTX_OP_RESET_ARENA) {
++        ret = ff_rtx_reset_arena(ctx, r);
++        if (ret < 0)
++            goto fail_pop;
++    }
++    ret = ff_rtx_frame_to_image(ctx, r, in, op->in_img, op->iW, op->iH, op->ibpp);
++    if (ret < 0)
++        goto fail_pop;
++    ret = op->run ? op->run(ctx)
++                  : ff_rtx_launch_all(ctx, r, !!(op->flags & FF_RTX_OP_PSIZE));
++    if (ret < 0)
++        goto fail_pop;
++    ret = ff_rtx_image_to_frame(ctx, r, op->out_img, out, op->oW, op->oH, op->obpp);
++    if (ret < 0)
++        goto fail_pop;
++
++    if (op->flags & FF_RTX_OP_OPAQUE_ALPHA)
++        ret = ff_rtx_fill_opaque_alpha(ctx, r, out, op->oW, op->oH, op->obpp);
++
++fail_pop:
++    FF_CUDA_CHECK_DL(ctx, cu, cu->cuCtxPopCurrent(&dummy));
++fail:
++    av_frame_free(&in);
++    if (ret < 0) {
++        av_frame_free(&out);
++        return ret;
++    }
++    return ff_filter_frame(outlink, out);
++}
++
++int ff_rtx_launch(AVFilterContext *ctx, FFRtxCuda *r, int fnid,
++                  const unsigned grid[3], const unsigned block[3], unsigned smem,
++                  void *params, size_t psize)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    void *extra[] = { CU_LAUNCH_PARAM_BUFFER_POINTER, params,
++                      CU_LAUNCH_PARAM_BUFFER_SIZE, &psize, CU_LAUNCH_PARAM_END };
++
++    /* The tables are the generator's, but the sizes they are indexed against
++     * are the caller's -- ISR has to state them by hand, its header carrying no
++     * MAX_FID -- so an out-of-range id is a bug to report, not to dereference. */
++    if (fnid < 0 || fnid > r->max_fid || !r->fn[fnid]) {
++        av_log(ctx, AV_LOG_ERROR, "launch of unresolved kernel id %d (max %d)\n",
++               fnid, r->max_fid);
++        return AVERROR_BUG;
++    }
++    return CHECK_CU(cu->cuLaunchKernel(r->fn[fnid], grid[0], grid[1], grid[2],
++                                       block[0], block[1], block[2],
++                                       smem, r->stream, NULL, extra));
++}
++
++int ff_rtx_launch_all(AVFilterContext *ctx, FFRtxCuda *r, int use_psize)
++{
++    for (int li = 0; li < r->nlaunch; li++) {
++        FFRtxLaunch *l = ff_rtx_launch_at(r, li);
++        int ret = ff_rtx_launch(ctx, r, l->fnid, l->grid, l->block, l->smem,
++                                l->params, use_psize ? l->psize : l->argsize);
++        if (ret < 0)
++            return ret;
++    }
++    return 0;
++}
++
++int ff_rtx_frame_to_image(AVFilterContext *ctx, FFRtxCuda *r, const AVFrame *in,
++                          const FFRtxImage *img, int W, int H, int bpp)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    CUDA_MEMCPY2D c = { 0 };
++
++    c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
++    c.srcDevice     = (CUdeviceptr)in->data[0];
++    c.srcPitch      = in->linesize[0];
++    if (img->arr) {
++        c.dstMemoryType = CU_MEMORYTYPE_ARRAY;
++        c.dstArray      = img->arr;
++    } else {
++        c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
++        c.dstDevice     = img->ptr;
++        c.dstPitch      = img->pitch;
++    }
++    c.WidthInBytes = (size_t)W * bpp;
++    c.Height       = H;
++    return CHECK_CU(cu->cuMemcpy2DAsync(&c, r->stream));
++}
++
++int ff_rtx_image_to_frame(AVFilterContext *ctx, FFRtxCuda *r,
++                          const FFRtxImage *img, AVFrame *out,
++                          int W, int H, int bpp)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    CUDA_MEMCPY2D c = { 0 };
++
++    if (img->arr) {
++        c.srcMemoryType = CU_MEMORYTYPE_ARRAY;
++        c.srcArray      = img->arr;
++    } else {
++        c.srcMemoryType = CU_MEMORYTYPE_DEVICE;
++        c.srcDevice     = img->ptr;
++        c.srcPitch      = img->pitch;
++    }
++    c.dstMemoryType = CU_MEMORYTYPE_DEVICE;
++    c.dstDevice     = (CUdeviceptr)out->data[0];
++    c.dstPitch      = out->linesize[0];
++    c.WidthInBytes  = (size_t)W * bpp;
++    c.Height        = H;
++    return CHECK_CU(cu->cuMemcpy2DAsync(&c, r->stream));
++}
++
++int ff_rtx_fill_opaque_alpha(AVFilterContext *ctx, FFRtxCuda *r, AVFrame *out,
++                             int oW, int oH, int bpp)
++{
++    CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++    size_t px = bpp;                                       /* 8 for rgba64le */
++    CUdeviceptr a0 = (CUdeviceptr)out->data[0] + (px - 2); /* last u16 = alpha */
++    int ret = 0;
++
++    /* Set just the alpha u16 of each pixel, stride = bpp.  A padded row is
++     * covered by running over the padding too: it is inside the frame
++     * allocation and nothing reads it (hwframe transfers copy oW*bpp per row),
++     * so one memset does the whole plane instead of one per row -- which at 4K
++     * was over two thousand launches on the critical stream.  The pitch comes
++     * from cuMemAllocPitch and is a multiple of 512, hence of bpp, but fall
++     * back to the row loop rather than assume it. */
++    if (out->linesize[0] % (int)px == 0) {
++        size_t stride_px = (size_t)out->linesize[0] / px;
++        return CHECK_CU(cu->cuMemsetD2D16Async(a0, px, 0xFFFF, 1,
++                                               stride_px * oH, r->stream));
++    }
++    for (int y = 0; y < oH && ret >= 0; y++)
++        ret = CHECK_CU(cu->cuMemsetD2D16Async(a0 + (size_t)y * out->linesize[0],
++                                              px, 0xFFFF, 1, oW, r->stream));
++    return ret;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Teardown and helpers
++ * ------------------------------------------------------------------------- */
++void ff_rtx_free_graph(AVFilterContext *ctx, FFRtxCuda *r)
++{
++    if (r->hwctx) {
++        CudaFunctions *cu = r->hwctx->internal->cuda_dl;
++        CUcontext dummy;
++
++        CHECK_CU(cu->cuCtxPushCurrent(r->cu_ctx));
++        for (int i = 0; i < r->nimage; i++) {
++            FFRtxImage *img = &r->image[i];
++            if (img->tex)  CHECK_CU(cu->cuTexObjectDestroy(img->tex));
++            if (img->surf) rtx_surf_destroy(img->surf);
++            if (img->arr)  CHECK_CU(cu->cuArrayDestroy(img->arr));
++            if (img->ptr)  CHECK_CU(cu->cuMemFree(img->ptr));
++        }
++        if (r->arena)          CHECK_CU(cu->cuMemFree(r->arena));
++        if (r->arena_template) CHECK_CU(cu->cuMemFree(r->arena_template));
++        for (int i = 0; r->mod && i <= r->max_mid; i++)
++            if (r->mod[i]) CHECK_CU(cu->cuModuleUnload(r->mod[i]));
++        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
++    }
++
++    av_freep(&r->mod);
++    av_freep(&r->fn);
++    av_freep(&r->alloc);
++    av_freep(&r->launches);
++    av_buffer_unref(&r->device_ref);
++    memset(r, 0, sizeof(*r));
++}
++
++enum { VAR_IN_W, VAR_IW, VAR_IN_H, VAR_IH, VAR_VARS_NB };
++static const char *const rtx_var_names[] = { "in_w", "iw", "in_h", "ih", NULL };
++
++int ff_rtx_eval_dims(AVFilterContext *ctx, AVFilterLink *inlink,
++                     const char *w_expr, const char *h_expr, int defscale,
++                     int *oW, int *oH)
++{
++    double var_values[VAR_VARS_NB], res;
++    int ret;
++
++    var_values[VAR_IN_W] = var_values[VAR_IW] = inlink->w;
++    var_values[VAR_IN_H] = var_values[VAR_IH] = inlink->h;
++
++    if (w_expr && *w_expr) {
++        if ((ret = av_expr_parse_and_eval(&res, w_expr, rtx_var_names, var_values,
++                                          NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        *oW = (int)(res + 0.5);
++    } else {
++        *oW = inlink->w * defscale;
++    }
++    if (h_expr && *h_expr) {
++        if ((ret = av_expr_parse_and_eval(&res, h_expr, rtx_var_names, var_values,
++                                          NULL, NULL, NULL, NULL, NULL, 0, ctx)) < 0)
++            return ret;
++        *oH = (int)(res + 0.5);
++    } else {
++        *oH = inlink->h * defscale;
++    }
++    if (*oW < 1 || *oH < 1) {
++        av_log(ctx, AV_LOG_ERROR, "invalid output size %dx%d\n", *oW, *oH);
++        return AVERROR(EINVAL);
++    }
++    return 0;
++}
++
++/*   scale = f32(544)/f32(min(W,H));  q(v) = 32*floor(((double)(f32)(v*scale) + 24)/32) */
++static int rtx_nn_q(int v, float scale)
++{
++    float t = (float)v * scale;
++    double u = (double)t + 24.0;
++    return 32 * (int)floor(u / 32.0);
++}
++
++void ff_rtx_nn_dims(int W, int H, int *NW, int *NH)
++{
++    int mn = W < H ? W : H;
++    float scale = 544.0f / (float)mn;
++
++    *NW = rtx_nn_q(W, scale);
++    *NH = rtx_nn_q(H, scale);
++}
+diff --git a/libavfilter/rtx_cuda.h b/libavfilter/rtx_cuda.h
+new file mode 100644
+index 0000000000..57d047600d
+--- /dev/null
++++ b/libavfilter/rtx_cuda.h
+@@ -0,0 +1,498 @@
++/*
++ * Shared core for the NVIDIA RTX Video CUDA filters.
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Shared machinery for the filters that replay a captured NVIDIA kernel graph:
++ * vf_vsr_cuda, vf_vsr_drv_cuda, vf_dlpp_drv_cuda, vf_deepdvc_drv_cuda,
++ * vf_truehdr_cuda, vf_truehdr_drv_cuda and vf_isr_cuda.
++ *
++ * All seven are 1:1 filters built the same way.  rtx-video-re emits a
++ * <feature>_cuda_gen.h describing one feature's graph -- which cubins to load,
++ * how big each scratch buffer is at a given frame size, where the weights go,
++ * and every launch's grid/block/argument block -- and the filter's job is to
++ * turn that into CUDA calls.  That job is the same every time: gate the GPU
++ * architecture, load the modules, lay out one contiguous arena, upload the
++ * weights, bind the input/output images, then replay the launch list once per
++ * frame.  This header is that job, written once.
++ *
++ * What stays in each vf_*.c is what genuinely differs: its AVOptions, which
++ * generated config the options select, the shape of its I/O binding, and the
++ * named tunable offsets it patches into the argument blocks.
++ *
++ * The generated headers are per-feature and expose everything as `static`, so
++ * this core never includes them.  Instead each filter passes its tables in
++ * through the layout-compatible views below, and calls its own generated fills
++ * behind the small callbacks these functions take.
++ */
++
++#ifndef AVFILTER_RTX_CUDA_H
++#define AVFILTER_RTX_CUDA_H
++
++#include <assert.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "libavutil/cuda_check.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_cuda_internal.h"
++#include "libavutil/pixfmt.h"
++
++#include "avfilter.h"
++
++/* Constants ffnvcodec's dynlink headers do not carry.  Everything else these
++ * filters need -- cuTexObjectCreate, cuArray3DCreate, cuMemAllocPitch,
++ * cuMemsetD2D16Async, cuMemcpyDtoDAsync, the CU_AD_FORMAT_* enumerators for the
++ * standard types -- is already in CudaFunctions / dynlink_cuda.h. */
++#ifndef CU_TRSF_NORMALIZED_COORDINATES
++#define CU_TRSF_NORMALIZED_COORDINATES 0x02
++#endif
++#ifndef CU_AD_FORMAT_UNORM_INT16X4
++#define CU_AD_FORMAT_UNORM_INT16X4 ((CUarray_format)0xc5)
++#endif
++#ifndef CU_AD_FORMAT_UNORM_INT_101010_2
++#define CU_AD_FORMAT_UNORM_INT_101010_2 ((CUarray_format)0x50)
++#endif
++/* cuLaunchKernel packed-argument sentinels. */
++#ifndef CU_LAUNCH_PARAM_END
++#define CU_LAUNCH_PARAM_END            ((void*)0x00)
++#define CU_LAUNCH_PARAM_BUFFER_POINTER ((void*)0x01)
++#define CU_LAUNCH_PARAM_BUFFER_SIZE    ((void*)0x02)
++#endif
++
++/* cuSurfObjectCreate/Destroy are the one pair ffnvcodec's loader does not
++ * export, so they are resolved out of libcuda directly -- once per process,
++ * inside this core, rather than once per filter instance. */
++typedef unsigned long long FFCUsurfObject;
++
++/* ------------------------------------------------------------------------- *
++ * Layout-compatible views of the generated tables.
++ *
++ * Every <feature>_cuda_gen.h emits its module, function and upload records with
++ * the same layout under a per-feature struct name, and its launch record with a
++ * common leading sequence (the trailing params[] array is sized per feature).
++ * The core works through these views; each filter casts its own tables and
++ * proves the cast with FF_RTX_ASSERT_*_LAYOUT, so a generator change that broke
++ * the assumption would fail the build rather than corrupt a launch.
++ * ------------------------------------------------------------------------- */
++typedef struct FFRtxModule { int mid; const char *file; } FFRtxModule;
++typedef struct FFRtxFunc   { int fid, mid; const char *name; } FFRtxFunc;
++typedef struct FFRtxUpload { long long file_off, size; uint64_t dst; } FFRtxUpload;
++
++typedef struct FFRtxLaunch {
++    int      fnid, argsize, psize;
++    unsigned grid[3], block[3], smem;
++    uint8_t  params[];
++} FFRtxLaunch;
++
++#define FF_RTX_ASSERT_FIELD(T, U, f) \
++    static_assert(offsetof(T, f) == offsetof(U, f) && \
++                  sizeof(((T *)0)->f) == sizeof(((U *)0)->f), \
++                  #T "." #f " does not match " #U)
++
++#define FF_RTX_ASSERT_MODULE_LAYOUT(T) \
++    static_assert(sizeof(T) == sizeof(FFRtxModule), #T " is not FFRtxModule-shaped")
++#define FF_RTX_ASSERT_FUNC_LAYOUT(T) \
++    static_assert(sizeof(T) == sizeof(FFRtxFunc), #T " is not FFRtxFunc-shaped"); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxFunc, fid); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxFunc, mid); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxFunc, name)
++#define FF_RTX_ASSERT_UPLOAD_LAYOUT(T) \
++    static_assert(sizeof(T) == sizeof(FFRtxUpload), #T " is not FFRtxUpload-shaped"); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxUpload, file_off); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxUpload, size); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxUpload, dst)
++/* The launch view is a prefix, not the whole struct -- params[] is sized per
++ * feature -- so this checks the leading sequence plus where params[] starts. */
++#define FF_RTX_ASSERT_LAUNCH_LAYOUT(T) \
++    FF_RTX_ASSERT_FIELD(T, FFRtxLaunch, fnid); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxLaunch, argsize); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxLaunch, psize); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxLaunch, grid); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxLaunch, block); \
++    FF_RTX_ASSERT_FIELD(T, FFRtxLaunch, smem); \
++    static_assert(offsetof(T, params) == sizeof(FFRtxLaunch), \
++                  #T ".params does not follow the FFRtxLaunch prefix")
++
++/* ------------------------------------------------------------------------- *
++ * Pixel formats
++ * ------------------------------------------------------------------------- */
++/**
++ * A frame format the graph can be bound to.  @p sel is the kernel's own format
++ * selector where the network has one (VSR/DLPP: 0 = raw 8-bit RGB order,
++ * 1 = raw 8-bit with an R<->B swap, 2 = the format-agnostic tex.f32 read /
++ * sust.p store that packs any UNORM array in its native order); features
++ * without a selector leave it 0, or reuse the field for their own flag.
++ */
++typedef struct FFRtxPixFmt {
++    enum AVPixelFormat f;
++    CUarray_format     cufmt;
++    int                bpp;
++    int                sel;
++} FFRtxPixFmt;
++
++/* The packed-RGB formats the VSR-family networks accept.  The R<->B swap only
++ * exists on the raw 8-bit path, so B-first formats are 8-bit only; higher bit
++ * depths go through the native-order sel-2 path.  A feature whose selector is
++ * not mapped cannot honour sel at all, so it takes only the R-first 8-bit rows
++ * (FF_RTX_N_RGB8_R_FIRST): feeding it a B-first frame would drive the network
++ * with red and blue transposed. */
++extern const FFRtxPixFmt ff_rtx_packed_rgb_fmts[5];
++#define FF_RTX_N_RGB8_R_FIRST 2
++
++const FFRtxPixFmt *ff_rtx_find_fmt(const FFRtxPixFmt *tbl, int n,
++                                   enum AVPixelFormat f);
++
++/* ------------------------------------------------------------------------- *
++ * Runtime state
++ * ------------------------------------------------------------------------- */
++/**
++ * One image the graph binds: a CUDA array or a linear/pitched allocation, with
++ * the bindless texture and/or surface handle over it.  Only the members the
++ * requested binding needs are set; the rest stay zero.
++ */
++typedef struct FFRtxImage {
++    CUarray        arr;    ///< set for array-backed images
++    CUdeviceptr    ptr;    ///< set for pitched/linear images
++    size_t         pitch;  ///< row stride of @ref ptr
++    CUtexObject    tex;
++    FFCUsurfObject surf;
++} FFRtxImage;
++
++#define FF_RTX_MAX_IMAGES 8
++
++/**
++ * Everything the core allocates for one configured graph.  Embed this in the
++ * filter's private context and pass its address to every ff_rtx_* call;
++ * ff_rtx_free_graph() releases all of it.
++ */
++typedef struct FFRtxCuda {
++    AVCUDADeviceContext *hwctx;
++    AVBufferRef         *device_ref;
++    CUcontext            cu_ctx;
++    CUstream             stream;
++
++    CUmodule            *mod;            ///< [max_mid + 1], indexed by mid
++    CUfunction          *fn;             ///< [max_fid + 1], indexed by fid
++    int                  max_mid, max_fid;
++
++    CUdeviceptr          arena;          ///< one contiguous block, sub-allocated
++    CUdeviceptr          arena_template; ///< pristine copy of the uploaded prefix
++    size_t               arena_size;
++    size_t               arena_uploaded;  ///< bytes from arena start covered by uploads
++    CUdeviceptr         *alloc;          ///< [nalloc] pointers into @ref arena
++    int                  nalloc;
++
++    void                *launches;       ///< the feature's own launch array
++    int                  nlaunch;
++    size_t               launch_size;    ///< sizeof one element of @ref launches
++
++    FFRtxImage           image[FF_RTX_MAX_IMAGES];
++    int                  nimage;
++
++    int                  ready;          ///< the graph is built and replayable
++} FFRtxCuda;
++
++/** The launch at index @p i of a graph built by ff_rtx_alloc_launches(). */
++static inline FFRtxLaunch *ff_rtx_launch_at(const FFRtxCuda *r, int i)
++{
++    return (FFRtxLaunch *)((uint8_t *)r->launches + (size_t)i * r->launch_size);
++}
++
++/**
++ * Every filter in the family embeds FFRtxCuda directly after its AVClass
++ * pointer, so one uninit serves them all.  FF_RTX_ASSERT_PRIV_LAYOUT proves the
++ * layout per filter, so a context that grew a member in front would fail the
++ * build rather than free the wrong bytes.
++ */
++typedef struct FFRtxPriv {
++    const AVClass *class;
++    FFRtxCuda      r;
++} FFRtxPriv;
++
++#define FF_RTX_ASSERT_PRIV_LAYOUT(T) \
++    static_assert(offsetof(T, r) == offsetof(FFRtxPriv, r), \
++                  #T ".r is not where FFRtxPriv.r is")
++
++void ff_rtx_uninit(AVFilterContext *ctx);
++
++/* ------------------------------------------------------------------------- *
++ * Device binding and output plumbing
++ * ------------------------------------------------------------------------- */
++/**
++ * The formats a filter accepts, for ff_rtx_config_formats().
++ */
++typedef struct FFRtxFormats {
++    const FFRtxPixFmt *in_tbl;
++    int                n_in;
++    const FFRtxPixFmt *out_tbl;    ///< NULL: the output is always the input format
++    int                n_out;
++    const char        *out_format; ///< the `format` option; NULL/empty = same as input
++    const char        *hint;       ///< appended to a rejection, e.g. "use rgb0/rgba"
++} FFRtxFormats;
++
++/**
++ * The config_output prologue every filter shares: require a CUDA hwframe input,
++ * look its sw_format up in the input table, and resolve the output format --
++ * the `format` option when set, else the input format -- in the output table.
++ * @p outpf may be NULL for a filter whose output format is its input format.
++ */
++int ff_rtx_config_formats(AVFilterContext *ctx, AVFilterLink *inlink,
++                          const FFRtxFormats *f,
++                          AVHWFramesContext **in_frames_ctx,
++                          const FFRtxPixFmt **inpf, const FFRtxPixFmt **outpf);
++
++/**
++ * Take a reference on the input frames context's device and cache the CUDA
++ * context and stream.  Must be called before anything else touches @p r.
++ */
++int ff_rtx_bind_device(AVFilterContext *ctx, FFRtxCuda *r,
++                       AVHWFramesContext *in_frames_ctx);
++
++/**
++ * Set the output link's size and build its CUDA frames context.  Call after
++ * ff_rtx_bind_device() and before ff_rtx_setup().
++ */
++int ff_rtx_config_hwframes(AVFilterContext *ctx, AVFilterLink *outlink,
++                           FFRtxCuda *r, int oW, int oH,
++                           enum AVPixelFormat sw_format);
++
++/**
++ * Push the CUDA context, run @p setup_graph, pop it again.  @p what names the
++ * graph in the failure message.
++ */
++int ff_rtx_setup(AVFilterContext *ctx, FFRtxCuda *r, const char *what,
++                 int (*setup_graph)(AVFilterContext *ctx));
++
++/* ------------------------------------------------------------------------- *
++ * Graph setup (all of these need the CUDA context current)
++ * ------------------------------------------------------------------------- */
++/**
++ * How far a feature's cubins have been validated.  The shared policy is that
++ * Blackwell (cc 12.x) and Ada (cc 8.9) run ungated -- those are the two the
++ * cubins were checked byte-exact on -- and every other architecture needs
++ * experimental_arch, because its images were matched statically rather than
++ * exercised.  What differs per feature is the wording and whether there is a
++ * floor below which no image exists at all.
++ */
++typedef struct FFRtxArchGate {
++    int         hard_min_major; ///< refuse cc_major below this outright; 0 = no floor
++    const char *hard_msg;       ///< printf'd with cc_major, cc_minor
++    const char *gate_msg;       ///< refusal when unvalidated and not opted in
++    const char *warn_msg;       ///< warning when running the opted-in path
++} FFRtxArchGate;
++
++int ff_rtx_arch_gate(AVFilterContext *ctx, FFRtxCuda *r,
++                     const FFRtxArchGate *gate, int experimental);
++
++/**
++ * Load every cubin named by @p mods out of @p dir and resolve every kernel in
++ * @p funcs, into r->mod[]/r->fn[] sized for @p max_mid / @p max_fid.
++ * @p load_hint, if set, is appended to a module-load failure (which is nearly
++ * always "this data dir has no image for the running GPU").
++ */
++int ff_rtx_load_modules(AVFilterContext *ctx, FFRtxCuda *r, const char *dir,
++                        const FFRtxModule *mods, int nmod, int max_mid,
++                        const FFRtxFunc *funcs, int nfunc, int max_fid,
++                        const char *load_hint);
++
++#define FF_RTX_ARENA_ZERO 1  ///< memset the arena before the weights land in it
++
++/**
++ * Allocate the graph's scratch and weight buffers as ONE contiguous arena and
++ * hand out r->alloc[0..nalloc-1] into it.
++ *
++ * @p fill_sizes is the feature's generated allocation model: it writes the
++ * largest size asked for each ordinal, as the driver's own allocator does.
++ *
++ * Contiguity is load-bearing, not tidiness: several kernels do a tile/halo read
++ * a little past the logical end of their input buffer.  That is harmless while
++ * the following bytes are mapped, which inside one arena they always are (an
++ * adjacent buffer, or the trailing guard).  With a separate allocation per
++ * buffer they scatter, and after a filter-graph rebuild (an mpv seek, say) the
++ * heap fragments until the bytes past a buffer are an unmapped hole -- turning
++ * the benign over-read into a CUDA_ERROR_ILLEGAL_ADDRESS that poisons the
++ * context.
++ */
++int ff_rtx_alloc_arena(AVFilterContext *ctx, FFRtxCuda *r, int nalloc,
++                       void (*fill_sizes)(AVFilterContext *ctx, long long *sz),
++                       unsigned flags);
++
++/**
++ * Arrange for ff_rtx_reset_arena() to restore the arena to its post-upload
++ * state.  For graphs that read scratch before writing it: a fresh process gets
++ * zeroed pages from cuMemAlloc and is byte-exact, but a long-running host
++ * recycles dirty memory, so the arena has to be put back between frames.
++ *
++ * Only the uploaded prefix is snapshotted.  ff_rtx_alloc_arena() zeroed the
++ * whole arena and the uploads then wrote a prefix of it, so everything past the
++ * last uploaded byte is known to be zero -- the reset can memset it instead of
++ * copying it back, which is bit-identical and much cheaper (a device-to-device
++ * copy reads and writes, a memset only writes).  Call after the uploads.
++ */
++int ff_rtx_snapshot_arena(AVFilterContext *ctx, FFRtxCuda *r);
++int ff_rtx_reset_arena(AVFilterContext *ctx, FFRtxCuda *r);
++
++/**
++ * Map @p dir/@p file and run every upload in @p up into the arena.  One
++ * weights blob per data dir holds each distinct payload exactly once -- the
++ * qualities of a feature share most layers, and the driver plugins share all of
++ * them -- so a config's uploads index into it by the generated file offset.
++ */
++int ff_rtx_upload_weights(AVFilterContext *ctx, FFRtxCuda *r, const char *dir,
++                          const char *file, const FFRtxUpload *up, int nup);
++
++/** Allocate the launch array the feature's fill_graph() will populate. */
++int ff_rtx_alloc_launches(AVFilterContext *ctx, FFRtxCuda *r,
++                          int nlaunch, size_t launch_size);
++
++/* Image binding flags. */
++#define FF_RTX_TEX   (1 << 0)  ///< create a bindless texture over the image
++#define FF_RTX_SURF  (1 << 1)  ///< create a bindless surface over the image
++#define FF_RTX_LDST  (1 << 2)  ///< array is SURFACE_LDST capable
++#define FF_RTX_CLAMP (1 << 3)  ///< texture address mode CLAMP (else the default WRAP)
++#define FF_RTX_ZERO  (1 << 4)  ///< zero the backing store (pitched images only)
++
++/**
++ * Bind a W x H image the graph can read and/or write.  Textures are always
++ * created linear-filtered with normalized coordinates, which is what the
++ * captured graphs sample with.
++ *
++ * ff_rtx_image_array()  -- a CUDA array, the usual input texture / output surface
++ * ff_rtx_image_pitch()  -- pitched linear memory bound as a PITCH2D texture
++ * ff_rtx_image_linear() -- a plain packed buffer, no texture or surface
++ *
++ * The returned pointer is owned by @p r and stays valid until
++ * ff_rtx_free_graph(); NULL means the image could not be created (the reason is
++ * already logged).
++ */
++FFRtxImage *ff_rtx_image_array(AVFilterContext *ctx, FFRtxCuda *r, int W, int H,
++                               CUarray_format cufmt, unsigned flags);
++FFRtxImage *ff_rtx_image_pitch(AVFilterContext *ctx, FFRtxCuda *r, int W, int H,
++                               CUarray_format cufmt, int bpp, unsigned flags);
++FFRtxImage *ff_rtx_image_linear(AVFilterContext *ctx, FFRtxCuda *r,
++                                size_t size, size_t pitch);
++
++/**
++ * Index of the first launch running kernel @p name, or -1.  For the features
++ * whose generated config does not yet carry the launch index of a tunable's
++ * kernel the way VSR's sel_launch does.
++ */
++int ff_rtx_find_launch(const FFRtxCuda *r, const FFRtxFunc *funcs, int nfunc,
++                       const char *name);
++/** As ff_rtx_find_launch(), matching a kernel-name prefix. */
++int ff_rtx_find_launch_prefix(const FFRtxCuda *r, const FFRtxFunc *funcs, int nfunc,
++                              const char *prefix);
++
++/* ------------------------------------------------------------------------- *
++ * Per-frame replay
++ * ------------------------------------------------------------------------- */
++/* ff_rtx_filter_frame() flags. */
++#define FF_RTX_OP_PSIZE        (1 << 0)  ///< launch with the kernel's own cbank size
++#define FF_RTX_OP_RESET_ARENA  (1 << 1)  ///< restore the pristine arena before each frame
++#define FF_RTX_OP_OPAQUE_ALPHA (1 << 2)  ///< force opaque alpha over the output
++
++/**
++ * What one frame through a configured graph consists of.  in_img and out_img
++ * are the same image for a filter that works in place.
++ */
++typedef struct FFRtxFrameOp {
++    const FFRtxImage *in_img, *out_img;
++    int iW, iH, ibpp;
++    int oW, oH, obpp;
++    unsigned flags;
++    /** Replace ff_rtx_launch_all() -- for a graph the launch list cannot
++     *  describe on its own, like ISR's per-tile pointer cursor. */
++    int (*run)(AVFilterContext *ctx);
++} FFRtxFrameOp;
++
++/**
++ * One whole frame: take the output buffer, copy the input frame's properties,
++ * push the CUDA context, replay the graph over the frame, pop, and forward the
++ * result.  @p retag, if set, adjusts the output frame's properties (the TrueHDR
++ * filters retag SDR input as HDR) before the graph runs.  Consumes @p in.
++ */
++int ff_rtx_filter_frame(AVFilterLink *inlink, AVFrame *in, FFRtxCuda *r,
++                        const FFRtxFrameOp *op,
++                        void (*retag)(AVFilterContext *ctx, AVFrame *out));
++
++/** Issue one launch.  @p params is its argument block, @p psize its cbank size. */
++int ff_rtx_launch(AVFilterContext *ctx, FFRtxCuda *r, int fnid,
++                  const unsigned grid[3], const unsigned block[3], unsigned smem,
++                  void *params, size_t psize);
++
++/**
++ * Issue the whole launch list in order.  @p use_psize selects the kernel's own
++ * EIATTR_CBANK_PARAM_SIZE rather than the captured driver argsize -- the driver
++ * over-reports for some DLPP tex/surf kernels, which makes cuLaunchKernel fail
++ * with CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES.
++ */
++int ff_rtx_launch_all(AVFilterContext *ctx, FFRtxCuda *r, int use_psize);
++
++/** Copy a pitched input frame into the graph's input image. */
++int ff_rtx_frame_to_image(AVFilterContext *ctx, FFRtxCuda *r, const AVFrame *in,
++                          const FFRtxImage *img, int W, int H, int bpp);
++/** Copy the graph's output image back out into a pitched frame. */
++int ff_rtx_image_to_frame(AVFilterContext *ctx, FFRtxCuda *r,
++                          const FFRtxImage *img, AVFrame *out,
++                          int W, int H, int bpp);
++
++/**
++ * Force opaque alpha over @p out.  The resample store kernel
++ * (dlpp_ResampleAndComposeFP16) omits the alpha write in its formatted path --
++ * unlike postProcess, which stores 1.0 -- so >= 10-bit output on the resample
++ * path would come out fully transparent (RGB is correct; verified in SASS, and
++ * the SDK DLL has the same omission).  These networks always produce opaque
++ * output, so this runs for any sel-2 output: it fixes the resample case and is
++ * a harmless no-op on the fast path.
++ */
++int ff_rtx_fill_opaque_alpha(AVFilterContext *ctx, FFRtxCuda *r, AVFrame *out,
++                             int oW, int oH, int bpp);
++
++/* ------------------------------------------------------------------------- *
++ * Teardown and helpers
++ * ------------------------------------------------------------------------- */
++/**
++ * Release everything ff_rtx_* built, against the CUDA context it was built on,
++ * and reset @p r so a graph can be built again.  Safe when nothing is
++ * configured.  config_output() may run more than once -- a mid-stream
++ * reconfigure, or a media player rebuilding its filter graph on seek -- so this
++ * must leave no leaked allocation and no stale device pointer baked into a
++ * launch argument block.
++ */
++void ff_rtx_free_graph(AVFilterContext *ctx, FFRtxCuda *r);
++
++/**
++ * Evaluate the `w`/`h` output-size expressions over in_w/iw/in_h/ih.  An unset
++ * or empty expression means @p defscale x the input.
++ */
++int ff_rtx_eval_dims(AVFilterContext *ctx, AVFilterLink *inlink,
++                     const char *w_expr, const char *h_expr, int defscale,
++                     int *oW, int *oH);
++
++/**
++ * TrueHDR's internal network resolution: shorter side -> 544, longer side
++ * aspect-scaled and quantized to a multiple of 32.  Must bit-match the float32
++ * arithmetic of rtxv.fit.truehdr.nn_dims (verified byte-exact across 28
++ * resolutions).
++ */
++void ff_rtx_nn_dims(int W, int H, int *NW, int *NH);
++
++#endif /* AVFILTER_RTX_CUDA_H */
+diff --git a/libavfilter/rtx_dlpp_abi.h b/libavfilter/rtx_dlpp_abi.h
+new file mode 100644
+index 0000000000..207bd962b1
+--- /dev/null
++++ b/libavfilter/rtx_dlpp_abi.h
+@@ -0,0 +1,102 @@
++/*
++ * The DLPP kernel ABI, shared by the two filters that drive those kernels.
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * vf_vsr_drv_cuda and vf_dlpp_drv_cuda replay two different driver plugins, but
++ * the glue kernels around their networks are literally the same kernels -- the
++ * DLPP pre/post-process and resample-and-compose -- so the argument-block
++ * offsets of the format selectors are one ABI, not two.  They were captured
++ * once; this is where they live, so a re-capture cannot update one filter and
++ * leave the other patching a stale offset.
++ *
++ * What stays per filter is what genuinely differs: which tunables that filter
++ * exposes and where they sit (vsr_drv's detail/smooth on preProcess, dlpp_drv's
++ * wipe on the SR head).
++ */
++
++#ifndef AVFILTER_RTX_DLPP_ABI_H
++#define AVFILTER_RTX_DLPP_ABI_H
++
++#include <stdint.h>
++#include <string.h>
++
++#include "avfilter.h"
++#include "rtx_cuda.h"
++
++/* The input kernel, and the two alternative output-store kernels: the fast path
++ * ends in postProcess, the resample path in ResampleAndComposeFP16. */
++#define FF_DLPP_PRE_KERNEL       "dlpp_preProcess"
++#define FF_DLPP_POST_KERNEL      "dlpp_postProcess"
++#define FF_DLPP_RESAMPLE_KERNEL  "dlpp_ResampleAndComposeFP16"
++
++/* Format-selector offsets in each kernel's params block. */
++#define FF_DLPP_PRE_FMT_OFF      0x30
++#define FF_DLPP_POST_FMT_OFF     0x40
++#define FF_DLPP_RESAMPLE_FMT_OFF 0x50
++
++/**
++ * Patch the input and output format selectors of a DLPP-family graph.
++ *
++ * The captured argbufs carry sel 0 (RGBA8); a chosen format that is not sel 0
++ * needs the kernel told, so a selector that cannot be found is a bug in the
++ * generated tables rather than something to skip -- silently leaving sel 0 in
++ * place would emit a whole encode with red and blue transposed.
++ *
++ * @param pre_out receives the preProcess launch index, which is also where both
++ *                filters' own preProcess tunables live; -1 when there is none
++ *                and the format did not need one.
++ */
++static inline int ff_dlpp_patch_selectors(AVFilterContext *ctx, FFRtxCuda *r,
++                                          const FFRtxFunc *funcs, int nfunc,
++                                          const FFRtxPixFmt *inpf,
++                                          const FFRtxPixFmt *outpf,
++                                          const char *tag, int *pre_out)
++{
++    int pre   = ff_rtx_find_launch(r, funcs, nfunc, FF_DLPP_PRE_KERNEL);
++    int store = ff_rtx_find_launch(r, funcs, nfunc, FF_DLPP_POST_KERNEL);
++    int store_fmt_off = FF_DLPP_POST_FMT_OFF;
++
++    if (store < 0) {
++        store = ff_rtx_find_launch(r, funcs, nfunc, FF_DLPP_RESAMPLE_KERNEL);
++        store_fmt_off = FF_DLPP_RESAMPLE_FMT_OFF;
++    }
++    *pre_out = pre;
++
++    if (inpf->sel) {
++        uint32_t sel = inpf->sel;
++        if (pre < 0) {
++            av_log(ctx, AV_LOG_ERROR, "no input pre-process kernel for config %s\n", tag);
++            return AVERROR_BUG;
++        }
++        memcpy(ff_rtx_launch_at(r, pre)->params + FF_DLPP_PRE_FMT_OFF, &sel, 4);
++    }
++    if (outpf->sel) {
++        uint32_t sel = outpf->sel;
++        if (store < 0) {
++            av_log(ctx, AV_LOG_ERROR, "no output-store kernel for config %s\n", tag);
++            return AVERROR_BUG;
++        }
++        memcpy(ff_rtx_launch_at(r, store)->params + store_fmt_off, &sel, 4);
++    }
++    return 0;
++}
++
++#endif /* AVFILTER_RTX_DLPP_ABI_H */

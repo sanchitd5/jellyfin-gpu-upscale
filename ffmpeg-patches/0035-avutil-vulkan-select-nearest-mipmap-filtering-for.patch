@@ -1,0 +1,31 @@
+From 2133f67b2f10262f641d1e9c7e06b8c3f42a9d51 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Wed, 15 Jul 2026 06:51:26 -0700
+Subject: [PATCH] avutil/vulkan: select nearest mipmap filtering for nearest samplers
+
+ff_vk_init_sampler() always used VK_SAMPLER_MIPMAP_MODE_LINEAR for samplers with
+normalized coordinates. But it is possible to have an image view that uses
+normalized coordinates while not supporting linear filtering (eg: R16G16_SINT).
+
+The simple solution is to always use nearest mipmap filtering if the image
+filter is nearest.
+---
+ libavutil/vulkan.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/libavutil/vulkan.c b/libavutil/vulkan.c
+index 4c3dbc9117..ec908940de 100644
+--- a/libavutil/vulkan.c
++++ b/libavutil/vulkan.c
+@@ -1631,8 +1631,9 @@ int ff_vk_init_sampler(FFVulkanContext *s, VkSampler *sampler,
+         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+         .magFilter = filt,
+         .minFilter = sampler_info.magFilter,
+-        .mipmapMode = unnorm_coords ? VK_SAMPLER_MIPMAP_MODE_NEAREST :
+-                                      VK_SAMPLER_MIPMAP_MODE_LINEAR,
++        .mipmapMode = (unnorm_coords || filt == VK_FILTER_NEAREST) ?
++                      VK_SAMPLER_MIPMAP_MODE_NEAREST :
++                      VK_SAMPLER_MIPMAP_MODE_LINEAR,
+         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+         .addressModeV = sampler_info.addressModeU,
+         .addressModeW = sampler_info.addressModeU,

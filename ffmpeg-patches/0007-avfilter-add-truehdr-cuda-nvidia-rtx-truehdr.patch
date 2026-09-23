@@ -1,0 +1,510 @@
+From 7ca18c5f07401a6c967124b3f3533122fa644f10 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:10 +0800
+Subject: [PATCH] avfilter: add truehdr_cuda, NVIDIA RTX TrueHDR inverse tone mapping
+
+Expands SDR to HDR with the RTX TrueHDR network from the NGX SDK snippet
+nvngx_truehdr.dll.  Unlike the super-resolution filters it does not rescale:
+the output resolution equals the input, while the neural core runs at an
+internal resolution derived from the input aspect ratio (ff_rtx_nn_dims).
+
+The two output formats are different colour spaces rather than two bit depths,
+selected by argument words in the final drtm launch, so the filter tags the
+output frame to match: rgbaf16le (the default) is scRGB -- linear light, Rec.709
+primaries, 1.0 = 80 nits -- and x2bgr10le is display-ready HDR10/BT.2100 with a
+PQ transfer and Rec.2020 primaries.  The four tunables (contrast, saturation,
+middle grey, peak luminance) are orthogonal overrides in that same block.
+
+The input is bound as a PITCH2D texture rather than a CUDA array, which is what
+the DLL does and what makes 10-bit x2bgr10le input byte-exact against it; the
+format-agnostic texture read normalizes 8-bit rgb0/rgba and 10-bit alike.
+---
+ configure                     |   1 +
+ doc/filters.texi              |  67 ++++++++
+ libavfilter/Makefile          |   1 +
+ libavfilter/allfilters.c      |   1 +
+ libavfilter/vf_truehdr_cuda.c | 362 ++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 432 insertions(+)
+
+diff --git a/configure b/configure
+index 7403274fbc..f29c29e5d2 100755
+--- a/configure
++++ b/configure
+@@ -4307,6 +4307,7 @@ transpose_opencl_filter_deps="opencl"
+ transpose_vaapi_filter_deps="vaapi VAProcPipelineCaps_rotation_flags"
+ transpose_vt_filter_deps="videotoolbox VTPixelRotationSessionCreate"
+ transpose_vulkan_filter_deps="vulkan spirv_compiler"
++truehdr_cuda_filter_deps="ffnvcodec nvfdata_truehdr"
+ unsharp_opencl_filter_deps="opencl"
+ uspp_filter_deps="gpl avcodec"
+ v360_vulkan_filter_deps="vulkan spirv_compiler"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index 1f61ee1185..2dc7202da2 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27863,6 +27863,73 @@ Preserve landscape geometry (when @var{width} >= @var{height}).
+ 
+ @end table
+ 
++@anchor{truehdr_cuda}
++@section truehdr_cuda
++
++Expand SDR to HDR with NVIDIA RTX TrueHDR, running the NGX SDK's inverse
++tone-mapping network directly on CUDA.
++
++The output resolution equals the input; only the tone curve and colour space
++change.  The neural core runs at an internal resolution derived from the input
++aspect ratio, and the tunables below are applied by the final kernel, so they
++cost nothing to change.
++
++There is a second TrueHDR network in the NVIDIA driver, which
++@code{truehdr_drv_cuda} drives.  It is a different and considerably brighter
++curve.
++
++It accepts the following options:
++
++@table @option
++@item contrast
++@item saturation
++Contrast and saturation, @code{0} to @code{200}.  Both default @code{100}, the
++neutral value.
++
++@item middlegray
++Middle-gray reference, @code{10} to @code{100}.  Default @code{50}.  This is
++the main exposure lever: it sets what input level maps to the middle of the
++output range, so lowering it darkens midtones and raising it lifts them.
++
++@item maxluminance
++Peak luminance of the target display in nits, @code{400} to @code{2000}.
++Default @code{1000}.
++
++@item format
++Output pixel format; see below.
++
++@item data
++Directory holding the extracted cubins and @file{weights.bin}.
++@end table
++
++@subsection Output colour spaces
++
++The two output formats are different @strong{colour spaces}, not just two bit
++depths, and the filter tags the output frame accordingly:
++
++@table @option
++@item rgbaf16le
++The default.  scRGB: linear light, Rec.709 primaries, with @code{1.0} meaning
++80 nits.  This is the Windows HDR swapchain format.
++
++@item x2bgr10le
++HDR10 / BT.2100: PQ (SMPTE ST.2084) transfer, Rec.2020 primaries.  Already
++display-ready, so feeding an HDR10 encoder needs only the RGB to YUV matrix, no
++tone or gamut conversion.
++@end table
++
++@subsection Supported formats
++
++Input is 8-bit R-first packed RGB (@code{rgb0} or @code{rgba}) -- the ordinary
++SDR case -- or 10-bit @code{x2bgr10le}.  TrueHDR has no R@math{<->}B swap path,
++so B-first 8-bit input has to be converted first.  The input is read through a
++format-agnostic texture, which normalizes any of them.
++
++The cubins and weights are extracted from the proprietary NVIDIA libraries and
++are @emph{not} shipped: the filter is only built when an
++@code{nvidia-video-filters} package carrying the TrueHDR data is installed, and
++@option{data} defaults to that package's data directory.
++
+ @anchor{vsr_cuda}
+ @section vsr_cuda
+ 
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index c7a2504cc4..c26bee04ff 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -553,6 +553,7 @@ OBJS-$(CONFIG_TRANSPOSE_VAAPI_FILTER)        += vf_transpose_vaapi.o vaapi_vpp.o
+ OBJS-$(CONFIG_TRANSPOSE_VT_FILTER)           += vf_transpose_vt.o
+ OBJS-$(CONFIG_TRANSPOSE_VULKAN_FILTER)       += vf_transpose_vulkan.o vulkan.o vulkan_filter.o
+ OBJS-$(CONFIG_TRIM_FILTER)                   += trim.o
++OBJS-$(CONFIG_TRUEHDR_CUDA_FILTER)           += vf_truehdr_cuda.o rtx_cuda.o
+ OBJS-$(CONFIG_UNPREMULTIPLY_FILTER)          += vf_premultiply.o framesync.o
+ OBJS-$(CONFIG_UNSHARP_FILTER)                += vf_unsharp.o
+ OBJS-$(CONFIG_UNSHARP_OPENCL_FILTER)         += vf_unsharp_opencl.o opencl.o \
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 942818e448..cd8ac56ab1 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -521,6 +521,7 @@ extern const FFFilter ff_vf_transpose_vaapi;
+ extern const FFFilter ff_vf_transpose_vt;
+ extern const FFFilter ff_vf_transpose_vulkan;
+ extern const FFFilter ff_vf_trim;
++extern const FFFilter ff_vf_truehdr_cuda;
+ extern const FFFilter ff_vf_unpremultiply;
+ extern const FFFilter ff_vf_unsharp;
+ extern const FFFilter ff_vf_unsharp_opencl;
+diff --git a/libavfilter/vf_truehdr_cuda.c b/libavfilter/vf_truehdr_cuda.c
+new file mode 100644
+index 0000000000..6b1b9acee5
+--- /dev/null
++++ b/libavfilter/vf_truehdr_cuda.c
+@@ -0,0 +1,362 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Inverse tone-mapping (SDR -> HDR) filter driving NVIDIA RTX TrueHDR.  Like
++ * vf_vsr_cuda, the network ships as a "pure CUDA" graph inside
++ * nvngx_truehdr.dll; the cubins were extracted per-architecture and the forward
++ * pass reverse-engineered by intercepting the live CUDA Driver-API launches.
++ * truehdr_cuda_gen.h encodes how the whole graph (grids, scratch allocations,
++ * packed arg-buffer scalars, weight-upload targets, pointer fixups) scales with
++ * the input W,H -- derived and validated byte-exact against the DLL
++ * (rtx-video-re).  The filter evaluates that at config time and replays the
++ * graph with libcuda; no DLL is needed at run time.  The replay machinery itself
++ * is rtx_cuda.c.
++ *
++ * Unlike VSR, TrueHDR does NOT rescale: output resolution == input resolution.
++ * The neural core runs at an internal resolution NW x NH derived from the input
++ * aspect ratio (ff_rtx_nn_dims); calculate_pov / postprocessing / drtm run at the
++ * input resolution.  The four tunables (contrast, saturation, middle-gray, peak
++ * luminance) and the output-format selection are small orthogonal overrides
++ * written into the final truehdr_drtm launch's arg buffer.
++ *
++ * I/O binding mirrors the DLL: the input frame is bound as a bindless TEXTURE
++ * (PITCH2D, clamp/linear/normalized -> samples in [0,1], format-agnostic) and
++ * the HDR output as a bindless SURFACE over a CUDA array.  Input is 8-bit
++ * rgb0/rgba (R-first; TrueHDR has no R<->B swap path) -- the standard SDR case --
++ * or 10-bit x2bgr10le; the format-agnostic texture read normalizes any of them.
++ *
++ * The two output formats are DIFFERENT COLOR SPACES, not just bit depths (the
++ * drtm arg words at off 68/72 select gamut and transfer; decoded from the drtm
++ * PTX and confirmed byte-exact, see rtx-video-re docs/FINDINGS-truehdr.md):
++ *   - rgbaf16le (default) = scRGB: linear light, Rec.709 primaries, 1.0 = 80 nits
++ *     (the Windows HDR swapchain format).
++ *   - x2bgr10le           = HDR10 / BT.2100: PQ (SMPTE ST.2084) transfer, Rec.2020
++ *     primaries -- i.e. already display-ready HDR10; no tone/gamut conversion, just
++ *     tag bt2020/pq/bt2020nc and do the RGB->YUV matrix to feed an HDR10 encoder.
++ * (10-bit x2bgr10le input is also accepted and byte-exact vs the DLL/replayer.
++ * An earlier top-left-corner divergence turned out to be the old CUarray input
++ * binding; the PITCH2D binding above -- which matches the DLL -- is byte-exact
++ * for 10-bit input across sizes incl. padded pitch.  See rtx-video-re
++ * docs/FINDINGS-truehdr.md.)
++ *
++ * The cubins and per-config weights blob are external files (the "data"
++ * option), extracted from the proprietary DLL and not shipped with FFmpeg.
++ */
++
++#include "libavutil/common.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "filters.h"
++#include "rtx_cuda.h"
++#include "video.h"
++
++/* Generated by rtx-video-re from the proprietary NVIDIA library, and
++ * installed rather than carried here -- located, together with the cubins and
++ * weights it names, through pkg-config (see configure's nvfdata_* checks). */
++#include <truehdr_cuda_gen.h>
++
++FF_RTX_ASSERT_MODULE_LAYOUT(ThdrModule);
++FF_RTX_ASSERT_FUNC_LAYOUT(ThdrFunc);
++FF_RTX_ASSERT_UPLOAD_LAYOUT(ThdrGenUpload);
++FF_RTX_ASSERT_LAUNCH_LAYOUT(ThdrGenLaunch);
++
++/* Supported packed frame formats.  The input is read format-agnostically through
++ * a texture (normalized to [0,1]); R-first 8-bit (rgb0/rgba) is the standard SDR
++ * input (there is no B-first path).  The output is HDR: fp16 rgba (default) or
++ * 10-bit x2bgr10le, selected by two flag words in the drtm arg buffer -- carried
++ * here in FFRtxPixFmt::sel. */
++static const FFRtxPixFmt thdr_in_fmts[] = {
++    { AV_PIX_FMT_RGB0,      CU_AD_FORMAT_UNSIGNED_INT8,       4, 0 },
++    { AV_PIX_FMT_RGBA,      CU_AD_FORMAT_UNSIGNED_INT8,       4, 0 },
++    { AV_PIX_FMT_X2BGR10LE, CU_AD_FORMAT_UNORM_INT_101010_2,  4, 0 },
++};
++static const FFRtxPixFmt thdr_out_fmts[] = {
++    { AV_PIX_FMT_RGBAF16LE, CU_AD_FORMAT_HALF,                8, 0 },
++    { AV_PIX_FMT_X2BGR10LE, CU_AD_FORMAT_UNORM_INT_101010_2,  4, 1 },
++};
++
++typedef struct TrueHdrCudaContext {
++    const AVClass *class;
++
++    FFRtxCuda   r;
++    FFRtxImage *in_img;               ///< pitched linear memory (PITCH2D texture, as in the DLL)
++    FFRtxImage *out_img;              ///< HDR output array + surface
++    FFRtxImage *scratch;              ///< dedicated clear-target for truehdr_postprocessing
++    FFRtxImage *zero;                 ///< reads 0: bound to stale intermediate-texture handles
++
++    int W, H;                         ///< input == output size
++
++    const FFRtxPixFmt *inpf, *outpf;
++
++    /* options */
++    double contrast, saturation, middlegray, maxluminance;
++    char  *data_dir;
++    char  *out_format;
++} TrueHdrCudaContext;
++
++#define OFFSET(x) offsetof(TrueHdrCudaContext, x)
++#define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
++
++static const AVOption truehdr_cuda_options[] = {
++    { "contrast", "contrast (0..200)", OFFSET(contrast), AV_OPT_TYPE_DOUBLE, {.dbl=100}, 0, 200, FLAGS },
++    { "saturation", "saturation (0..200)", OFFSET(saturation), AV_OPT_TYPE_DOUBLE, {.dbl=100}, 0, 200, FLAGS },
++    { "middlegray", "middle gray (10..100)", OFFSET(middlegray), AV_OPT_TYPE_DOUBLE, {.dbl=50}, 10, 100, FLAGS },
++    { "maxluminance", "peak luminance in nits (400..2000)", OFFSET(maxluminance), AV_OPT_TYPE_DOUBLE, {.dbl=1000}, 400, 2000, FLAGS },
++    { "data", "directory with extracted TrueHDR cubins + weights.bin",
++      OFFSET(data_dir), AV_OPT_TYPE_STRING, {.str=TRUEHDR_DEFAULT_DATA_DIR}, 0, 0, FLAGS },
++    /* Named rather than left NULL-for-the-default, so `format` reports what it
++     * does: unlike the super-resolution filters there is no same-as-input
++     * output here -- the whole point is the SDR->HDR change. */
++    { "format", "output: rgbaf16le=scRGB linear Rec.709 80nit (default), x2bgr10le=HDR10 PQ Rec.2020",
++      OFFSET(out_format), AV_OPT_TYPE_STRING, {.str="rgbaf16le"}, 0, 0, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(truehdr_cuda);
++
++FF_RTX_ASSERT_PRIV_LAYOUT(TrueHdrCudaContext);
++
++/* As for vsr_cuda: a capture only yields the capturing GPU's images, so
++ * `rtxv extract truehdr` replaces each one with the snippet's own fatbin --
++ * every architecture the DLL ships, plus the PTX -- and fills the conv backbone
++ * in from the sibling ELFs.  A data dir built with --no-fatbins still holds
++ * bare single-arch cubins, which is what a module-load failure here usually
++ * means.  No arch gate: nothing in an SDK snippet's cubins is a
++ * statically-matched guess needing an opt-in. */
++#define THDR_LOAD_HINT \
++    "Re-run `rtxv extract truehdr <nvngx_truehdr.dll>` and `rtxv install`: the " \
++    "generator repacks each kernel as the snippet's own multi-arch fatbin."
++
++/* ------------------------------------------------------------------------- *
++ * One-time graph setup for W,H.  Must run with the CUDA context current.
++ * ------------------------------------------------------------------------- */
++static void fill_sizes(AVFilterContext *ctx, long long *sz)
++{
++    TrueHdrCudaContext *s = ctx->priv;
++    int NW, NH;
++    ff_rtx_nn_dims(s->W, s->H, &NW, &NH);
++    thdr_fill_allocs(s->W, s->H, NW, NH, sz);
++}
++
++static int setup_graph(AVFilterContext *ctx)
++{
++    TrueHdrCudaContext *s = ctx->priv;
++    ThdrGenUpload *up;
++    thdr_devptr handle[5] = { 0 };
++    int W = s->W, H = s->H, NW, NH, ret, nup;
++
++    ff_rtx_nn_dims(W, H, &NW, &NH);
++
++    if ((ret = ff_rtx_load_modules(ctx, &s->r, s->data_dir,
++                                   (const FFRtxModule *)thdr_modules, THDR_NMODULE, THDR_MAX_MID,
++                                   (const FFRtxFunc *)thdr_funcs, THDR_NFUNC, THDR_MAX_FID,
++                                   THDR_LOAD_HINT)) < 0)
++        return ret;
++    /* Zero the arena: calculate_pov and k_conv_fp16_nhwc read uninitialised
++     * scratch (compute-sanitizer initcheck), which in a fresh CLI process is
++     * zeroed pages and therefore byte-exact. */
++    if ((ret = ff_rtx_alloc_arena(ctx, &s->r, THDR_NALLOC, fill_sizes,
++                                  FF_RTX_ARENA_ZERO)) < 0)
++        return ret;
++
++    up = av_calloc(THDR_NUPLOAD, sizeof(*up));
++    if (!up)
++        return AVERROR(ENOMEM);
++    nup = thdr_fill_uploads(W, H, NW, NH, (const thdr_devptr *)s->r.alloc, up);
++    ret = ff_rtx_upload_weights(ctx, &s->r, s->data_dir, "weights.bin",
++                                (const FFRtxUpload *)up, nup);
++    av_freep(&up);
++    if (ret < 0)
++        return ret;
++
++    /* Snapshot the pristine arena (weights + zeroed scratch); every frame resets
++     * it, so the graph always reads the same clean scratch instead of whatever
++     * the previous frame or another host (mpv) left behind. */
++    if ((ret = ff_rtx_snapshot_arena(ctx, &s->r)) < 0)
++        return ret;
++
++    /* Input: pitched linear memory read with linear/normalized/clamp sampling
++     * (the texture unit normalizes any 8/10-bit UNORM format to [0,1]). */
++    s->in_img = ff_rtx_image_pitch(ctx, &s->r, W, H, s->inpf->cufmt, s->inpf->bpp,
++                                   FF_RTX_TEX | FF_RTX_CLAMP);
++    /* Zero texture bound to the graph's stale intermediate-texture handles (the
++     * generator's kind-4 fixups).  A small zeroed buffer read with clamp -> every
++     * sample is 0, exactly reproducing the read from an unbound handle that the
++     * CLI relied on (byte-exact), but as a real, safe object that can never alias
++     * a live texture. */
++    s->zero = ff_rtx_image_pitch(ctx, &s->r, 64, 64, s->inpf->cufmt, s->inpf->bpp,
++                                 FF_RTX_TEX | FF_RTX_CLAMP | FF_RTX_ZERO);
++    /* HDR output array + surface: fp16 rgba or 10-bit x2bgr10le. */
++    s->out_img = ff_rtx_image_array(ctx, &s->r, W, H, s->outpf->cufmt,
++                                    FF_RTX_SURF | FF_RTX_LDST);
++    /* Private scratch surface bound to the graph's stale scratch/clear surface
++     * handles (the generator's kind-3 fixups).  Several kernels write surfaces the
++     * DLL created as extra bindless objects (e.g. truehdr_postprocessing is a pure
++     * clear -- sust {0,0,0,0} over WxH -- and truehdr_debanding writes a scratch
++     * surface); their handles were baked as invariant literals with no fixup because
++     * the capture's PTX analysis only tagged the primary output surface.  In a fresh
++     * process the literals alias nothing (writes dropped, byte-exact), but in a busy
++     * CUDA context (mpv/nvdec, gpu-next's Vulkan interop) they alias LIVE objects --
++     * e.g. our own input texture gets postprocessing's handle -> the clear zeros the
++     * input -> black output.  Route all such writes here; nothing reads them back
++     * (no suld anywhere in the graph), so it is output-irrelevant and matches the
++     * byte-exact reference.  sust.p.v4.b32 -> 4x32-bit. */
++    s->scratch = ff_rtx_image_array(ctx, &s->r, W, H, CU_AD_FORMAT_UNSIGNED_INT32,
++                                    FF_RTX_SURF | FF_RTX_LDST);
++    if (!s->in_img || !s->zero || !s->out_img || !s->scratch)
++        return AVERROR_EXTERNAL;
++
++    /* Build the graph.  thdr_fill_graph() is generated from the same fit as the
++     * tables above and assigns every field through its named thdr_*_params
++     * struct.  Kinds 3 and 4 are the two stale slots the SDK snippet leaves
++     * bound; they are given the private objects above rather than left dangling.
++     * The casts are only `unsigned long long *` vs `uint64_t *` on LP64. */
++    if ((ret = ff_rtx_alloc_launches(ctx, &s->r, THDR_NLAUNCH, sizeof(ThdrGenLaunch))) < 0)
++        return ret;
++    handle[3] = (thdr_devptr)s->scratch->surf;
++    handle[4] = (thdr_devptr)s->zero->tex;
++    if (thdr_fill_graph(W, H, NW, NH, (const thdr_devptr *)s->r.alloc,
++                        (thdr_devptr)s->in_img->tex, (thdr_devptr)s->out_img->surf,
++                        handle, s->r.launches) != THDR_NLAUNCH) {
++        av_log(ctx, AV_LOG_ERROR, "generated fill disagrees with the tables\n");
++        return AVERROR_BUG;
++    }
++
++    /* drtm overrides: the 4 tunables (float32, computed in double then cast to
++     * bit-match the DLL) and the output-format flag words.  These sit at fixed
++     * offsets in the truehdr_drtm launch's arg buffer (see rtx-video-re). */
++    if (THDR_DRTM_LAUNCH < 0 || THDR_DRTM_LAUNCH >= s->r.nlaunch) {
++        av_log(ctx, AV_LOG_ERROR, "no drtm launch in graph\n");
++        return AVERROR_BUG;
++    }
++    {
++        uint8_t *a = ff_rtx_launch_at(&s->r, THDR_DRTM_LAUNCH)->params;
++        float contrast   = (float)(0.45 + 0.004 * av_clipd(s->contrast,   0, 200));
++        float saturation = (float)(0.85 + 0.002 * av_clipd(s->saturation, 0, 200));
++        float middlegray = (float)av_clipd(s->middlegray,   10, 100);
++        float maxlum     = (float)av_clipd(s->maxluminance, 400, 2000);
++        uint32_t flag    = (uint32_t)s->outpf->sel;
++        memcpy(a + THDR_OFF_CONTRAST,     &contrast,   4);
++        memcpy(a + THDR_OFF_SATURATION,   &saturation, 4);
++        memcpy(a + THDR_OFF_MIDDLEGRAY,   &middlegray, 4);
++        memcpy(a + THDR_OFF_MAXLUMINANCE, &maxlum,     4);
++        memcpy(a + THDR_OFF_OUTFLAG0,     &flag,       4);
++        memcpy(a + THDR_OFF_OUTFLAG1,     &flag,       4);
++    }
++
++    av_log(ctx, AV_LOG_INFO,
++           "TrueHDR graph ready: %dx%d (NN %dx%d)  %s -> %s  (%d launches, %d buffers)\n",
++           W, H, NW, NH, av_get_pix_fmt_name(s->inpf->f), av_get_pix_fmt_name(s->outpf->f),
++           s->r.nlaunch, s->r.nalloc);
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Per-frame: bind the input frame as a texture, replay the graph, copy out.
++ * ------------------------------------------------------------------------- */
++/* The output is HDR, not the SDR the input props describe -- retag it so a
++ * colour-managed consumer (mpv gpu-next) interprets it correctly and does not
++ * see the frame properties "change on the fly".  fp16 = scRGB (linear, Rec.709,
++ * full range); x2bgr10le = HDR10 (PQ, Rec.2020).  Both are RGB. */
++static void retag_hdr(AVFilterContext *ctx, AVFrame *out)
++{
++    TrueHdrCudaContext *s = ctx->priv;
++
++    out->colorspace     = AVCOL_SPC_RGB;
++    out->color_range    = AVCOL_RANGE_JPEG;
++    if (s->outpf->f == AV_PIX_FMT_X2BGR10LE) {
++        out->color_primaries = AVCOL_PRI_BT2020;
++        out->color_trc       = AVCOL_TRC_SMPTE2084;
++    } else {                                  /* rgbaf16le scRGB */
++        out->color_primaries = AVCOL_PRI_BT709;
++        out->color_trc       = AVCOL_TRC_LINEAR;
++    }
++}
++
++static int filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    TrueHdrCudaContext *s = inlink->dst->priv;
++    const FFRtxFrameOp op = {
++        .in_img = s->in_img,   .iW = s->W, .iH = s->H, .ibpp = s->inpf->bpp,
++        .out_img = s->out_img, .oW = s->W, .oH = s->H, .obpp = s->outpf->bpp,
++        /* Reset the arena each frame: the DLL gets fresh memory per frame, we
++         * reuse one arena, and a long-running host recycles it dirty. */
++        .flags = FF_RTX_OP_RESET_ARENA,
++    };
++
++    return ff_rtx_filter_frame(inlink, in, &s->r, &op, retag_hdr);
++}
++
++static int config_output(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    AVFilterLink *inlink = ctx->inputs[0];
++    TrueHdrCudaContext *s = ctx->priv;
++    AVHWFramesContext *in_frames_ctx;
++    FFRtxFormats fmts = {
++        .in_tbl  = thdr_in_fmts, .n_in  = FF_ARRAY_ELEMS(thdr_in_fmts),
++        .out_tbl = thdr_out_fmts, .n_out = FF_ARRAY_ELEMS(thdr_out_fmts),
++        .hint    = "use rgb0/rgba in, rgbaf16le/x2bgr10le out",
++    };
++    int ret;
++
++    ff_rtx_free_graph(ctx, &s->r);
++
++    fmts.out_format = s->out_format;
++    if ((ret = ff_rtx_config_formats(ctx, inlink, &fmts, &in_frames_ctx,
++                                     &s->inpf, &s->outpf)) < 0)
++        return ret;
++
++    s->W = inlink->w;
++    s->H = inlink->h;
++
++    if ((ret = ff_rtx_bind_device(ctx, &s->r, in_frames_ctx)) < 0)
++        return ret;
++    if ((ret = ff_rtx_config_hwframes(ctx, outlink, &s->r, s->W, s->H,
++                                      s->outpf->f)) < 0)
++        return ret;
++    return ff_rtx_setup(ctx, &s->r, "TrueHDR", setup_graph);
++}
++
++static const AVFilterPad truehdr_cuda_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .filter_frame = filter_frame },
++};
++
++static const AVFilterPad truehdr_cuda_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_output },
++};
++
++const FFFilter ff_vf_truehdr_cuda = {
++    .p.name        = "truehdr_cuda",
++    .p.description = NULL_IF_CONFIG_SMALL("NVIDIA RTX TrueHDR SDR-to-HDR (CUDA)"),
++    .p.priv_class  = &truehdr_cuda_class,
++    .priv_size     = sizeof(TrueHdrCudaContext),
++    .uninit        = ff_rtx_uninit,
++    FILTER_INPUTS(truehdr_cuda_inputs),
++    FILTER_OUTPUTS(truehdr_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};

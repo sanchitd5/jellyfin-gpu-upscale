@@ -210,8 +210,10 @@ if [[ "$WITH_VSR" == "1" ]]; then
         || die "WITH_VSR=1: no libnvinfer.so.10 (TensorRT) under VFXLIBS_DIR=$VFXLIBS_DIR - CreateEffect" \
                "returns \"not yet implemented\" without it, confirmed the hard way (see VSR.md)"
     command -v patchelf >/dev/null || die "WITH_VSR=1: patchelf not found (apt install patchelf) - needed to fix libVideoFX.so's own rpath, see VSR.md"
-    say "note: WITH_VSR builds and registers the filter. CreateEffect+Load are now confirmed to work" \
-        "against VFXLIBS_DIR's exact library set (VSR.md) - this build stages that same set."
+    say "note: WITH_VSR builds and registers the filter, and CreateEffect works against VFXLIBS_DIR's" \
+        "exact library set (which this build stages). NvVFX_Load does NOT - it hangs, and no frame" \
+        "has ever come out of this filter. See VSR.md 'Round 3'. Build it if you are working on that" \
+        "hang; it is not a working upscaler."
 fi
 
 say "installing build dependencies"

@@ -1,0 +1,621 @@
+From d8eb6779c3ba0713dc856430b71c816f5191fe22 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:10 +0800
+Subject: [PATCH] avfilter: add truehdr_drv_cuda, the driver RTX TrueHDR network
+
+The inverse tone mapping the NVIDIA driver itself runs (the DXVA/PPE plugin
+nvaihdrx.dll, ppe/features/TrueHDR), as opposed to the NGX SDK snippet that
+truehdr_cuda drives.  Like it, the output resolution equals the input and the
+neural core runs at ff_rtx_nn_dims' internal resolution; unlike it, the graph
+carries two internal surfaces -- postprocessing to debanding, and debanding to
+drtm -- each a float32 array exposed to its producer as a surface and to its
+consumer as a texture.
+
+The tone curve comes entirely out of the final drtm launch's argument block.
+The captured template runs ToneMapMode 0, a near-linear bypass that reads only
+MaxLuminance; it is byte-exact against the driver but blows out midtones, so
+tonemap=1 -- the default -- enables the driver's adaptive inverse tone map,
+which also consumes the live per-frame calculate_pov scene statistic and is
+shaped by the tunable floats.  This network is considerably brighter than the
+SDK one, so preset=sdk names a tunable set that pulls its curve onto
+truehdr_cuda's for a like-for-like comparison.
+---
+ configure                         |   1 +
+ doc/filters.texi                  |  75 ++++++
+ libavfilter/Makefile              |   1 +
+ libavfilter/allfilters.c          |   1 +
+ libavfilter/vf_truehdr_drv_cuda.c | 464 ++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 542 insertions(+)
+
+diff --git a/configure b/configure
+index f29c29e5d2..6b3ca593be 100755
+--- a/configure
++++ b/configure
+@@ -4308,6 +4308,7 @@ transpose_vaapi_filter_deps="vaapi VAProcPipelineCaps_rotation_flags"
+ transpose_vt_filter_deps="videotoolbox VTPixelRotationSessionCreate"
+ transpose_vulkan_filter_deps="vulkan spirv_compiler"
+ truehdr_cuda_filter_deps="ffnvcodec nvfdata_truehdr"
++truehdr_drv_cuda_filter_deps="ffnvcodec nvfdata_truehdr_drv"
+ unsharp_opencl_filter_deps="opencl"
+ uspp_filter_deps="gpl avcodec"
+ v360_vulkan_filter_deps="vulkan spirv_compiler"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index 2dc7202da2..2f4a8098d2 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27930,6 +27930,81 @@ are @emph{not} shipped: the filter is only built when an
+ @code{nvidia-video-filters} package carrying the TrueHDR data is installed, and
+ @option{data} defaults to that package's data directory.
+ 
++@section truehdr_drv_cuda
++
++Expand SDR to HDR with the NVIDIA driver's TrueHDR network, running it directly
++on CUDA.
++
++This is the driver's own inverse tone mapping, not the NGX SDK network that
++@ref{truehdr_cuda} drives.  As there, the output resolution equals the input.
++The curve is much brighter than the SDK one, which is what @option{preset} and
++the tunables exist to manage.
++
++It accepts the following options:
++
++@table @option
++@item tonemap
++Tone-map algorithm: @code{0} is the captured bypass, a near-linear curve that
++reads only @option{maxluminance}; @code{1} is the driver's adaptive inverse tone
++map, which additionally consumes a live per-frame scene statistic and is shaped
++by the tunables below.  @code{-1}, the default, is auto and resolves to
++@code{1}.  @code{0} is byte-exact against the driver but blows out midtones, so
++it is mostly of interest for verification.
++
++@item preset
++A named set of tunables.  @code{none} (the default) uses them as given;
++@code{sdk} pulls this network's curve onto @ref{truehdr_cuda}'s, for a
++like-for-like comparison between the two.  A preset only fills in the tunables
++left at auto (@code{-1}), so anything passed explicitly alongside it wins.
++
++@item maxluminance
++Peak luminance of the target display in nits, @code{400} to @code{2000}.
++Default @code{1000}.  The only tunable @code{tonemap=0} reads.
++
++@item contrast
++Adaptive tone-curve contrast, @code{0.1} to @code{4}.  Default @code{1}.
++
++@item saturation
++Adaptive chroma saturation, @code{0} to @code{4}.  Default @code{1} (neutral).
++
++@item middlegray
++Adaptive middle-gray reference, @code{1} to @code{100}.  Default @code{-1},
++auto: @code{50}, or the value @option{preset} names.  As on @ref{truehdr_cuda}
++this is the main exposure lever.
++
++@item exposure
++Highlight-expansion gain, @code{1} to @code{1000}.  Default @code{-1}, auto:
++@code{200}, or the value @option{preset} names.
++
++@item gamma
++Per-channel output gamma, @code{0.25} to @code{4}.  Default @code{1} (off).
++
++@item format
++Output pixel format: @code{rgbaf16le} (the default) or @code{x2bgr10le}.  These
++are two different colour spaces; see @ref{truehdr_cuda} for what each one means.
++
++@item gamut
++For @code{x2bgr10le} output: @code{1} (the default) converts to Rec.2020
++primaries for true HDR10, @code{0} keeps Rec.709.
++
++@item data
++Directory holding the extracted cubins and @file{weights.bin}.
++
++@item experimental_arch
++Allow GPU architectures whose cubins were matched statically rather than
++exercised.  Ada (sm_89) and Blackwell do not need this.
++@end table
++
++@subsection Supported formats
++
++Input is 8-bit R-first packed RGB, @code{rgb0} or @code{rgba}.  Output is
++@code{rgbaf16le} or @code{x2bgr10le} as selected by @option{format}.
++
++The cubins and weights are extracted from the proprietary NVIDIA libraries and
++are @emph{not} shipped: the filter is only built when an
++@code{nvidia-video-filters} package carrying the driver TrueHDR data is installed, and
++@option{data} defaults to that package's data directory.
++
+ @anchor{vsr_cuda}
+ @section vsr_cuda
+ 
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index c26bee04ff..1222b87eec 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -554,6 +554,7 @@ OBJS-$(CONFIG_TRANSPOSE_VT_FILTER)           += vf_transpose_vt.o
+ OBJS-$(CONFIG_TRANSPOSE_VULKAN_FILTER)       += vf_transpose_vulkan.o vulkan.o vulkan_filter.o
+ OBJS-$(CONFIG_TRIM_FILTER)                   += trim.o
+ OBJS-$(CONFIG_TRUEHDR_CUDA_FILTER)           += vf_truehdr_cuda.o rtx_cuda.o
++OBJS-$(CONFIG_TRUEHDR_DRV_CUDA_FILTER)       += vf_truehdr_drv_cuda.o rtx_cuda.o
+ OBJS-$(CONFIG_UNPREMULTIPLY_FILTER)          += vf_premultiply.o framesync.o
+ OBJS-$(CONFIG_UNSHARP_FILTER)                += vf_unsharp.o
+ OBJS-$(CONFIG_UNSHARP_OPENCL_FILTER)         += vf_unsharp_opencl.o opencl.o \
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index cd8ac56ab1..6704a9cd06 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -522,6 +522,7 @@ extern const FFFilter ff_vf_transpose_vt;
+ extern const FFFilter ff_vf_transpose_vulkan;
+ extern const FFFilter ff_vf_trim;
+ extern const FFFilter ff_vf_truehdr_cuda;
++extern const FFFilter ff_vf_truehdr_drv_cuda;
+ extern const FFFilter ff_vf_unpremultiply;
+ extern const FFFilter ff_vf_unsharp;
+ extern const FFFilter ff_vf_unsharp_opencl;
+diff --git a/libavfilter/vf_truehdr_drv_cuda.c b/libavfilter/vf_truehdr_drv_cuda.c
+new file mode 100644
+index 0000000000..98a0e76a1f
+--- /dev/null
++++ b/libavfilter/vf_truehdr_drv_cuda.c
+@@ -0,0 +1,464 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Inverse tone-mapping (SDR -> HDR) filter driving the NVIDIA *driver* TrueHDR
++ * network (the DXVA/PPE plugin nvaihdrx.dll, ppe/features/TrueHDR) -- distinct
++ * from vf_truehdr_cuda, which runs the NGX SDK snippet (nvngx_truehdr.dll).  The
++ * plugin's cubins were extracted and the forward pass reverse-engineered by
++ * running it on Linux via loader_ppe and intercepting the live CUDA Driver-API
++ * launches.  truehdr_drv_cuda_gen.h encodes how the whole graph (grids, scratch
++ * allocations, packed arg-buffer scalars, weight-upload targets, pointer fixups)
++ * scales with the input W,H -- derived and validated byte-exact against the
++ * loader (rtx-video-re).  The filter evaluates that at config time and replays
++ * the graph with libcuda; no DLL is needed at run time.  The replay machinery
++ * itself is rtx_cuda.c.
++ *
++ * Like the SDK filter this does NOT rescale: output resolution == input
++ * resolution, with the neural core at the internal NW x NH of ff_rtx_nn_dims.
++ * Unlike it, the graph carries two INTERNAL surfaces -- S1
++ * (postprocessing -> debanding) and S2 (debanding -> drtm) -- each a float32
++ * array exposed to its producer as a surface and to its consumer as a texture.
++ *
++ * The tone curve is driven entirely from the final truehdr_drtm launch's
++ * argument block.  The captured template runs ToneMapMode 0, a near-linear
++ * bypass reading only MaxLuminance (byte-exact vs the loader, but it blows out
++ * midtones); tonemap=1 (the default) enables the driver's adaptive
++ * inverse-tone-map, which additionally consumes the live per-frame
++ * calculate_pov scene stat and is shaped by the tunable floats.  This network is
++ * much brighter than the SDK one, so preset=sdk names a tunable set that pulls
++ * its curve onto the SDK filter's.
++ *
++ * The cubins and the weights blob are external files (the "data" option),
++ * extracted from the proprietary driver and not shipped with FFmpeg.
++ */
++
++#include "libavutil/common.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "filters.h"
++#include "rtx_cuda.h"
++#include "video.h"
++
++/* Generated by rtx-video-re from the proprietary NVIDIA library, and
++ * installed rather than carried here -- located, together with the cubins and
++ * weights it names, through pkg-config (see configure's nvfdata_* checks). */
++#include <truehdr_drv_cuda_gen.h>
++
++FF_RTX_ASSERT_MODULE_LAYOUT(ThdrvModule);
++FF_RTX_ASSERT_FUNC_LAYOUT(ThdrvFunc);
++FF_RTX_ASSERT_UPLOAD_LAYOUT(ThdrvGenUpload);
++FF_RTX_ASSERT_LAUNCH_LAYOUT(ThdrvGenLaunch);
++
++/* Supported packed frame formats.  Input is read format-agnostically through a
++ * texture normalized to [0,1] and there is no B-first path, so it is the shared
++ * table's R-first 8-bit rows -- exactly what FF_RTX_N_RGB8_R_FIRST names.
++ * Output: scRGB fp16 rgba (linear, drtm arg0x2c=0) or HDR10 x2bgr10le (PQ /
++ * SMPTE ST.2084, drtm arg0x2c=1 -> the kernel emits [0,1] PQ values that the
++ * SUST.P.2D packs into the 10-bit surface).  See rtx-video-re docs/drtm610/. */
++static const FFRtxPixFmt thdrv_out_fmts[] = {
++    { AV_PIX_FMT_RGBAF16LE, CU_AD_FORMAT_HALF,               8, 0 },
++    { AV_PIX_FMT_X2BGR10LE, CU_AD_FORMAT_UNORM_INT_101010_2, 4, 0 },
++};
++
++/* Tone-curve presets (the `preset` option).  A preset names a whole tunable set;
++ * "sdk" makes this (much brighter) driver network approximate the SDK truehdr_cuda
++ * filter's tone curve. */
++enum {
++    THDRV_PRESET_NONE = 0,
++    THDRV_PRESET_SDK  = 1,
++};
++
++typedef struct TrueHdrDrvCudaContext {
++    const AVClass *class;
++
++    FFRtxCuda   r;
++    FFRtxImage *in_img;           ///< pitched linear memory (PITCH2D texture)
++    FFRtxImage *out_img;
++    FFRtxImage *s1, *s2;          ///< graph-internal surfaces
++
++    int W, H;                     ///< input == output size
++
++    const FFRtxPixFmt *inpf, *outpf;
++
++    /* options */
++    double maxluminance;
++    int    preset;                ///< tone-curve preset (THDRV_PRESET_*), applied over the tunables
++    int    tonemap;               ///< 0 = byte-exact bypass; 1 = adaptive inverse-tone-map
++    double contrast, saturation, middlegray, exposure, gamma;
++    char  *out_format;            ///< "rgbaf16le" (scRGB) or "x2bgr10le" (HDR10 PQ)
++    int    gamut;                 ///< x2bgr10le: 1 = Rec.2020 primaries (HDR10), 0 = Rec.709
++    int    experimental_arch;     ///< allow the unverified non-Blackwell (sm_75) path
++    char  *data_dir;
++} TrueHdrDrvCudaContext;
++
++#define OFFSET(x) offsetof(TrueHdrDrvCudaContext, x)
++#define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
++
++static const AVOption truehdr_drv_cuda_options[] = {
++    { "maxluminance", "peak luminance in nits (400..2000)", OFFSET(maxluminance), AV_OPT_TYPE_DOUBLE, {.dbl=1000}, 400, 2000, FLAGS },
++    /* preset: a named tunable set.  The driver network is a different, much brighter
++     * net than the SDK truehdr_cuda filter; preset=sdk applies values (found by
++     * sweeping this filter against the SDK filter on real content) that pull its
++     * adaptive curve onto the SDK's -- tonemap=1, exposure=800, middlegray=15 (14 for
++     * PQ output, which weights midtones more).  It only fills in the tunables left
++     * at "auto" (-1), so e.g. preset=sdk:exposure=600 keeps the explicit exposure. */
++    { "preset", "tone-curve preset over the tunables: none, or sdk (emulate the SDK truehdr_cuda curve)",
++      OFFSET(preset), AV_OPT_TYPE_INT, {.i64=THDRV_PRESET_NONE}, 0, 1, FLAGS, .unit = "preset" },
++        { "none", "use the tunables directly (no preset)",       0, AV_OPT_TYPE_CONST, {.i64=THDRV_PRESET_NONE}, 0, 0, FLAGS, .unit = "preset" },
++        { "sdk",  "emulate the SDK truehdr_cuda tone curve",      0, AV_OPT_TYPE_CONST, {.i64=THDRV_PRESET_SDK},  0, 0, FLAGS, .unit = "preset" },
++    /* tonemap 0 = the captured ToneMapMode-0 bypass (near-linear, reads only
++     * MaxLuminance) -- byte-exact vs loader_ppe.  tonemap 1 = the driver's adaptive
++     * inverse-tone-map, which consumes the live per-frame calculate_pov scene stat
++     * (fraction of bright pixels) and is shaped by the tone floats below.  The exact
++     * production values the driver's DXVA/PPE config passes are not observable from
++     * the loader (we are the caller), so these are exposed with neutral defaults;
++     * the curve rolls highlights off toward, not to, the peak (an inverse-tone-map,
++     * not a linear scale). Named by live value-correlation (rtx-video-re
++     * docs/drtm610/). */
++    /* The three tunables a preset names default to -1 = auto: the preset's value
++     * if one is selected, else the neutral one quoted in the help text.  A
++     * sentinel rather than the neutral value itself, so that passing that value
++     * explicitly is distinguishable from not passing it at all. */
++    { "tonemap", "tone-map algorithm: -1=auto (1), 0=bypass (byte-exact), 1=adaptive inverse-tone-map",
++      OFFSET(tonemap), AV_OPT_TYPE_INT, {.i64=-1}, -1, 1, FLAGS },
++    { "contrast",   "adaptive tone-curve contrast (tonemap=1)",              OFFSET(contrast),   AV_OPT_TYPE_DOUBLE, {.dbl=1.0},  0.1, 4.0,   FLAGS },
++    { "saturation", "adaptive chroma saturation (tonemap=1; 1=neutral)",     OFFSET(saturation), AV_OPT_TYPE_DOUBLE, {.dbl=1.0},  0.0, 4.0,   FLAGS },
++    { "middlegray", "adaptive tone-curve middle-gray reference (tonemap=1; -1=auto, neutral 50)", OFFSET(middlegray), AV_OPT_TYPE_DOUBLE, {.dbl=-1.0}, -1.0, 100.0, FLAGS },
++    { "exposure",   "adaptive highlight-expansion gain (tonemap=1; -1=auto, neutral 200)",        OFFSET(exposure),   AV_OPT_TYPE_DOUBLE, {.dbl=-1.0}, -1.0, 1000.0,FLAGS },
++    /* Per-channel gamma (drtm arg0x10, out = scale*ch^gamma).  Inert until enabled
++     * by arg0x40 AND ToneMapMode 1; the filter enables it only when gamma!=1 (so the
++     * default leaves the mode-1 arg buffer untouched).  1.0 = identity. */
++    { "gamma",      "per-channel output gamma (tonemap=1; 1.0=off)",          OFFSET(gamma),      AV_OPT_TYPE_DOUBLE, {.dbl=1.0},  0.25,4.0,   FLAGS },
++    /* Output transfer/format.  rgbaf16le = scRGB (linear Rec.709, 1.0=80nit) --
++     * drtm arg0x2c=0.  x2bgr10le = HDR10: PQ / SMPTE ST.2084 transfer (drtm
++     * arg0x2c=1, kernel emits [0,1] -> 10-bit surface). */
++    { "format", "output: rgbaf16le=scRGB linear 80nit (default), x2bgr10le=HDR10 PQ",
++      OFFSET(out_format), AV_OPT_TYPE_STRING, {.str="rgbaf16le"}, 0, 0, FLAGS },
++    /* x2bgr10le only: apply the drtm Rec.709->Rec.2020 gamut matrix (arg0x2b) so
++     * the PQ output is standards-correct HDR10 / BT.2100.  0 keeps Rec.709 primaries
++     * (PQ-over-709).  Ignored for the linear rgbaf16le/scRGB output (Rec.709). */
++    { "gamut", "x2bgr10le: 1=Rec.2020 primaries (HDR10, default), 0=keep Rec.709",
++      OFFSET(gamut), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, FLAGS },
++    /* The truehdr_* glue cubins ship as multi-arch fatbins (sm_75/sm_80/sm_120/
++     * sm_121; sm_80 covers all Ampere/Ada via minor-version compat).  The four
++     * k_conv conv-layer cubins have four same-named copies per arch;
++     * `rtxv fatbins --cross-major` pairs them across the major boundary by three
++     * agreeing static signals (.text rank, ISETP output-size bounds, SASS immediate
++     * fingerprint), yielding sm_75/sm_86/sm_87/sm_89/sm_120 -- so Turing/Ampere/Ada
++     * all get k_conv images.  sm_89 (Ada) is confirmed byte-identical to the DLL on
++     * an RTX 4060 Ti and runs ungated; the other statically-matched arches remain
++     * UNVERIFIED on real hardware, so this opt-in lifts the guard for those GPUs. */
++    { "experimental_arch", "attempt the statically-matched but unverified non-Blackwell path (sm_89/Ada does not need this)",
++      OFFSET(experimental_arch), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
++    { "data", "directory with extracted driver TrueHDR cubins + weights.bin",
++      OFFSET(data_dir), AV_OPT_TYPE_STRING, {.str=TRUEHDRDRV_DEFAULT_DATA_DIR}, 0, 0, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(truehdr_drv_cuda);
++
++FF_RTX_ASSERT_PRIV_LAYOUT(TrueHdrDrvCudaContext);
++
++/* The glue kernels carry sm_75/80/120/121 (sm_80 serves Ampere/Ada via minor
++ * compat); the k_conv layers carry sm_75/86/87/89/120 when built with
++ * `rtxv fatbins --cross-major`.  So Turing/Ampere/Ada all have a full graph --
++ * but that path is matched statically, not exercised on real hardware. */
++static const FFRtxArchGate thdrv_gate = {
++    .gate_msg =
++        "truehdr_drv_cuda is validated on Blackwell (cc 12.x) and Ada (cc 8.9); "
++        "this GPU is cc %d.%d.  Its k_conv is statically matched but unverified "
++        "-- set experimental_arch=1 to attempt it anyway.\n",
++    .warn_msg =
++        "truehdr_drv_cuda: EXPERIMENTAL non-Blackwell (cc %d.%d) path -- k_conv is "
++        "statically matched (sm_75/86/87/89), UNVERIFIED on real hardware.\n",
++};
++
++/* ------------------------------------------------------------------------- *
++ * One-time graph setup for W,H.  Must run with the CUDA context current.
++ * ------------------------------------------------------------------------- */
++static void fill_sizes(AVFilterContext *ctx, long long *sz)
++{
++    TrueHdrDrvCudaContext *s = ctx->priv;
++    int NW, NH;
++    ff_rtx_nn_dims(s->W, s->H, &NW, &NH);
++    thdrv_fill_allocs(s->W, s->H, NW, NH, sz);
++}
++
++/* One internal graph surface (S1 or S2): a float32 array exposed to its producer
++ * kernel as a surface and to its consumer as a texture.  The texture descriptor
++ * mirrors the input texture (normalized coords, linear filter) so the producer's
++ * pixel-coord SUST and the consumer's normalized TLD line up exactly as they do
++ * in loader_ppe. */
++static FFRtxImage *mk_interm(AVFilterContext *ctx, FFRtxCuda *r, int W, int Ha)
++{
++    return ff_rtx_image_array(ctx, r, W, Ha, CU_AD_FORMAT_FLOAT,
++                              FF_RTX_TEX | FF_RTX_SURF | FF_RTX_LDST);
++}
++
++static int setup_graph(AVFilterContext *ctx)
++{
++    TrueHdrDrvCudaContext *s = ctx->priv;
++    ThdrvGenUpload *up;
++    thdrv_devptr handle[7] = { 0 };
++    int W = s->W, H = s->H, NW, NH, ret, nup;
++    int Ha = (H + 15) & ~15;   /* conv padding rounds height to a multiple of 16 */
++    int sdk, tonemap;
++    double exposure, middlegray;
++    uint8_t *a;
++
++    ff_rtx_nn_dims(W, H, &NW, &NH);
++
++    if ((ret = ff_rtx_arch_gate(ctx, &s->r, &thdrv_gate, s->experimental_arch)) < 0)
++        return ret;
++    if ((ret = ff_rtx_load_modules(ctx, &s->r, s->data_dir,
++                                   (const FFRtxModule *)thdrv_modules, THDRV_NMODULE, THDRV_MAX_MID,
++                                   (const FFRtxFunc *)thdrv_funcs, THDRV_NFUNC, THDRV_MAX_FID,
++                                   NULL)) < 0)
++        return ret;
++    /* Zero the arena so any scratch the conv/pov kernels read before writing is
++     * deterministically 0, as in a fresh loader process. */
++    if ((ret = ff_rtx_alloc_arena(ctx, &s->r, THDRV_NALLOC, fill_sizes,
++                                  FF_RTX_ARENA_ZERO)) < 0)
++        return ret;
++
++    up = av_calloc(THDRV_NUPLOAD, sizeof(*up));
++    if (!up)
++        return AVERROR(ENOMEM);
++    nup = thdrv_fill_uploads(W, H, NW, NH, (const thdrv_devptr *)s->r.alloc, up);
++    ret = ff_rtx_upload_weights(ctx, &s->r, s->data_dir, "weights.bin",
++                                (const FFRtxUpload *)up, nup);
++    av_freep(&up);
++    if (ret < 0)
++        return ret;
++
++    /* Snapshot the pristine arena (weights + zeroed scratch); reset from it each
++     * frame so the graph always reads clean scratch regardless of host memory
++     * reuse. */
++    if ((ret = ff_rtx_snapshot_arena(ctx, &s->r)) < 0)
++        return ret;
++
++    /* Input: pitched linear memory, normalized/linear sampling (matches
++     * loader_ppe; the texture unit normalizes the 8-bit UNORM input to [0,1]). */
++    s->in_img = ff_rtx_image_pitch(ctx, &s->r, W, H, s->inpf->cufmt, s->inpf->bpp,
++                                   FF_RTX_TEX);
++    /* Output array + surface (HDR fp16 rgba = scRGB, or 10-bit PQ). */
++    s->out_img = ff_rtx_image_array(ctx, &s->r, W, H, s->outpf->cufmt,
++                                    FF_RTX_SURF | FF_RTX_LDST);
++    /* Internal surfaces S1 (postprocessing->debanding) and S2 (debanding->drtm). */
++    s->s1 = mk_interm(ctx, &s->r, W, Ha);
++    s->s2 = mk_interm(ctx, &s->r, W, Ha);
++    if (!s->in_img || !s->out_img || !s->s1 || !s->s2)
++        return AVERROR_EXTERNAL;
++
++    /* Build the graph.  thdrv_fill_graph() is generated from the same fit as the
++     * tables above and assigns every field through its named thdrv_*_params
++     * struct.  The internal S1/S2 surfaces and textures are passed by fix kind,
++     * which is the index the generated code reads them at.  The casts are only
++     * `unsigned long long *` vs `uint64_t *` on LP64. */
++    if ((ret = ff_rtx_alloc_launches(ctx, &s->r, THDRV_NLAUNCH, sizeof(ThdrvGenLaunch))) < 0)
++        return ret;
++    handle[3] = (thdrv_devptr)s->s1->surf;
++    handle[4] = (thdrv_devptr)s->s1->tex;
++    handle[5] = (thdrv_devptr)s->s2->surf;
++    handle[6] = (thdrv_devptr)s->s2->tex;
++    if (thdrv_fill_graph(W, H, NW, NH, (const thdrv_devptr *)s->r.alloc,
++                         (thdrv_devptr)s->in_img->tex, (thdrv_devptr)s->out_img->surf,
++                         handle, s->r.launches) != THDRV_NLAUNCH) {
++        av_log(ctx, AV_LOG_ERROR, "generated fill disagrees with the tables\n");
++        return AVERROR_BUG;
++    }
++
++    if (THDRV_DRTM_LAUNCH < 0 || THDRV_DRTM_LAUNCH >= s->r.nlaunch) {
++        av_log(ctx, AV_LOG_ERROR, "no drtm launch in graph\n");
++        return AVERROR_BUG;
++    }
++    a = ff_rtx_launch_at(&s->r, THDRV_DRTM_LAUNCH)->params;
++
++    /* Resolve the tunables the preset names, before marshalling them below.  The
++     * SDK preset selects the adaptive path and the exposure/middlegray that
++     * emulate the SDK truehdr_cuda curve (middlegray one step lower for PQ
++     * output).  Only tunables left at auto (-1) take a preset value, so an
++     * explicit one passed alongside the preset still wins -- including one that
++     * happens to equal the neutral default, which a compare-against-the-default
++     * test could not tell apart.  The resolved values live in locals: the
++     * AVOption fields stay as the user set them, so a re-run of config_output
++     * resolves from the same starting point and av_opt_get still reports what
++     * was asked for. */
++    sdk        = s->preset == THDRV_PRESET_SDK;
++    tonemap    = s->tonemap >= 0 ? s->tonemap : 1;
++    exposure   = s->exposure   >= 0 ? s->exposure   : (sdk ? 800.0 : 200.0);
++    middlegray = s->middlegray >= 0 ? s->middlegray
++               : sdk ? (s->outpf->f == AV_PIX_FMT_X2BGR10LE ? 14.0 : 15.0) : 50.0;
++    if (sdk)
++        av_log(ctx, AV_LOG_VERBOSE,
++               "preset=sdk: tonemap=%d exposure=%.0f middlegray=%.0f\n",
++               tonemap, exposure, middlegray);
++
++    /* drtm override: peak luminance (float32, computed in double then cast to
++     * bit-match the reference). */
++    {
++        float maxlum = (float)av_clipd(s->maxluminance, 400, 2000);
++        memcpy(a + THDRV_OFF_MAXLUMINANCE, &maxlum, 4);
++    }
++
++    /* Output format flags (drtm final SUST).  arg0x2c = TRANSFER: 0 = scRGB linear
++     * (rgb*MaxLuminance/80, fp16); 1 = PQ / SMPTE ST.2084 -> normalized [0,1] the
++     * 10-bit x2bgr10le surface packs.  arg0x2b = GAMUT: 1 = Rec.709->Rec.2020 primary
++     * matrix.  x2bgr10le output enables PQ, and (by default) the gamut too == HDR10 /
++     * BT.2100.  arg0x2b is byte 3 of a packed dword, so write a single byte. */
++    if (s->outpf->f == AV_PIX_FMT_X2BGR10LE) {
++        int32_t pq = 1;
++        memcpy(a + THDRV_OFF_TRANSFER, &pq, 4);
++        a[THDRV_OFF_GAMUT] = s->gamut ? 1 : 0;
++    }
++
++    /* Adaptive inverse-tone-map (tonemap>=1, the default).  The captured drtm template
++     * runs ToneMapMode 0 -- a near-linear bypass that reads only MaxLuminance, so
++     * tonemap=0 is byte-exact vs the loader but blows out midtones.  Mode 1 enables the
++     * driver's adaptive curve, which additionally consumes the live calculate_pov
++     * scene stat (drtm arg0x48 = the per-frame bright-pixel fraction; the graph
++     * already produces it and the arena reset zero-inits its atomic accumulator each
++     * frame -- see filter_frame / loader_ppe) and is gated by the tone floats.  Those
++     * MUST be non-zero or the curve divides by zero (NaN), so write the tunable set
++     * with neutral shadow-lift.  Offsets are the drtm610-named arg offsets.  Mode 0
++     * is left entirely untouched. */
++    if (tonemap >= 1) {
++        float f_contrast   = (float)av_clipd(s->contrast,   0.1, 4.0);
++        float f_shadowlift = 1.0f;               /* neutral; curve needs it non-zero */
++        float f_saturation = (float)av_clipd(s->saturation, 0.0, 4.0);
++        float f_middlegray = (float)av_clipd(middlegray,    1.0, 100.0);
++        float f_exposure   = (float)av_clipd(exposure,      1.0, 1000.0);
++        int32_t mode       = tonemap;
++        memcpy(a + THDRV_OFF_CONTRAST,    &f_contrast,   4);
++        memcpy(a + THDRV_OFF_SHADOWLIFT,  &f_shadowlift, 4);
++        memcpy(a + THDRV_OFF_SATURATION,  &f_saturation, 4);
++        memcpy(a + THDRV_OFF_MIDDLEGRAY,  &f_middlegray, 4);
++        memcpy(a + THDRV_OFF_EXPOSURE,    &f_exposure,   4);
++        memcpy(a + THDRV_OFF_TONEMAPMODE, &mode,         4);
++        /* Per-channel gamma is a separate opt-in: it needs its enable byte
++         * (arg0x40) set as well as the exponent (arg0x10).  Only touch them when
++         * the user asked for a non-identity gamma, so gamma=1.0 leaves the
++         * (byte-exact) mode-1 arg buffer untouched. */
++        if (s->gamma != 1.0) {
++            float g = (float)av_clipd(s->gamma, 0.25, 4.0);
++            memcpy(a + THDRV_OFF_GAMMA, &g, 4);
++            a[THDRV_OFF_GAMMAENABLE] = 1;
++        }
++    }
++
++    av_log(ctx, AV_LOG_INFO,
++           "driver TrueHDR graph ready: %dx%d (NN %dx%d)  %s -> %s  (%d launches, %d buffers)  "
++           "tonemap=%s\n",
++           W, H, NW, NH, av_get_pix_fmt_name(s->inpf->f), av_get_pix_fmt_name(s->outpf->f),
++           s->r.nlaunch, s->r.nalloc,
++           s->outpf->f == AV_PIX_FMT_X2BGR10LE
++               ? (tonemap ? "adaptive/PQ" : "bypass/PQ")
++               : (tonemap ? "adaptive" : "bypass(byte-exact)"));
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Per-frame: bind the input frame as a texture, replay the graph, copy out.
++ * ------------------------------------------------------------------------- */
++/* The output is HDR, not the SDR the input props describe -- retag so a
++ * colour-managed consumer interprets it.  rgbaf16le = scRGB (linear light,
++ * Rec.709, full range); x2bgr10le = HDR10 (PQ / SMPTE ST.2084, Rec.2020 primaries
++ * when the gamut matrix is on -- the standard -- else Rec.709). */
++static void retag_hdr(AVFilterContext *ctx, AVFrame *out)
++{
++    TrueHdrDrvCudaContext *s = ctx->priv;
++    int hdr10 = s->outpf->f == AV_PIX_FMT_X2BGR10LE;
++
++    out->colorspace      = AVCOL_SPC_RGB;
++    out->color_range     = AVCOL_RANGE_JPEG;
++    out->color_primaries = (hdr10 && s->gamut) ? AVCOL_PRI_BT2020 : AVCOL_PRI_BT709;
++    out->color_trc       = hdr10 ? AVCOL_TRC_SMPTE2084 : AVCOL_TRC_LINEAR;
++}
++
++static int filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    TrueHdrDrvCudaContext *s = inlink->dst->priv;
++    const FFRtxFrameOp op = {
++        .in_img = s->in_img,   .iW = s->W, .iH = s->H, .ibpp = s->inpf->bpp,
++        .out_img = s->out_img, .oW = s->W, .oH = s->H, .obpp = s->outpf->bpp,
++        /* Reset the arena each frame: the DLL gets fresh memory per frame, we
++         * reuse one arena, and a long-running host recycles it dirty. */
++        .flags = FF_RTX_OP_RESET_ARENA,
++    };
++
++    return ff_rtx_filter_frame(inlink, in, &s->r, &op, retag_hdr);
++}
++
++static int config_output(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    AVFilterLink *inlink = ctx->inputs[0];
++    TrueHdrDrvCudaContext *s = ctx->priv;
++    AVHWFramesContext *in_frames_ctx;
++    FFRtxFormats fmts = {
++        .in_tbl  = ff_rtx_packed_rgb_fmts, .n_in  = FF_RTX_N_RGB8_R_FIRST,
++        .out_tbl = thdrv_out_fmts, .n_out = FF_ARRAY_ELEMS(thdrv_out_fmts),
++        .hint    = "use rgb0/rgba in, rgbaf16le/x2bgr10le out",
++    };
++    int ret;
++
++    ff_rtx_free_graph(ctx, &s->r);
++
++    fmts.out_format = s->out_format;
++    if ((ret = ff_rtx_config_formats(ctx, inlink, &fmts, &in_frames_ctx,
++                                     &s->inpf, &s->outpf)) < 0)
++        return ret;
++
++    s->W = inlink->w;
++    s->H = inlink->h;
++
++    if ((ret = ff_rtx_bind_device(ctx, &s->r, in_frames_ctx)) < 0)
++        return ret;
++    if ((ret = ff_rtx_config_hwframes(ctx, outlink, &s->r, s->W, s->H,
++                                      s->outpf->f)) < 0)
++        return ret;
++    return ff_rtx_setup(ctx, &s->r, "driver TrueHDR", setup_graph);
++}
++
++static const AVFilterPad truehdr_drv_cuda_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .filter_frame = filter_frame },
++};
++
++static const AVFilterPad truehdr_drv_cuda_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_output },
++};
++
++const FFFilter ff_vf_truehdr_drv_cuda = {
++    .p.name        = "truehdr_drv_cuda",
++    .p.description = NULL_IF_CONFIG_SMALL("NVIDIA RTX driver TrueHDR SDR-to-HDR (CUDA)"),
++    .p.priv_class  = &truehdr_drv_cuda_class,
++    .priv_size     = sizeof(TrueHdrDrvCudaContext),
++    .uninit        = ff_rtx_uninit,
++    FILTER_INPUTS(truehdr_drv_cuda_inputs),
++    FILTER_OUTPUTS(truehdr_drv_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};

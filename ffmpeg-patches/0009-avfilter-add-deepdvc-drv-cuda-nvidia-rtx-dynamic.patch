@@ -1,0 +1,426 @@
+From 44f50e6eb726319ceff5010f513b35a20a5c51a0 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:10 +0800
+Subject: [PATCH] avfilter: add deepdvc_drv_cuda, NVIDIA RTX Dynamic Vibrance
+
+Colour and vibrance enhancement with the driver's DeepDVC network (the DXVA/PPE
+plugin nvaidvcx.dll, ppe/features/DeepDVC).  It is an HDRnet-style learned
+enhancer: a small CNN predicts a coefficient grid which applyLUTToSurface then
+applies at full resolution.
+
+It is same-resolution and in-place, which shapes the binding: applyLUTToSurface
+reads and writes one image handle and the downsample kernel reads that same
+frame, so the whole graph binds a single frame texture.  Unified TEXMODE lets
+one texture handle serve both the sample and the surface store -- a surface
+handle there fails the TLD.
+
+Both tunables, vibrance and gain, are a final blend strength inside
+applyLUTToSurface, so vibrance=0 is an exact pass-through rather than an
+approximate one.
+---
+ configure                         |   1 +
+ doc/filters.texi                  |  46 ++++++
+ libavfilter/Makefile              |   1 +
+ libavfilter/allfilters.c          |   1 +
+ libavfilter/vf_deepdvc_drv_cuda.c | 300 ++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 349 insertions(+)
+
+diff --git a/configure b/configure
+index 6b3ca593be..899e5abd40 100755
+--- a/configure
++++ b/configure
+@@ -4189,6 +4189,7 @@ deinterlace_qsv_filter_deps="libmfx"
+ deinterlace_qsv_filter_select="qsvvpp"
+ deinterlace_vaapi_filter_deps="vaapi"
+ delogo_filter_deps="gpl"
++deepdvc_drv_cuda_filter_deps="ffnvcodec nvfdata_dvc_drv"
+ denoise_vaapi_filter_deps="vaapi"
+ derain_filter_select="dnn"
+ deshake_filter_select="pixelutils"
+diff --git a/doc/filters.texi b/doc/filters.texi
+index 2f4a8098d2..ac3afebe19 100644
+--- a/doc/filters.texi
++++ b/doc/filters.texi
+@@ -27483,6 +27483,52 @@ JPEG (full) range
+ 
+ @end table
+ 
++@section deepdvc_drv_cuda
++
++Enhance colour with NVIDIA RTX Dynamic Vibrance, running the driver's DeepDVC
++network directly on CUDA.
++
++DeepDVC is a learned enhancer rather than a fixed saturation curve: a small
++convolutional network looks at the whole frame and predicts a grid of colour
++transform coefficients, which a second pass then applies at full resolution.
++It works at the input resolution and does not rescale.
++
++It accepts the following options:
++
++@table @option
++@item vibrance
++Strength of the predicted transform, @code{0} to @code{8}.  Default @code{1}.
++@code{0} is an exact pass-through: the strength is applied inside the final
++kernel, so the output is bit-identical to the input rather than merely close to
++it.
++
++@item gain
++Secondary saturation gain, @code{0} to @code{8}.  Default @code{1}.
++
++@item data
++Directory holding the extracted cubins and @file{weights.bin}.
++
++@item experimental_arch
++Allow GPU architectures whose cubins were matched statically rather than
++exercised.  Ada (sm_89) and Blackwell do not need this.
++@end table
++
++@subsection Supported formats
++
++8-bit R-first packed RGB CUDA frames: @code{rgb0} or @code{rgba}.  The output
++format is always the input format.
++
++Unlike the super-resolution filters this one does not map the network's format
++selectors -- it drives it as raw 4-channel 8-bit in the frame's own byte order,
++so it cannot be told to swap.  A B-first frame would be enhanced as though blue
++were red, so @code{bgr0} and @code{bgra} are rejected rather than silently
++hue-shifted; convert first.
++
++The cubins and weights are extracted from the proprietary NVIDIA libraries and
++are @emph{not} shipped: the filter is only built when an
++@code{nvidia-video-filters} package carrying the DeepDVC data is installed, and
++@option{data} defaults to that package's data directory.
++
+ @section dlpp_drv_cuda
+ 
+ Upscale video with the NVIDIA driver's DLPP super-resolution network, running
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 1222b87eec..b38b80748c 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -274,6 +274,7 @@ OBJS-$(CONFIG_DECIMATE_FILTER)               += vf_decimate.o
+ OBJS-$(CONFIG_DERAIN_FILTER)                 += vf_derain.o
+ OBJS-$(CONFIG_DECONVOLVE_FILTER)             += vf_convolve.o framesync.o
+ OBJS-$(CONFIG_DEDOT_FILTER)                  += vf_dedot.o
++OBJS-$(CONFIG_DEEPDVC_DRV_CUDA_FILTER)       += vf_deepdvc_drv_cuda.o rtx_cuda.o
+ OBJS-$(CONFIG_DEFLATE_FILTER)                += vf_neighbor.o
+ OBJS-$(CONFIG_DEFLICKER_FILTER)              += vf_deflicker.o
+ OBJS-$(CONFIG_DEINTERLACE_D3D12_FILTER)      += vf_deinterlace_d3d12.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 6704a9cd06..592b33dfb0 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -249,6 +249,7 @@ extern const FFFilter ff_vf_deblock;
+ extern const FFFilter ff_vf_decimate;
+ extern const FFFilter ff_vf_deconvolve;
+ extern const FFFilter ff_vf_dedot;
++extern const FFFilter ff_vf_deepdvc_drv_cuda;
+ extern const FFFilter ff_vf_deflate;
+ extern const FFFilter ff_vf_deflicker;
+ extern const FFFilter ff_vf_deinterlace_qsv;
+diff --git a/libavfilter/vf_deepdvc_drv_cuda.c b/libavfilter/vf_deepdvc_drv_cuda.c
+new file mode 100644
+index 0000000000..f442f05249
+--- /dev/null
++++ b/libavfilter/vf_deepdvc_drv_cuda.c
+@@ -0,0 +1,300 @@
++/*
++ * Copyright (C) 2026 Philip Langdale <philipl@overt.org>
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * Color/vibrance-enhancement filter driving the NVIDIA *driver* DeepDVC network
++ * (= "RTX Dynamic Vibrance"; the DXVA/PPE plugin nvaidvcx.dll,
++ * ppe/features/DeepDVC).  Sibling of vf_vsr_drv_cuda / vf_truehdr_drv_cuda: the
++ * plugin's cubins were extracted and the forward pass reverse-engineered by
++ * running it on Linux via loader_ppe and intercepting the live CUDA Driver-API
++ * launches.  dvc_drv_cuda_gen.h encodes how the whole graph (grids, scratch
++ * allocations, packed arg-buffer scalars, weight-upload targets, pointer fixups)
++ * scales with the frame W,H -- derived and validated by the rtxv.fit pipeline.
++ * The filter evaluates that at config time and replays the graph with libcuda;
++ * no DLL is needed at run time.  The replay machinery itself is rtx_cuda.c.
++ *
++ * DeepDVC is an HDRnet-style learned enhancer: a small CNN
++ * (surfaceToDownsampleHalfTensor -> instanceNorm2d/k_conv_fp16_nhwc/mean/
++ * finalConv_kernel_temporal) predicts a coefficient grid (mergeLUT_kernel) that
++ * applyLUTToSurface applies at full resolution.  It is SAME-RESOLUTION and
++ * IN-PLACE: applyLUTToSurface reads (TLD) and writes (SUST) one image handle, and
++ * surfaceToDownsampleHalfTensor reads that same frame -- so the whole graph binds
++ * a single frame texture (unified TEXMODE lets one texture handle serve both the
++ * sample and the surface store; a surface handle there fails the TLD).
++ *
++ * Two tunables, both a final blend strength applied in applyLUTToSurface (so
++ * vibrance=0 is an exact identity/pass-through): vibrance (params 0x10 -> arg
++ * 0x20) and gain (params 0x14 -> arg 0x24).  RGBA8 in/out.
++ *
++ * The cubins and the weights blob are external files (the "data" option),
++ * extracted from the proprietary driver and not shipped with FFmpeg.
++ */
++
++#include "libavutil/hwcontext.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/pixdesc.h"
++
++#include "avfilter.h"
++#include "filters.h"
++#include "rtx_cuda.h"
++#include "video.h"
++
++/* Generated by rtx-video-re from the proprietary NVIDIA library, and
++ * installed rather than carried here -- located, together with the cubins and
++ * weights it names, through pkg-config (see configure's nvfdata_* checks). */
++#include <dvc_drv_cuda_gen.h>
++
++FF_RTX_ASSERT_MODULE_LAYOUT(DvcModule);
++FF_RTX_ASSERT_FUNC_LAYOUT(DvcFunc);
++FF_RTX_ASSERT_UPLOAD_LAYOUT(DvcGenUpload);
++FF_RTX_ASSERT_LAUNCH_LAYOUT(DvcGenLaunch);
++
++/* applyLUTToSurface arg-buffer offsets of the two tunable floats (params
++ * 0x10/0x14; a final blend strength).  applyLUTToSurface is the last launch. */
++#define DVCDRV_APPLY_VIBRANCE_OFF 0x20
++#define DVCDRV_APPLY_GAIN_OFF     0x24
++
++typedef struct DvcDrvCudaContext {
++    const AVClass *class;
++
++    FFRtxCuda   r;
++    FFRtxImage *frame;                ///< the one in-place frame image
++
++    int W, H;                         ///< frame size (in == out)
++    int cfg;                          ///< index into dvcdrv_configs
++
++    const FFRtxPixFmt *pf;
++
++    float vibrance;                   ///< applyLUTToSurface arg 0x20 (params 0x10)
++    float gain;                       ///< applyLUTToSurface arg 0x24 (params 0x14)
++    int   experimental_arch;          ///< allow the unverified non-Blackwell path
++    char *data_dir;
++} DvcDrvCudaContext;
++
++#define OFFSET(x) offsetof(DvcDrvCudaContext, x)
++#define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
++
++static const AVOption deepdvc_drv_cuda_options[] = {
++    /* Both are a final blend strength in applyLUTToSurface.  1.0 = the driver's
++     * default (byte-exact with the captured graph); 0 = identity/pass-through;
++     * higher = stronger saturation.  vibrance is the primary control. */
++    { "vibrance", "vibrance strength (0=off/identity, 1=default, higher=stronger)",
++      OFFSET(vibrance), AV_OPT_TYPE_FLOAT, {.dbl=1.0}, 0, 8, FLAGS },
++    { "gain", "secondary saturation gain (1=default)",
++      OFFSET(gain), AV_OPT_TYPE_FLOAT, {.dbl=1.0}, 0, 8, FLAGS },
++    /* All cubins are multi-arch fatbins.  The 5 k_conv layers share one name and
++     * couldn't be paired across a major boundary by the fatbin repack's heuristic,
++     * so they originally carried only sm_120+sm_121.  Their genuine sm_86/sm_89
++     * slices were captured on real hardware (loader_ppe RTXV_CAPS) and injected by
++     * load order via `rtxv inject` -- byte-identical to the DLL.
++     * Blackwell (cc 12.x) is validated byte-exact; Ada (cc 8.9) is verified on an
++     * RTX 4060 Ti (all 15 modules load, 27 launches, byte-identical cubins to the
++     * DLL).  Still opt-in since only sm_89 was exercised on real Ada silicon. */
++    { "experimental_arch", "allow other sub-Blackwell arches (sm_89/Ada does not need this; needs injected per-arch k_conv cubins)",
++      OFFSET(experimental_arch), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
++    { "data", "directory with extracted driver DeepDVC cubins + weights.bin",
++      OFFSET(data_dir), AV_OPT_TYPE_STRING,
++      {.str=DVCDRV_DEFAULT_DATA_DIR}, 0, 0, FLAGS },
++    { NULL }
++};
++
++AVFILTER_DEFINE_CLASS(deepdvc_drv_cuda);
++
++FF_RTX_ASSERT_PRIV_LAYOUT(DvcDrvCudaContext);
++
++/* The glue kernels carry sm_75/80/86/89/120/121 (sm_80 serves Ampere/Ada via
++ * minor-version compat); the five k_conv layers carry sm_86/89/120/121, their
++ * sm_86/sm_89 slices captured on real hardware and injected by load order.  An
++ * Ampere/Ada card without those injected slices would fail at module load. */
++static const FFRtxArchGate dvcdrv_gate = {
++    .gate_msg =
++        "deepdvc_drv_cuda is validated on Blackwell (cc 12.x) and Ada (cc 8.9); "
++        "this GPU is cc %d.%d.  Other Ampere/Ada needs per-arch k_conv cubins "
++        "injected and is unverified -- set experimental_arch=1 to attempt it.\n",
++    .warn_msg =
++        "deepdvc_drv_cuda: EXPERIMENTAL sub-Blackwell (cc %d.%d) path -- other "
++        "Ampere/Ada need their k_conv slices injected "
++        "(`rtxv inject`) or module load will fail.\n",
++};
++
++/* ------------------------------------------------------------------------- *
++ * One-time graph setup for the selected config + W,H (context current).
++ * ------------------------------------------------------------------------- */
++static void fill_sizes(AVFilterContext *ctx, long long *sz)
++{
++    DvcDrvCudaContext *s = ctx->priv;
++    dvcdrv_fill_allocs(s->cfg, s->W, s->H, s->W, s->H, sz);
++}
++
++static int setup_graph(AVFilterContext *ctx)
++{
++    DvcDrvCudaContext *s = ctx->priv;
++    const DvcConfig *c = &dvcdrv_configs[s->cfg];
++    DvcGenUpload *up;
++    int ret, nup, li;
++
++    if ((ret = ff_rtx_arch_gate(ctx, &s->r, &dvcdrv_gate, s->experimental_arch)) < 0)
++        return ret;
++    if ((ret = ff_rtx_load_modules(ctx, &s->r, s->data_dir,
++                                   (const FFRtxModule *)c->modules, c->nmod, DVCDRV_MAX_MID,
++                                   (const FFRtxFunc *)c->funcs, c->nfunc, DVCDRV_MAX_FID,
++                                   NULL)) < 0)
++        return ret;
++    if ((ret = ff_rtx_alloc_arena(ctx, &s->r, c->nalloc, fill_sizes, 0)) < 0)
++        return ret;
++
++    up = av_calloc(c->nupload, sizeof(*up));
++    if (!up)
++        return AVERROR(ENOMEM);
++    nup = dvcdrv_fill_uploads(s->cfg, s->W, s->H, s->W, s->H,
++                              (const dvcdrv_devptr *)s->r.alloc, up);
++    ret = ff_rtx_upload_weights(ctx, &s->r, s->data_dir, "weights.bin",
++                                (const FFRtxUpload *)up, nup);
++    av_freep(&up);
++    if (ret < 0)
++        return ret;
++
++    /* Single in-place frame image.  SURFACE_LDST so applyLUTToSurface's SUST
++     * store is valid; the texture (linear/normalized/wrap, matching the loader)
++     * feeds both the sample reads and the surface store via one bindless
++     * handle. */
++    s->frame = ff_rtx_image_array(ctx, &s->r, s->W, s->H, s->pf->cufmt,
++                                  FF_RTX_TEX | FF_RTX_LDST);
++    if (!s->frame)
++        return AVERROR_EXTERNAL;
++
++    if ((ret = ff_rtx_alloc_launches(ctx, &s->r, c->nlaunch, sizeof(DvcGenLaunch))) < 0)
++        return ret;
++    /* DeepDVC is in-place: both I/O fixups are the one frame texture, so it is
++     * passed as both the tex and the surf handle.  The casts are only
++     * `unsigned long long *` vs `uint64_t *` on LP64. */
++    if (dvcdrv_fill_graph(s->cfg, s->W, s->H, s->W, s->H,
++                          (const dvcdrv_devptr *)s->r.alloc,
++                          (dvcdrv_devptr)s->frame->tex, (dvcdrv_devptr)s->frame->tex,
++                          s->r.launches) != c->nlaunch) {
++        av_log(ctx, AV_LOG_ERROR, "generated fill disagrees with the config tables\n");
++        return AVERROR_BUG;
++    }
++
++    /* Tunables: patch the two blend floats on applyLUTToSurface (params 0x10/0x14
++     * -> arg 0x20/0x24).  Default 1.0 == the captured graph (byte-exact); 0 =
++     * identity/pass-through. */
++    li = ff_rtx_find_launch(&s->r, (const FFRtxFunc *)c->funcs, c->nfunc,
++                            "applyLUTToSurface");
++    if (li < 0) {
++        av_log(ctx, AV_LOG_ERROR, "no applyLUTToSurface launch for config %s\n", c->tag);
++        return AVERROR_BUG;
++    }
++    {
++        uint8_t *a = ff_rtx_launch_at(&s->r, li)->params;
++        memcpy(a + DVCDRV_APPLY_VIBRANCE_OFF, &s->vibrance, 4);
++        memcpy(a + DVCDRV_APPLY_GAIN_OFF,     &s->gain,     4);
++        av_log(ctx, AV_LOG_VERBOSE,
++               "applyLUTToSurface tunables: vibrance=%g gain=%g (launch %d)\n",
++               s->vibrance, s->gain, li);
++    }
++
++    av_log(ctx, AV_LOG_INFO,
++           "driver DeepDVC graph ready: %s  %dx%d  (%d launches, %d buffers)\n",
++           c->tag, s->W, s->H, s->r.nlaunch, s->r.nalloc);
++    return 0;
++}
++
++/* ------------------------------------------------------------------------- *
++ * Per-frame: copy the frame into the in-place image, replay the graph, copy out.
++ * ------------------------------------------------------------------------- */
++static int filter_frame(AVFilterLink *inlink, AVFrame *in)
++{
++    DvcDrvCudaContext *s = inlink->dst->priv;
++    /* In place: the graph reads and enhances the one frame image.  psize is the
++     * kernel's own cbank size, NOT the captured argsize. */
++    const FFRtxFrameOp op = {
++        .in_img = s->frame,  .iW = s->W, .iH = s->H, .ibpp = s->pf->bpp,
++        .out_img = s->frame, .oW = s->W, .oH = s->H, .obpp = s->pf->bpp,
++        .flags = FF_RTX_OP_PSIZE,
++    };
++
++    return ff_rtx_filter_frame(inlink, in, &s->r, &op, NULL);
++}
++
++static int config_output(AVFilterLink *outlink)
++{
++    AVFilterContext *ctx = outlink->src;
++    AVFilterLink *inlink = ctx->inputs[0];
++    DvcDrvCudaContext *s = ctx->priv;
++    AVHWFramesContext *in_frames_ctx;
++    /* DeepDVC's format selectors are not mapped, so the network is driven as raw
++     * 4-channel 8-bit in the array's byte order and cannot be told to swap.  It
++     * is a learned per-channel colour enhancer, so a B-first frame would be
++     * enhanced as if blue were red -- accept only the R-first rows and let the
++     * caller insert a conversion, rather than silently hue-shifting.  The output
++     * is always the input format. */
++    const FFRtxFormats fmts = {
++        .in_tbl = ff_rtx_packed_rgb_fmts, .n_in = FF_RTX_N_RGB8_R_FIRST,
++        .hint   = "use rgb0/rgba",
++    };
++    int ret;
++
++    /* This can run again on a link reconfigure or a graph rebuild; drop the
++     * previous graph first so the rebuild neither leaks nor inherits stale
++     * device pointers. */
++    ff_rtx_free_graph(ctx, &s->r);
++
++    if ((ret = ff_rtx_config_formats(ctx, inlink, &fmts, &in_frames_ctx,
++                                     &s->pf, NULL)) < 0)
++        return ret;
++
++    s->W = inlink->w;
++    s->H = inlink->h;
++
++    s->cfg = dvcdrv_config_index(0, 0);
++    if (s->cfg < 0) {
++        av_log(ctx, AV_LOG_ERROR, "no DeepDVC config\n");
++        return AVERROR(ENOSYS);
++    }
++
++    if ((ret = ff_rtx_bind_device(ctx, &s->r, in_frames_ctx)) < 0)
++        return ret;
++    if ((ret = ff_rtx_config_hwframes(ctx, outlink, &s->r, s->W, s->H, s->pf->f)) < 0)
++        return ret;
++    return ff_rtx_setup(ctx, &s->r, "driver DeepDVC", setup_graph);
++}
++
++static const AVFilterPad deepdvc_drv_cuda_inputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .filter_frame = filter_frame },
++};
++
++static const AVFilterPad deepdvc_drv_cuda_outputs[] = {
++    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_output },
++};
++
++const FFFilter ff_vf_deepdvc_drv_cuda = {
++    .p.name        = "deepdvc_drv_cuda",
++    .p.description  = NULL_IF_CONFIG_SMALL("NVIDIA driver RTX Dynamic Vibrance / DeepDVC (CUDA)"),
++    .p.priv_class  = &deepdvc_drv_cuda_class,
++    .priv_size     = sizeof(DvcDrvCudaContext),
++    .uninit        = ff_rtx_uninit,
++    FILTER_INPUTS(deepdvc_drv_cuda_inputs),
++    FILTER_OUTPUTS(deepdvc_drv_cuda_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};

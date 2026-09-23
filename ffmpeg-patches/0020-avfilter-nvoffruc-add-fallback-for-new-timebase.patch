@@ -1,0 +1,31 @@
+From 0abbcdbdc4a3d6668bf1fc6022b2e2dffafa7922 Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Sun, 12 Apr 2026 15:01:07 -0700
+Subject: [PATCH] avfilter/nvoffruc: add fallback for new timebase being unexpressible
+
+In some situations the derived timebase can be unexpressible using an
+AVRational, if the denominator is larger than an int. Today this causes the new
+timebase to collapse to 0/1, which is unusable. In such situations, fall back
+to using 1/frame_rate as this is significantly better than nothing.
+---
+ libavfilter/vf_nvoffruc.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/libavfilter/vf_nvoffruc.c b/libavfilter/vf_nvoffruc.c
+index a10bb61655..2b7c487dfa 100644
+--- a/libavfilter/vf_nvoffruc.c
++++ b/libavfilter/vf_nvoffruc.c
+@@ -576,6 +576,13 @@ static int config_output(AVFilterLink *outlink)
+                              (int64_t)s->srce_time_base.den * s->dest_frame_rate.den ),
+                       (int64_t)s->srce_time_base.den * s->dest_frame_rate.num, INT_MAX);
+ 
++    if (!s->dest_time_base.num || !s->dest_time_base.den) {
++        // LCM of source time base and dest frame interval exceeded INT_MAX;
++        // fall back to the inverse of the dest frame rate as the time base.
++        exact = av_reduce(&s->dest_time_base.num, &s->dest_time_base.den,
++                          s->dest_frame_rate.den, s->dest_frame_rate.num, INT_MAX);
++    }
++
+     av_log(ctx, AV_LOG_INFO,
+            "time base:%u/%u -> %u/%u exact:%d\n",
+            s->srce_time_base.num, s->srce_time_base.den,

@@ -1,0 +1,133 @@
+From dac4bc75862e3f635c674a58249fa066ebb6902c Mon Sep 17 00:00:00 2001
+From: Philip Langdale <philipl@overt.org>
+Date: Fri, 31 Jul 2026 15:59:09 +0800
+Subject: [PATCH] configure: find an installed nvidia-video-filters package
+
+The RTX Video filters that follow are generated code over data this tree does
+not contain and cannot produce: the *_cuda_gen.h that describes each captured
+kernel graph, and the cubins and weights it names, are extracted from the
+proprietary NVIDIA libraries by an out-of-tree tool and installed into a prefix
+that describes itself with an nvidia-video-filters.pc.  Nothing here ships or
+extracts them.
+
+The package existing is only half the answer.  Each feature comes from a
+different NVIDIA library, so an install routinely holds some and not others, and
+a filter whose data is absent must not be built rather than built to fail at run
+time.  So the umbrella check only picks up the cflags, and each feature is
+probed separately for both halves -- its generated header has to compile, and
+the data directory named by the .pc has to exist -- giving one nvfdata_* per
+feature for the filters to depend on.
+---
+ configure | 71 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 71 insertions(+)
+
+diff --git a/configure b/configure
+index f2896b81c7..2a6d0e9725 100755
+--- a/configure
++++ b/configure
+@@ -363,6 +363,10 @@ External library support:
+   --enable-mmal            enable Broadcom Multi-Media Abstraction Layer (Raspberry Pi) via MMAL [no]
+   --disable-nvdec          disable Nvidia video decoding acceleration (via hwaccel) [autodetect]
+   --disable-nvenc          disable Nvidia video encoding code [autodetect]
++  --disable-nvidia-video-filters
++                           disable the RTX Video filters, whose kernels, weights and
++                           generated headers come from an installed
++                           nvidia-video-filters package [autodetect]
+   --enable-rkmpp           enable Rockchip Media Process Platform code [no]
+   --disable-v4l2-m2m       disable V4L2 mem2mem code [autodetect]
+   --disable-vaapi          disable Video Acceleration API (mainly Unix/Intel) code [autodetect]
+@@ -2146,6 +2150,7 @@ HWACCEL_AUTODETECT_LIBRARY_LIST="
+     libdrm
+     nvdec
+     nvenc
++    nvidia_video_filters
+     vaapi
+     vdpau
+     videotoolbox
+@@ -2668,6 +2673,22 @@ TYPES_LIST="
+     struct_mfxConfigInterface
+ "
+
++# One entry per RTX Video feature whose data an installed nvidia-video-filters
++# package provides.  The features are independent -- extracting VSR does not give
++# you TrueHDR, and each comes from a different proprietary NVIDIA library -- so
++# "the package is installed" is not enough to build any particular filter, and
++# each filter depends on its own entry here rather than on the package.
++NVIDIA_VIDEO_FILTER_DATA_LIST="
++    nvfdata_dlpp_drv
++    nvfdata_dvc_drv
++    nvfdata_isr
++    nvfdata_smoothmotion
++    nvfdata_truehdr
++    nvfdata_truehdr_drv
++    nvfdata_vsr
++    nvfdata_vsr_drv
++"
++
+ HAVE_LIST="
+     $ARCH_EXT_LIST
+     $(add_suffix _external $ARCH_EXT_LIST)
+@@ -2679,6 +2700,7 @@ HAVE_LIST="
+     $HEADERS_LIST
+     $INTRINSICS_LIST
+     $MATH_FUNCS
++    $NVIDIA_VIDEO_FILTER_DATA_LIST
+     $SYSTEM_FEATURES
+     $SYSTEM_FUNCS
+     $SYSTEM_LIBRARIES
+@@ -7193,6 +7215,55 @@ if enabled ffnvcodec; then
+     check_cpp_condition ffnvcodec_cuarray ffnvcodec/dynlink_loader.h "defined(CUDA_ARRAY3D_VIDEO_ENCODE_DECODE)"
+ fi
+
++# The RTX Video filters are generated code over data this tree does not contain.
++# Both halves -- the *_cuda_gen.h describing the kernel graph, and the cubins and
++# weights it names -- are extracted from the proprietary NVIDIA libraries by
++# rtx-video-re and installed into a prefix, which describes itself with a
++# nvidia-video-filters.pc.  Nothing here ships or extracts them.
++#
++# The package existing is only half the answer.  Each feature comes from a
++# different NVIDIA library, so an install routinely holds some and not others,
++# and a filter whose data is absent must not be built rather than built to fail
++# at run time.  So the umbrella check just gets the cflags, and each feature is
++# probed separately below.
++if ! disabled nvidia_video_filters; then
++    check_pkg_config nvidia_video_filters "nvidia-video-filters" "" ""
++fi
++
++# One feature: <name in the .pc> <its generated header> <the macro that header
++# must define>.  Both halves are checked.  The header has to compile, and the
++# macro pins that it is a *generated* header rather than something else of that
++# name earlier on the include path -- it is the compiled-in default for the
++# filter's `data` option, so it is exactly the thing the filter needs from it.
++# The data directory is checked through the .pc's own variable rather than
++# assembled here, because its name carries the NVIDIA library version.
++#
++# The nvf_ prefixes are not decoration: sh has no local scope, and `datadir` is
++# one of configure's own PATHS_LIST variables -- the one behind FFMPEG_DATADIR.
++# Assigning it here would quietly redefine where FFmpeg believes its installed
++# data lives.
++check_nvidia_video_filter_data(){
++    nvf_feature=$1
++    disable nvfdata_$nvf_feature
++    nvf_datadir=$($pkg_config --variable=${nvf_feature}_datadir nvidia-video-filters)
++    if test -z "$nvf_datadir" || test ! -d "$nvf_datadir"; then
++        log check_nvidia_video_filter_data: "no data dir for $nvf_feature"
++        return 1
++    fi
++    check_cpp_condition nvfdata_$nvf_feature "$2" "defined($3)"
++}
++
++if enabled nvidia_video_filters; then
++    check_nvidia_video_filter_data dlpp_drv    dlpp_drv_cuda_gen.h    DLPPDRV_DEFAULT_DATA_DIR
++    check_nvidia_video_filter_data dvc_drv     dvc_drv_cuda_gen.h     DVCDRV_DEFAULT_DATA_DIR
++    check_nvidia_video_filter_data isr         isr_cuda_gen.h         ISR_DEFAULT_DATA_DIR
++    check_nvidia_video_filter_data smoothmotion smoothmotion_cuda_gen.h SM_DEFAULT_DATA_DIR
++    check_nvidia_video_filter_data truehdr     truehdr_cuda_gen.h     TRUEHDR_DEFAULT_DATA_DIR
++    check_nvidia_video_filter_data truehdr_drv truehdr_drv_cuda_gen.h TRUEHDRDRV_DEFAULT_DATA_DIR
++    check_nvidia_video_filter_data vsr         vsr_cuda_gen.h         VSR_DEFAULT_DATA_DIR
++    check_nvidia_video_filter_data vsr_drv     vsr_drv_cuda_gen.h     VSRDRV_DEFAULT_DATA_DIR
++fi
++
+ check_cpp_condition winrt windows.h "!WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)"
+
+ if ! disabled w32threads && ! enabled pthreads; then
