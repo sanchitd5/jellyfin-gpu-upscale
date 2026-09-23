@@ -1342,6 +1342,38 @@ does), not a context/thread problem at all.
      `Process` (`0x18002a1f0`), any `cuLaunchKernel`. Next: call `obj->vtbl[0]` Init, then build the
      `0x44`-byte params struct for `Process` (quality `+0x0c`, level 0-4, width/height `+0x20/+0x24`,
      formats `+0x28..+0x34`) and watch which host slots it hits.
+   - **2026-09-23, step 1.4 part 2: first real `cuLaunchKernel` - 19 launches, output NOT yet
+     produced.** rtx-video-re `0f88ce7`, `./pe_map nvaivpx.dll --aivp-process 960,540,1920,1080`
+     (logs `aivp5..9.log` on CT114).
+     - `Init` needs no separate call: `CreateInstance` already runs `obj->vtbl[0]` Init internally
+       (slot 1 shape above). The 333/53/53/333 CUDA work is Init's.
+     - `Process` = outer slot 2, called `process(h, din, dout, NULL, NULL, params)`, params 0x44 B:
+       `+0x00`=0x44, `+0x0c` level 0, `+0x10` 1.0f, `+0x20/+0x24` 960x540, `+0x28/+0x2c` 1920x1080,
+       `+0x30/+0x34` fmt 0x20/0x20. Returns 0, `cuCtxSynchronize` rc=0.
+     - New host slots during Process: `8` (`0x48`) = **kernel launch**, shape from gdb at two call
+       sites (`ctx, CUfunction, argbuf, argsize, bx,by,bz, gx,gy,gz, s11, s12`), argbuf passed via
+       `CU_LAUNCH_PARAM_BUFFER_POINTER`. s11 low dword = dynamic smem (0x2880..0x6080 on convs, 0
+       on dlpp_*), s12 host ptr, not a CUstream (stream passed NULL). `12` (`0x68`) x2, unnamed,
+       returning 0 works. `1`/`3` also fire (allocs).
+     - Launch sequence (all rc=0): `dlpp_preProcess` grid 120x68 block 8x8 args 0x48 ->
+       `dlpp_pixelFold` 1020x1 / 64 -> `all_fuse_with_pooling_fp16_*`, `conv2d_v4_fp16_*`,
+       `hfuse_with_pooling_*`, `upsampling_with_conv2d_fp16_*` (launches 2-16) ->
+       `conv3x3_fuse_conv1x1_with_pixel_shuffle4_bilinearAndSRBlockBicubic2_tile8x16_64_32_warp221`
+       grid 1x1020 block 64 -> `dlpp_postProcess` grid 240x135 block 8x8 args 0x50.
+     - preProcess args: `{src=din, dst=DLL buf, 0x21c/0x3c0 (540/960), 0x220/0x3c0 (544/960 padded)}`;
+       postProcess args: `{src=DLL buf, dst=dout, 0x780x0x440 (1920x1088), 0x780x0x438 twice}`.
+     - Data probes (sync + DtoH 64 KiB after the kernel): preProcess **did real work** - src is our
+       RGBA test card (`00 00 19 ff`), dst holds fp16 `0xbc00` (= -1.0, i.e. 0 mapped to [-1,1]).
+       But postProcess src is ~all zero (136/65536 nonzero) and **dout is still the 0x55 poison
+       after postProcess + sync** (8294400/8294400 bytes untouched). So: kernels launch, the network
+       tail feeds zeros, and postProcess writes nothing to our buffer.
+     - Not verified / open: why the conv chain ends in zeros (candidates, none tested: s12 is a real
+       stream/event the DLL expects, host slot 12 needs a real return, weights uploaded to wrong
+       dst, `+0x08..+0x0b` flags / `+0x38` field unset); why postProcess skips its writes (maybe a
+       flag word in its args, or it writes via something other than the raw ptr). No comparison with
+       bilinear done - there is no output to compare. **This is not a capture yet; 1.5 not started.**
+     - Next: probe each launch's dst (only for args whose qword 0/1 are device ptrs - blind DtoH on
+       pixelFold's non-pointer arg0 segfaulted) to find the first kernel whose output goes to zero.
 
 ## Track C: integration, once a data dir exists
 
