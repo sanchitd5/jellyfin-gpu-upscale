@@ -2239,6 +2239,48 @@ case, run at minimum: one non-16-aligned width (e.g. 854x480), one non-exact-rat
 and check for correctness (no crash, no garbage, output actually looks upscaled), not just
 absence of error.
 
+## Track B: DLPP, `vf_dlpp_spike` ffmpeg integration, network genuinely on (2026-09-23)
+
+**Verdict: works end to end, GPU-resident, with the real network producing output, and the
+already-recorded gain reproduces through the real ffmpeg filter, not just the standalone
+harness.** This closes agent 14's review points 8 and 9 (filter never tested with the network
+on; GPU-resident proofs never re-run under a genuine network path).
+
+| Task | Result | Key finding |
+|---|---|---|
+| 1: build `vf_dlpp_spike` | Done | Copied `vf_aivp_spike.c`/`aivp_embed.[ch]` to `dlpp_embed.[ch]`/`vf_dlpp_spike.c` in `~/dev/rtx-video-re/ffmpeg-spike/`, targeting `nvdlppx.dll` via `run_dlpp()` (DLPP's own IID) and its 0x50-byte param struct. Both fixes baked in as unconditional defaults, not env knobs: `params+0x10=0.0` always, `params+0x38` auto-derived from actual output width/input width (not a separate knob a user could set inconsistently) and only written for `level>=3`. `level` (1-4, default 1) is a filter option. Registered as `dlpp_spike` in the scratch tree: needed three build-system edits beyond `build.sh`'s existing sed pattern, all now folded into `build.sh` itself -- `ffbuild/config.mak` (`CONFIG_DLPP_SPIKE_FILTER=yes`, `EXTRALIBS` extended with `libdlpp_embed.a`), `config_components.h` (`#define CONFIG_DLPP_SPIKE_FILTER 1`, since `./configure` doesn't know the name and the AIVP entry was hand-added the same way), and `libavfilter/filter_list.c` (the actual unconditional array `av_filter_iterate()` walks -- the `allfilters.c` extern alone never runs the filter without an entry here). `-filters` confirms `dlpp_spike` registers. |
+| 2: verify end to end, network genuinely on | Done | `-hwaccel cuda -hwaccel_output_format cuda` decode of a real 1920x1080 library file (Rick and Morty S09E06, the exact frame at `-ss 900` already used for `gt_rm6.rgba` -- confirmed by md5 match, `0685c3423435736f124e95728e8b67d0`, before running it through the filter) -> `dlpp_spike=level=1` -> `h264_nvenc`/`-f null`. Clean, no crash. Scored the filter's own dumped output (via a CPU-side 960x540 downscale bridge matching the harness's exact in/out ratio, since no `scale_cuda` filter exists in this scratch build) against `gt_rm6.rgba`: **PSNR rgb=36.070 y=37.623**, vs agent 5's harness-measured 36.548/38.140 for the same content/level -- within 0.5 dB, confirming the gain reproduces through the real filter, not a harness artifact. |
+| 3: re-verify GPU-resident preset requirements | Done | Ran the full remaining episode unattended (10,790 frames, `-frames:v` placement bug let it run past the intended 300) at native 1920x1080->3840x2160 (level 1, real network, `h264_nvenc` encode): steady-state **113 fps**. `copy_count.so` shim: HtoD stayed at 525 (all at `CreateInstance`) for the entire run, DtoH stayed at 0 throughout -- zero per-frame host<->device copies holds with the real network on, at scale, not just for a few warm-up frames. DtoD grew (expected: the PTX nv12<->rgba kernels and NVENC's own device-side copies), never HtoD/DtoH. |
+
+VERIFIED (commands + on CT114):
+- `-filters` lists `dlpp_spike`: `SCRATCH: RTX DLPP super-resolution (nvdlppx) via the loader, GPU-resident`.
+- Same frame as existing gt: fresh extraction at `-ss 900` from the exact EDITH release file matches `gt_rm6.rgba` md5 exactly.
+- Score through the real filter: `l1_rm6_thruf: finite=True var=3329.161 PSNR(lanczos) rgb=36.070 y=37.623`, via the existing `score_dlpp5.sh`, no new scoring code.
+- Zero-copy at scale: `copy_count: HtoD=525(4638624B) DtoH=0(0B) ...` after 10,790 frames of real network + NVENC.
+- Level 3 (native-scale field auto-derived, 3x/5760x3240) also ran 40 frames clean, no crash, mirroring agent 3's field-set-avoids-crash finding through the real filter path.
+- No disruption: `ps -eo pid,etime,args | grep ffmpeg` before and after showed only Jellyfin (PID 548311, idle) and an unrelated build loop (PID 301669, different directory) throughout.
+
+ASSUMED / not reached: the 0.5 dB gap between the filter's measured PSNR and the harness's recorded
+value was not root-caused (candidates: the CPU-side 960x540 bridge's scale filter defaults vs
+whatever the harness's own extraction used, or minor rounding in the real NVDEC decode path vs the
+pre-extracted rgba buffer) -- close enough to call the gain reproduced, not close enough to call
+it exact. `scale_cuda` isn't built into this scratch ffmpeg, so the 960x540 downscale for the
+scoring run went through a host round-trip (`hwdownload,scale,hwupload_cuda`) instead of staying
+GPU-resident end-to-end for that one test frame; this does not affect the zero-copy claim, which
+is about the filter's own per-frame loop (verified separately, at full native res, with no
+downscale bridge at all). Levels 2/4 and other content sources were not re-run through the real
+filter (level 1 and level 3 on one source stands in for both fixes; TASK.md's standalone-harness
+results already cover per-level/per-content variation).
+
+Commits: `rtx-video-re` (new `dlpp_embed.h`, `dlpp_embed.c`, `vf_dlpp_spike.c`, updated
+`build.sh`). `jellyfin-gpu-upscale` (this TASK.md update).
+
+Next step: this is close to ready for the plugin's 5-place checklist. What's still open: deciding
+the shipped default level (1 vs 3/4, per the existing content-dependent ranking caveat),
+`scale_cuda` or an equivalent GPU-resident downscale for cases where the plugin wants an SR ratio
+other than what NVDEC hands the filter directly, and the non-16-aligned/non-integer-ratio/small-res
+correctness pass this file already calls out as a precondition before shipping.
+
 ## Definition of done
 
 A served Jellyfin segment comes back upscaled by a real NVIDIA network, with an fps number recorded
