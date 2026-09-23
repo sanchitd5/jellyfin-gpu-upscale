@@ -22,13 +22,23 @@ Each of these is reusable by every feature below:
 
 | # | Feature | Source | Status | What it gives ffmpeg |
 |---|---|---|---|---|
-| 1 | RTX VSR (`vsr_drv_cuda`) | `nvaivpx.dll` / AIVP | Runs. Blocked on L17 (network output unused) | Neural upscaling for 720p to 1080p/4K transcodes. The main target |
-| 2 | Bypass resampler (`AIVP_FLAGS=0x100`) | same DLL | **Works**: 43.93 dB vs 41.66 dB bilinear, 0.08 ms/frame | A GPU scaler better than bilinear, usable now. A fallback level while L17 is open |
+| 1 | RTX VSR (`vsr_drv_cuda`) | `nvaivpx.dll` / AIVP | Runs. 13 rounds of host-side work (TASK.md/TASK.L17.md) narrowed the blocker to L17's own constant bias term, not fixed. Stays on the table as an option; see status note below | Neural upscaling for 720p to 1080p/4K transcodes. The main target |
+| 2 | Bypass resampler (`AIVP_FLAGS=0x100`) | same DLL | **Works**: 43.93 dB vs 41.66 dB bilinear, 0.08 ms/frame | A GPU scaler better than bilinear, usable now. The interim path while #1's neural output is unresolved |
 | 3 | RTX Video HDR (TrueHDR, SDR to HDR) | `truehdr_drv_cuda` in the patch series | Not started | SDR library shown as HDR10 on HDR TVs. Stock ffmpeg has nothing like it |
 | 4 | RTX Dynamic Vibrance (DeepDVC) | `deepdvc_drv_cuda` in the patch series | Not started | Neural colour and vibrance enhancement. Small and low risk |
-| 5 | DLPP | `nvdlppx.dll` | Not started | A sibling SR network. A fallback route for #1 if AIVP stays gated |
+| 5 | DLPP (`dlpp_drv_cuda`) | `nvdlppx.dll` | **In progress.** Now the active alternate route to real neural VSR, explored in parallel with #1, not a fallback held in reserve. Same host-callback/CUDA-launch pattern as AIVP; whether it hits the same kind of network-output blocker is not yet known | A second path to the same goal as #1: neural upscaling, in case AIVP's L17 blocker doesn't resolve |
 | 6 | NGX DLISR | `nvngx_dlisr.dll` | Init works, stuck at the `CreateFeature` trap | Image SR on fixed 256x256 tiles. Mainly de-risking |
 | 7 | Frame interpolation (NVOFFRUC / SmoothMotion) | patches 0010-0023 | Patches exist, never built | 24 to 48/60 fps motion smoothing on the GPU |
+
+**RTX VSR (#1) status, 2026-09-23:** 13 host-side agent rounds (TASK.md Track B "L17 agent 1-13",
+detail in `TASK.L17.md`) confirmed the network genuinely computes on real feature data, but L17's
+output is dominated by its own constant bias term regardless of any argbuf field, field
+combination, or allocation layout tried so far; no fix transfers between the two test frames. The
+bypass path (#2) already beats bicubic and ships as the interim option; it does not replace this
+goal. Two efforts are running in parallel to unblock it: DLPP (#5) as an alternate route to the
+same neural-VSR goal, and a public-research pass checking whether documented NVIDIA behaviour
+(Control Panel quality levels, driver-side gating) explains the blocker. Both are **in progress**;
+this file will be updated once either reports back, not before.
 
 ## Shared infrastructure
 

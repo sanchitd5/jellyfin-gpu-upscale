@@ -105,6 +105,142 @@ work already done. The bypass fallback (`AIVP_FLAGS=0x100`, GPU-resident, alread
 ships in parallel as the interim path, it does not replace this goal. See `TASK.md` Track C / the
 GPU-resident preset for the bypass path.
 
+## Review (agent 14, fresh eyes)
+
+Reviewed TASK.L17.md and TASK.md's full "L17 agent 1" through "L17 agent 13" entries, plus the
+earlier CreateInstance/PPE-interface work and the ffmpeg-hosting shortcut, and read `aivp.c`'s
+`aivp_process()` directly on the Mac loader checkout. No new CT114 runs. Nine points below (1-6
+from the original brief, 7-9 added after a scope correction mid-review to cover the full
+vsr_drv_cuda effort, not just the L17 bias sweeps).
+
+1. **Bilinear-baseline contradiction: confirmed gap, not resolved, only noted.** The "external
+   design note" entry (TASK.md ~line 1506) flags the PSNR script reading bilinear at 48.80 dB
+   against an earlier 41.66 dB, and says to reconcile before scoring. No later agent entry
+   reconciles it by name; agent 7 instead defines a new canonical scorer
+   (`analysis/t17/score.py`) and reports fresh bicubic numbers (34.699/32.929 frame 1200,
+   35.341/34.705 frame 3130) without explaining the earlier 48.80-vs-41.66 discrepancy. The
+   canonical-scoring paragraph in this file's "Where it stands" section admits "Bilinear/bypass
+   were not scored under this method on all frames" — i.e. the gap was carried forward, not
+   closed. Next test: re-run whichever script produced 48.80 dB against the same
+   `in_001200.rgba`/GT pair `score.py` now uses, and diff the two scorers line by line (crop,
+   channel weights, clipping) until the numbers agree or the discrepancy is explained.
+
+2. **Untested integer-range/value gaps: confirmed gap.** The full `[3..16]` integer sweep (agent
+   13) was run on only `+0x3a8`/`+0x44`, the two fields that showed the largest single-field gain
+   on frame 1200. It was never run on the other fields agent 9/12 found to move the score at all
+   (`+0x150`, `+0x40`, `+0x48`, `+0x58`, `+0x68`, `+0x1a4`, `+0x200`, `+0xa8`, `+0xdc`, `+0x1e0`,
+   etc. — the 21-field list in `analysis/b6/improving_fields.tsv`), including `+0x150`, which
+   agent 12 found is actually the *best single field on frame 3130*, better than `+0x3a8` there.
+   So the one field with the best cross-frame signal never got the level-code sweep at all. Also,
+   no agent dumped AIVP's internal per-level weight-select table (the `this+0x70+8*L` model
+   pointer array from the CreateInstance-era disassembly) to find a real non-round constant used
+   internally; every tested value was one we chose (0/1/-1/0.5/2/3/4/8/15/16/32/64/100), not one
+   read out of the DLL's own tables. Next test: `[3..16]` (and beyond) on `+0x150` specifically,
+   on both frames, before ruling out a level-code interpretation.
+
+3. **Assumptions never independently re-verified: confirmed gap, two instances.** (a) `fmt=0x20`
+   for RGBA8 is flagged "Assumed, not verified... colours come out right, so plausible" at the
+   first real-output milestone and was never revisited by later agents — no one tried a different
+   format code as a sweep value the way `+0x10` eventually was. (b) The level-0-remaps-to-4
+   `cmove` was read once from one disassembly pass; combined with "all 5 levels give
+   byte-identical output," no agent checked whether the per-level model-select path
+   (`this+0x70+8*L`) is itself short-circuited (e.g. always resolving to the same cached model
+   pointer) versus genuinely loading different weights that just happen to produce identical
+   pixels for this content. Both are treated as settled fact downstream (level sweeps, "level"
+   framing in agent 13) without a second look.
+
+4. **preProcess-input-biasing lead: confirmed gap, never followed up.** Agent 11 explicitly named
+   this as the next idea ("check L17's *input* preprocessing... for a field that could be biasing
+   what L17 sees, rather than continuing to search L17's own or postProcess's argbufs"). Agents 12
+   and 13 both stayed inside L17's own argbuf (combo search, frame cross-check) or moved to
+   postProcess/slot 12/level-code framing. Neither touches `dlpp_preProcess`'s argbuf (launch 1)
+   at all past agent 6's tail-decode, which only characterized two dimension fields, not a sweep
+   for a bias-injecting field. This is a real, unexplored gap, not a dead end — it is the one
+   suggested next step from the L17-specific rounds that was never attempted.
+
+5. **Harness's own hardcoded Process-param fields: confirmed gap, one new concrete instance.**
+   Read `aivp_process()` in `~/dev/rtx-video-re/loader/aivp.c` in full. Every top-level Process
+   param write: `+0x00=0x44` (struct size, structural), `+0x0c=g_plevel` (level, already swept
+   1-4), `+0x10=1.0f` (the known split-fraction scaffolding bug, `AIVP_F10` overrides it),
+   `+0x20/+0x24/+0x28/+0x2c` = input/output W/H (structural, independently confirmed live by
+   agent 6), `+0x30=g_pfin`, `+0x34=g_pfout` (pixel format in/out), `+0x38` only written if
+   `AIVP_F38` env is set (else stays 0 from zero-init, already tested by agent 4). `g_pfin`/
+   `g_pfout` are the same class of bug as `+0x10`: values **we** hardcode from a CLI default,
+   never reverse-engineered from the DLL, never swept as a candidate the way `+0x10` eventually
+   was — they are exactly the "assumed fmt=0x20" from point 3, and the harness write of them was
+   never flagged as a candidate field in its own right. Next test: sweep `+0x30`/`+0x34` (i.e.
+   `g_pfin`/`g_pfout`) across other plausible DXGI/CUDA format codes with network on, the same way
+   `+0x10` was swept once someone noticed it was our own scaffolding.
+
+6. **Frame/content choice: not a gap, a valid methodology flag.** Both CT114 test frames come
+   from one already-decent 1080p library source downscaled to 960x540, then compared against that
+   same 1080p as GT. Agent 8 found bicubic itself scores 47.20 dB with a 16px border cropped vs
+   34.70 dB full-frame uncropped, i.e. the canonical score is border-dominated — a real
+   demonstration that this scoring setup is noisy/dominated by edge effects, which supports the
+   concern. No new run needed to say this, but it is a real risk: a genuinely-working but *small*
+   residual could be sitting below this setup's noise floor on this specific content, and would
+   show up more clearly on synthetic high-frequency patterns or genuinely low-quality/compressed
+   source, which is also closer to VSR's real intended use case. Worth raising before concluding
+   "the network never helps" rather than "the network doesn't help *measurably, on this content*."
+
+7. **Early pipeline (pre-L17) work: mostly solid, one real gap found, confirmed via
+   independent-check evidence.** The CreateInstance/`ppeGetExportTable`/`ppeGetVersion` chain was
+   reversed against the *host's own* binary (`nvppex.dll`) disassembly, not guessed from the
+   feature DLL alone, and cross-checked with a byte-identical 16-byte GUID match on both sides —
+   this is about as verified as reverse engineering gets and was not just assumed. Slots 1
+   (CreateInstance) and 2 (Process) are confirmed by direct disassembly; slots 3 and others are
+   explicitly still marked "weakly characterized... not confirmed," which is honest, not
+   overclaimed, and those slots don't feed frame data to L17 so they're not implicated in the bias
+   problem regardless. The surface/texture-object fix (step 1.4 part 2) was verified with a
+   synthetic test card (correct geometry/colour, ~bilinear on a flat card) and *re-verified* on
+   real content afterward (preProcess probe showing correctly-decoded real pixel values, not the
+   earlier broken all-`-1.0` raw-pointer read). Agent 8's numpy re-implementation of L17, fed
+   L16's *actual dumped output* from the real DLL run, independently supports that upstream data
+   (through L16) is real and non-degenerate. **The actual gap:** launches 3-15 — `dlpp_pixelFold`,
+   `all_fuse_with_pooling_fp16_*`, `conv2d_v4_fp16_*`, `hfuse_with_pooling_*`,
+   `upsampling_with_conv2d_fp16_*`, the entire conv-chain body between preProcess and L16 — were
+   never individually dumped or plausibility-checked at any point across all 13 agents. Only
+   preProcess, L16 (agent 8's dump target), L17, and postProcess were ever probed. If something in
+   that middle stretch is subtly wrong (wrong channel order, a saturated intermediate, a layer
+   silently no-op'd the way L17's conv path initially looked skipped), it would look exactly like
+   "L17 ignores good input," and nobody has ruled it out layer-by-layer. Concrete next test: dump
+   one intermediate buffer per launch 3-15 (DtoH on the first pointer-shaped arg, same method
+   agent 8's L16 dump and the early per-launch probes already used) and sanity-check each for
+   non-degenerate statistics (nonzero fraction, range, not-all-identical), the same bar already
+   applied to preProcess/L16/L17/postProcess.
+
+8. **`vf_aivp_spike` ffmpeg-hosting shortcut: confirmed gap — the actual neural-on path was never
+   run through the filter.** Every `vf_aivp_spike`/shortcut-assumption verification
+   (`AIVP_THREAD`, `AIVP_PRIMARY`, `AIVP_STREAM`, real-stream, no-LD_PRELOAD, the 400/440 fps
+   numbers, the zero-alloc-after-init proof) checked md5 against either `AIVP_FLAGS=0x100`
+   (explicit bypass, md5 `6d9a012a`) or default "flags 0" (md5 `b3c5094c`). `b3c5094c` is the same
+   md5 reported elsewhere as the **network-off** baseline (e.g. the `AIVP_ARENA` test: "network-off
+   md5 unchanged (`b3c5094c`)") — it is the default-`+0x10=1.0` case where the network covers zero
+   columns, not `AIVP_F10=0` (md5 `25c94c00`), which is what every L17 bias-hunting agent actually
+   used as "network on." So the filter integration and the actual (broken) neural path have never
+   been run together: nobody has confirmed the filter's threading/context/stream setup behaves
+   identically with `AIVP_F10=0` set, where the network's 19 launches actually feed into the split
+   region. Given the launch sequence and count are the same regardless of the split value, this is
+   probably fine, but it is asserted, not verified — flag it before treating the filter shortcut
+   as validated for a genuinely-fixed neural path later.
+
+9. **GPU-resident preset requirements: same gap as #8, one level up.** All of the GPU-resident
+   proof categories (zero per-frame `cuMemcpyHtoD`/`DtoH`, `journalctl` command check, PCIe
+   near-zero, flat CPU/RSS) were measured under the same `flags 0`/bypass runs as #8, never with
+   `AIVP_F10=0`. The `AIVP_ARENA` contiguous-buffer change (agent 10, committed by agent 13) was
+   tested only in the standalone `pe_map` harness, never inside `vf_aivp_spike` or under the
+   GPU-resident preset's pooled-buffer requirement (Track C item 4). If a future L17 fix needs
+   `AIVP_ARENA`-style contiguous allocation to matter, or changes which buffers Process touches per
+   frame, the current zero-alloc/zero-HtoD numbers measured under bypass are not guaranteed to
+   hold once the network genuinely contributes. Not urgent (no working neural fix exists yet to
+   re-measure against) but worth re-proving once one does, not assumed to carry over.
+
+**Most promising concrete gap:** point 4 (preProcess never swept for a bias-injecting field) and
+point 7 (launches 3-15 never dumped/plausibility-checked) are the two live, unexplored leads —
+point 7 is the deeper one, since it questions whether "L17 ignores good input" is even the right
+frame, versus "something upstream of L16 is already degenerate and L17 is just the layer where it
+became visible."
+
 ## Access reference (unchanged from TASK.md / lookups)
 
 - CT114: `ssh -o ConnectTimeout=10 -p 2298 root@192.168.1.2 'pct exec 114 -- bash -c "..."'`
