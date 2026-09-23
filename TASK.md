@@ -1403,6 +1403,39 @@ does), not a context/thread problem at all.
      - **1.5 can start**: the capture path (19 launches, names, grids, argbufs, weight uploads) is
        reproducible. Before sweeping: run one real video frame (extract with jellyfin-ffmpeg) and
        diff vs bilinear, to prove the residual is nonzero on real content; fix the x=1919 column.
+   - **2026-09-23, real-content test: network contribution is ZERO. 1.5 blocked on this.**
+     rtx-video-re `b5d4c7a` (`AIVP_INPUT`/`AIVP_OUT`/`AIVP_SKIP`/`AIVP_DUMP`, `loader/cmp_real.py`).
+     Input: two frames of a 1080p library file (HotD S03E01 @12:00, @31:30), extracted read-only
+     with stock jellyfin-ffmpeg to `/root/rtxv-spike/loader/frames/` (CT114 only, never in a repo),
+     area-downscaled to 960x540; the 1080p frame is ground truth (GT).
+     - **Level remap (static, `0x18002a2d4..2f3`):** `+0x0c` level L: `L == 0 → 4` (`cmove` at
+       `0x18002a2ec`), else used as-is, model = `this+0x70+8*L` (`this+0x70` itself = cached active
+       model). No bound check seen, so only 1..4 are safe. Launch counts: l1 17, l2 8, l3 17, l4 19,
+       l0 = l4 (19).
+     - **All 5 levels give byte-identical output** (md5 `9b650b38` frame 12:00, `3a52343f` 31:30).
+       Frame 31:30: vs bilinear 39.42 dB (MAD 0.58), vs GT 37.37 dB; bilinear vs GT 41.66 dB. So the
+       19-launch path is *worse* than bilinear against GT.
+     - **Decisive:** `AIVP_SKIP=2-16` (don't launch the whole network) → output md5 identical
+       (`ee94b532…`), and L17's output buffer (alloc#337, full 0xff0000 B dumped as fp16) has per-ch
+       mean |net-skip| = `[0. 0. 0. 0.]`. L17 (`conv3x3_fuse_conv1x1_with_pixel_shuffle4_bilinearAndSRBlockBicubic2_…`)
+       ignores its `+0` feature input (alloc#335+0x7f8000, L16's output, which *does* hold real,
+       changing data). Weights/biases feeding L17 are nonzero (`+0x8` 18395/18432 nz, `+0x250`
+       6129/6144 nz). Changing `+0x38` (0.5/1/2), `+0x3c`/`+0x40` (1.0), `+0x10` does not bring the
+       network in (skip == net in every case).
+     - **Flags `+0x08..+0x0b` do matter on real input** (earlier "no effect" was with the broken raw-ptr
+       input): `+0x09 = 1` → only 2 launches (preProcess + postProcess, network bypassed) and it is
+       the best result: **vs GT 43.93 dB (> bilinear 41.66), HF 1.93 vs bilinear 1.31, GT 3.42**, and
+       the last column is correct. `+0x08 = 1` → vs GT 36.22; `+0x0a = 1` → 39.32; `+0x0b = 1` → same as
+       unset. With every flag set, skip == net still holds.
+     - **x=1919 column (item 2):** not a surface/pitch/addressing bug. Same in/out surfaces, same
+       postProcess grid (240x135 x 8x8 = 1920x1080) give a correct last column (R `30 28 27` vs GT
+       `~29 27 28`) on the `+0x09` bypass path. The constant (R 117 on the default path, 46 with
+       `+0x0a`) only appears when L17 runs, so it is in L17's edge handling. Not fixed.
+     - **Blocker:** why L17 discards the network features. Nothing here returns an error; every
+       launch rc=0. Untested candidates: host slot 12 (`0x68`, x2, unnamed, returns 0) might be what
+       binds/enables the residual branch; the L17 argbuf field `4670000000000001` / the tail floats
+       `4000000000000003 000000043f000000` (2.0f, 0.5f); s12 as a real stream/event.
+     - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
 
 ## Track C: integration, once a data dir exists
 
