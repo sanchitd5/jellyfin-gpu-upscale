@@ -1302,6 +1302,46 @@ does), not a context/thread problem at all.
      proxy wraps (19 slots at `nvppex.dll+0x410c10`, the CUDA/alloc services AIVP needs from us),
      then the `nvppex.dll+0x4b4f0` slot-2 call site to name rdx/r8/r9/s5. None of that is run yet;
      all of the above is static disasm.
+   - **2026-09-23, host callback table decoded (static, partial).** Layout + dispatch known, semantics not:
+     - `nvppex.dll+0x410c10` = `{u64 size=0xa0, fn[19]}`: 19 fn ptrs at `+0x08..+0x98`, `+0x88`/`+0x90` NULL.
+       Each fn = 2-insn thunk `mov (%rcx),%rax; jmp *off(%rax)` → call on a C++ host object's vtable.
+       Map hostCb off → host vtbl off: 08→00, 10→10, 18→18, 20→20, 28→28, 30→30, 38→38, 40→40,
+       48→48, 50→50, 58→60, 60→68, 68→70, 70→78, 78→70, 80→78, 98→08 (thunks at `0x18004a780..a880`,
+       `0x18004a790`). 78/80 repeat 70/78 → likely second object/base, unconfirmed.
+     - Host object: ctor `nvppex.dll+0x48920` (ex-"handle from `call 0x180048920`" at call site 0x4ad41),
+       vtbl `0x1800fa578`, 18 entries: `48dd0 48de0 48b20 48dc0 48df0 48d00 48bf0 49340 48e00 48fe0 48f50
+       48f80 48db0 48d90 48d60 48da0 48d80 48d70` (+`48f40`), fields `+0x8/+0xc/+0x10` = ctor edx/r8d/r9d,
+       `+0x18/+0x20` = stack args, two 0x100-byte buffers at `+0x78/+0x88`. Several slots are `ret`/`ret 0`
+       stubs (`48d60..48db0`); `48fe0` goes through global backend obj `0x180713a38` (`+0x28`, `+0x40`).
+     - AIVP proxy vtbl `0x180202db0` (19 thunks, `jmp *off(hostCb)`) proxy slot → hostCb off:
+       0→08, 1→98, 2→10, 3→18, 4→20, 5→28, 6→30, 7→38, 8→40, 9→48, 10→50, 11→? (`0x180056c90`, not
+       read), 12→58, 13→60, 14→68, 15→70, 16→78, 17→80, 18→88 (NULL in host table!). Slot 18 hitting a
+       NULL entry → AIVP must not call it on this path, or host fills it later. Unverified.
+     - **Semantics not named.** Static tracing of each host fn goes 2-3 indirections deep into the backend
+       object; cheaper route: run under `librtxv_interpose.so` with a hook logging which hostCb slot fires
+       and which `cu*` calls follow. Next: that, then slot-2 call site `nvppex.dll+0x4b4f0`.
+   - **2026-09-23, step 1.4 part 1 DONE: `CreateInstance` returns 0 on CT114 with real CUDA behind it.**
+     `~/dev/rtx-video-re/loader/aivp.c` (commit `cc19704`, `./pe_map nvaivpx.dll --aivp`). Log-only
+     host table first (every slot logs args, returns a configurable value), then slots named from live
+     logs, not static tracing:
+     - `0` (`0x08`) SM version: returns `major*10+minor`. Returning 0 → `CreateInstance` fails
+       `0xffffffc18`; 86 → proceeds.
+     - `1` (`0x10`) alloc(size, flags, out) → `cuMemAlloc_v2`.
+     - `3` (`0x20`) handle → device pointer. Found via gdb at its call site (`call *0x20(%rax)`, result
+       stored as the buffer address). Returning 0 made every later HtoD dst NULL. Identity, since our
+       handle is the `CUdeviceptr`.
+     - `6` (`0x38`) module load(elf, size, out): a1 always ELF (`7f 45 4c 46`) inside the image →
+       `cuModuleLoadData`.
+     - `7` (`0x40`) get function(module, name, out): names real kernels (`dlpp_preProcess`,
+       `dlpp_postProcess`, `all_fuse_with_pooling_fp16_*`, `upsampling_with_conv2d_fp16_*`) →
+       `cuModuleGetFunction`.
+     - `9` (`0x50`) HtoD(dst, src, size): src inside image, 0x8..0x4800 bytes = weight upload →
+       `cuMemcpyHtoD_v2`.
+     Result: 333 allocs, 53 module loads, 53 functions, 333 weight uploads, zero CUDA errors, handle
+     non-NULL. Other slots never fired during `CreateInstance`. Not yet: `Init` (`0x1800295a0`),
+     `Process` (`0x18002a1f0`), any `cuLaunchKernel`. Next: call `obj->vtbl[0]` Init, then build the
+     `0x44`-byte params struct for `Process` (quality `+0x0c`, level 0-4, width/height `+0x20/+0x24`,
+     formats `+0x28..+0x34`) and watch which host slots it hits.
 
 ## Track C: integration, once a data dir exists
 
