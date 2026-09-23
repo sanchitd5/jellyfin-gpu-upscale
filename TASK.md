@@ -2203,6 +2203,42 @@ copy.
 - Do not fabricate a data directory, substitute another feature's weights, or stub a graph to make
   something pass.
 
+## Track B: DLPP, arbitrary/non-standard resolution plan (2026-09-23)
+
+**Not yet tested.** Every DLPP result so far (agents 1-5, the ffmpeg spike) used one exact 2x
+ratio, 960x540 -> 1920x1080. Real Jellyfin sources will not all be a clean multiple of the target,
+and this needs a plan before shipping, not discovery in production. Three separate concerns, each
+answered differently by what the real independently-verified `ffmpeg-patches` series already
+documents:
+
+1. **Non-exact output ratio** (e.g. 542p source, or any source/target pair that is not an exact
+   2x/3x/4x). `ffmpeg-patches/0006`'s own comment: "Base models (q1/q2)... fast when out==2x, else
+   resample. The high-quality models (q3/q4) do native integer upscaling... only the exact-Nx fast
+   path is shipped for them." The DLL's own launch chain already contains a real resample kernel,
+   `dlpp_ResampleAndComposeFP16` (format selector at params `+0x50`, per `rtx_dlpp_abi.h`), for
+   exactly this case. We do not need to build our own resize glue; we need to confirm the DLL
+   selects/accepts it correctly when driven live (Route A) with a non-exact oW/oH, since every
+   live test so far has only ever supplied an exact match.
+2. **Alignment/padding** (e.g. 854-wide 480p, not a multiple of 16). Every padded dimension seen
+   in the argument buffer so far (`540` -> `544`) was computed and reported BY THE DLL, never
+   supplied by us. The working assumption: pass the real, unpadded W/H, and make sure our own
+   buffer allocation is generous (round up + a guard region, the same purpose `AIVP_ARENA`'s guard
+   already serves) rather than pre-padding ourselves, since the DLL appears to own that
+   computation. Untested against a genuinely non-16-aligned width.
+3. **Very small resolutions** (480p and below). No evidence either way yet.
+
+**Cross-check found while researching this:** the pixel-format field agent 15 found empirically
+at Process params `+0x30` (where `0x1c` beat the accidental `0x20` default) matches
+`FF_DLPP_PRE_FMT_OFF = 0x30` in `rtx_dlpp_abi.h`, a real documented format-selector offset, with
+siblings at `0x40` (postProcess) and `0x50` (the resample kernel). Independent confirmation that
+agent 15's black-box method was finding the real mechanism, not a coincidence.
+
+**Before shipping:** once the `vf_dlpp_spike` ffmpeg integration is verified at the standard 2x
+case, run at minimum: one non-16-aligned width (e.g. 854x480), one non-exact-ratio request (e.g.
+542p source upscaled to a size that is not an integer multiple), and one small resolution (480p),
+and check for correctness (no crash, no garbage, output actually looks upscaled), not just
+absence of error.
+
 ## Definition of done
 
 A served Jellyfin segment comes back upscaled by a real NVIDIA network, with an fps number recorded
