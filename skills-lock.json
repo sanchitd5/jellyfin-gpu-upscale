@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "senior-computer-vision": {
+      "source": "alirezarezvani/claude-skills",
+      "sourceType": "github",
+      "skillPath": "engineering-team/skills/senior-computer-vision/SKILL.md",
+      "computedHash": "c954ac42858565c5b2e79f25d52c63e6f14844c0f04c8126c70dd6da2a7df305"
+    }
+  }
+}
