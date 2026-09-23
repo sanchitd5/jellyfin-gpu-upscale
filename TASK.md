@@ -190,6 +190,11 @@ re-scope, not a reason to keep pushing the same wall.
      not ship one.
 2.6. Ship off by default, honest unverified-arch string in `-filters` output (same pattern
      `vf_dlss.c` already uses for its DEGRADED label).
+2.7. **GPU-resident preset (user requirement, added 2026-09-23).** An additional preset option,
+     beside the normal path: when `vsr_drv_cuda` runs under it, decoded frames never touch system
+     RAM. NVDEC -> filter -> NVENC entirely in VRAM, GPU compute only. CPU/RAM carry only what
+     cannot move: demux, audio, kernel-launch calls, compressed bitstream in and out. See
+     "GPU-resident preset" under Track C for the requirements and how to prove it.
 
 **Phase 3 - prove it, per this project's own recurring failure mode**
 3.1. Audit the full chain end-to-end, not assumed: `panel -> localStorage -> addParams ->
@@ -1458,6 +1463,44 @@ does), not a context/thread problem at all.
    chain builder has to emit it.
 7. Ships off by default with the unverified-arch status in its `-filters` description, the same way
    `vf_dlss.c` honestly says DEGRADED.
+
+### GPU-resident preset (user requirement, added 2026-09-23)
+
+An additional preset option, not a replacement for the normal path. Under it, `vsr_drv_cuda` runs
+with decoded frames resident in VRAM from decode to encode: no frame is ever copied to system RAM,
+and the per-frame work is GPU compute. Irreducible CPU/RAM use is accepted and nothing more:
+demux/mux, audio, kernel-launch calls, compressed bitstream in and out.
+
+Requirements:
+
+1. **Decode on the GPU.** `-hwaccel cuda -hwaccel_output_format cuda`, so NVDEC frames stay in VRAM.
+2. **Format conversion inside the filter.** NVDEC gives nv12/p010 and NVENC takes the same, but
+   Process wants RGBA8 in CUDA surface/texture objects (found in step 1.4 part 2). The filter
+   carries two CUDA kernels: nv12/p010 -> RGBA into the input surface, RGBA -> nv12/p010 out of
+   the output surface. This replaces the `scale_cuda` in item 6 for this preset and absorbs the
+   linear-to-array copy.
+3. **Weights uploaded once.** The 333 `cuMemcpyHtoD_v2` weight uploads happen at CreateInstance.
+   Create the instance once per session, never per frame.
+4. **No per-frame allocation.** Buffers Process allocates through host slot 0x10 are pooled and
+   reused, not `cuMemAlloc`'d every frame.
+5. **ffmpeg's stream, no global sync.** Pass the `AVCUDADeviceContext` stream as launch arg `s12`
+   instead of NULL, and drop the per-frame `cuCtxSynchronize`, so the CPU never blocks on a frame.
+6. **No CPU hop anywhere in the chain.** The built command carries no `hwdownload`/`hwupload` and
+   no software filter. When the preset is on and something would force a hop (CPU filter,
+   subtitle burn-in, a codec NVDEC cannot decode), the engine either refuses the preset for that
+   session or accepts the hop and reports it in the session record. Never silently.
+7. **Chaining with the Vulkan filters** (libplacebo) needs Vulkan<->CUDA sharing with no download;
+   see `vulkan-cuda-hwmap-task.md` and `hw-resident-encode-plan.md`.
+
+Proof (all four, per session):
+
+- Interposer counts per frame after init: zero `cuMemcpyHtoD*` and zero `cuMemcpyDtoH*`.
+- `journalctl -u jellyfin | grep vsr_drv`: the built command has no `hwdownload`/`hwupload`.
+- `nvidia-smi dmon -s t` shows PCIe rx/tx near zero during the run.
+- ffmpeg process CPU and RSS stay flat during a transcode, not scaling with resolution or fps.
+
+Holds for both routes: codegen (we write the filter) and loader-in-ffmpeg (DLL host slots only
+issue launches; the interposer count must prove no frame data crosses the bus).
 
 ## Guardrails
 
