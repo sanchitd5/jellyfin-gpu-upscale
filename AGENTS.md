@@ -11,8 +11,13 @@ sharpening and denoising. It works by runtime-patching Jellyfin with Harmony, be
 exposes no plugin hook for the video filter graph.
 
 It started as libplacebo GLSL user shaders alone. It is now two things: those shaders, plus **five
-custom ffmpeg video filters** carried by a separately built binary beside the stock one. Both halves
-reach the same command line and compose, so a change in one can silently alter the other.
+mandatory custom ffmpeg video filters** carried by a separately built binary beside the stock one.
+Both halves reach the same command line and compose, so a change in one can silently alter the
+other. Two more filters, `dlpp_rtcuda` and `vsr_rtcuda`, exist in the same binary and build clean
+(commits `82bab39`, `fc999dd`) but are opt-in (`WITH_RTXDLPP`/`WITH_RTXVSR`, off by default), not
+part of the mandatory five, and NOT yet wired into the plugin's 5-place checklist below or into
+`UpscaleEngine` at all - see `TASK.md` ("Track B: DLPP", "Track C"), `RTXDLPP.md`, `RTXVSR.md`, and
+`INTEGRATION_DESIGN.md` for the proposed wiring.
 
 Layout:
 
@@ -28,7 +33,12 @@ scripts/                install, inject, activate/rollback, build-ffmpeg.sh
 ```
 
 Per-filter background lives in [OIDN.md](OIDN.md), [OPTIX.md](OPTIX.md), [NEURAL.md](NEURAL.md),
-[FSR2.md](FSR2.md) and [DLSS.md](DLSS.md); deployment in [INSTALL.md](INSTALL.md).
+[FSR2.md](FSR2.md) and [DLSS.md](DLSS.md); deployment in [INSTALL.md](INSTALL.md). The two opt-in
+filters live in [RTXDLPP.md](RTXDLPP.md) and [RTXVSR.md](RTXVSR.md); the retired Maxine VSR
+investigation (superseded by `vsr_rtcuda`) is in [VSR.md](VSR.md). Active investigation and
+findings for both tracks are in `TASK.md`; the retired AIVP neural-path investigation is in
+`TASK.L17.md`; the GPU-residency roadmap this filter/backend map feeds is in
+[roadmap/](roadmap/driver-features.md) and [roadmap/gpu-only-filters.md](roadmap/gpu-only-filters.md).
 
 ## Invariants — do not break these
 
@@ -86,15 +96,21 @@ hook points decide and file order is irrelevant. This is why Anime4K + RCAS shar
 enlarging regardless of how the file is composed — that pairing was measured and kept because it
 still beat CAS-after, but the reasoning must be checked, not assumed, whenever a shader is added.
 
-**10. The patched ffmpeg binary is separate, and all five filters must survive a rebuild.**
-`vf_oidn`, `vf_optix`, `vf_ort`, `vf_fsr2` and `vf_dlss` live in a binary beside the stock
-`jellyfin-ffmpeg`, which is never modified. The shim routes a session there only when it asks for a
-filter that binary alone provides, and it asks the binary which filters it actually carries, stripping
-chain nodes it lacks. So a rebuild that quietly drops a `vf_*.c` degrades to unenhanced playback
-rather than failing every session, which means **nothing will tell you it happened**. Check `-filters`
-after every rebuild. `scripts/proxmox-build.sh` keeps the previous binary at `<binary>.prev` on
-success as well as on failure, so there is something to fall back to when a build lists all five
-filters and one of them then fails against the driver.
+**10. The patched ffmpeg binary is separate, and all five mandatory filters must survive a
+rebuild.** `vf_oidn`, `vf_optix`, `vf_ort`, `vf_fsr2` and `vf_dlss` live in a binary beside the
+stock `jellyfin-ffmpeg`, which is never modified. The shim routes a session there only when it
+asks for a filter that binary alone provides, and it asks the binary which filters it actually
+carries, stripping chain nodes it lacks. So a rebuild that quietly drops a `vf_*.c` degrades to
+unenhanced playback rather than failing every session, which means **nothing will tell you it
+happened**. Check `-filters` after every rebuild. `scripts/proxmox-build.sh` keeps the previous
+binary at `<binary>.prev` on success as well as on failure, so there is something to fall back to
+when a build lists all five filters and one of them then fails against the driver. The opt-in
+`dlpp_rtcuda`/`vsr_rtcuda` filters build into the same binary but are not in this mandatory set and
+not in the shim's own `PATCHED_FILTERS` tuple yet - compiled and present via `-filters` is not the
+same as reachable from a real session; see `TASK.md` for that gap. The shim also re-probes the
+binary's filter list per invocation, keyed by its mtime/size, and fails open to stock ffmpeg on any
+problem - so a binary swap needs no Jellyfin restart to go live, which cuts the other way too: a
+broken rebuild degrades every session silently the moment it's staged, restart or not.
 
 **Presence is not capability, and the two binaries differ in BOTH directions.** The probe asks which
 filters exist. It cannot ask whether one runs. `nlmeans_vulkan` exists in both binaries and, until
@@ -201,6 +217,14 @@ Objective metrics disagree with each other on this content, and each can be game
   back.
 - **Trusting a level name over a measurement.** The shader shipped as `CAS-low` was, at its gentlest
   setting, already a strong sharpener that overshot ground-truth detail by 15%.
+- **A doc-side instance of "renders, is stored, and is never sent."** `ARCHITECTURE.md` said
+  optix's CUDA-hw-frame conversion (Tier 1) was "not yet scoped" for a full day after commit
+  `61d6798` actually did it and verified it. The work was real and committed; the reference doc
+  describing it was not updated in the same commit and nobody re-read it before relying on it. Same
+  failure shape as the missing `neural` param - the change was correct, the audit trail was not, and
+  it would have read as three unrelated confusions to anyone diagnosing "why does ARCHITECTURE.md
+  disagree with what the code does." Re-read the doc, not a summary of it, before trusting a
+  "not yet done" claim in this repo.
 
 ## Operational care
 

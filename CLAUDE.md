@@ -41,6 +41,17 @@ Fourteen axes reach the ffmpeg command: `upscale`, `sr`, `deblur`, `denoise`, `d
 `game`, `refine`, `chroma`, `deband`, `kernel`, `jitter`, `depth`, `reactive`. Each travels as a
 lowercase query parameter through `StreamOptions`.
 
+Two more filters, `dlpp_rtcuda` and `vsr_rtcuda`, build into that same binary and are verified
+GPU-resident, but they are opt-in, not in the mandatory five, and touch none of the fourteen axes
+above yet - the plugin's 5-place checklist for them (below) hasn't been started. Before working on
+either, read `TASK.md` ("Track B: DLPP", "Track C") and `INTEGRATION_DESIGN.md` for what's proposed
+and what's still open, not just this file.
+
+The NVIDIA Maxine VFX SDK video-super-resolution filter (`vf_vsr.c`) is retired as a neural target
+(`VSR.md`'s RETIRED banner, build flag renamed `WITH_VSR` -> `WITH_MAXINE_VSR`) - `vsr_rtcuda` above
+is the live replacement under the same "VSR" name, and the two are not interchangeable in docs or
+build flags.
+
 **Nothing here pre-processes video.** The source file is never read-and-rewritten; enhancement
 happens inside the transcode. A batch pass was planned and dropped for exactly this: it would have
 written a second copy of every processed item into the library. See the programme in

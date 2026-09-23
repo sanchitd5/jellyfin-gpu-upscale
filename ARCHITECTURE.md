@@ -34,8 +34,10 @@ A session running `denoise=optix` + `neural=ort` pays that round trip twice befo
 
 | Filter | Backend | Notes |
 |---|---|---|
-| `vf_optix.c` (`optix`, `optix-temporal` denoise) | **CUDA**, own `cu_ctx` | Zero Vulkan involvement. Pushes/pops its own CUDA context per frame. |
-| `vf_ort.c` (`ort` neural SR) | **CUDA** via ONNX Runtime `CUDA_V2` execution provider | Falls back to CPU if the CUDA EP is unavailable at session init (logged, not silent). Zero Vulkan involvement. |
+| `vf_optix.c` (`optix`, `optix-temporal` denoise) | **CUDA**, own `cu_ctx` | Zero Vulkan involvement. Reads/writes `AV_PIX_FMT_CUDA` hw frames directly (commit `61d6798`) - no more `cuMemcpyHtoD`/`cuMemcpyDtoH` round trip through system memory, reuses ffmpeg's own `AVCUDADeviceContext`. Verified: real decode->optix->NVENC run with no hwupload/hwdownload anywhere in the graph, 140 real frames, PSNR 47.7dB/SSIM 0.998 against source. This is Tier 1 item 2 for optix, done. |
+| `vf_ort.c` (`ort` neural SR) | **CUDA** via ONNX Runtime `CUDA_V2` execution provider | Falls back to CPU if the CUDA EP is unavailable at session init (logged, not silent). Zero Vulkan involvement. Still reads/writes system-memory `gbrpf32le` frames - the `61d6798` hw-frame conversion was done for `optix` only; `vf_ort.c` is NOT yet converted. This is Tier 1 item 2's still-open half. |
+| `vf_dlpp_rtcuda.c` (`dlpp_rtcuda`, opt-in neural SR route, see `RTXDLPP.md`) | **CUDA**, self-contained PE32+ loader hosting `nvdlppx.dll` at run time (`gu_dlpp_*` files) | Genuinely different architecture from every other row in this table: links no NVIDIA SDK at compile time, instead maps a user-supplied driver DLL directly. GPU-resident, verified zero per-frame host<->device copies at 113fps native 1080p->4K (commit `82bab39`). Opt-in (`WITH_RTXDLPP`), not in the mandatory five-filter list, not yet wired into `UpscaleEngine.Option()` or the plugin's 5-place checklist. |
+| `vf_vsr_rtcuda.c` (`vsr_rtcuda`, opt-in fast resampler route, see `RTXVSR.md`) | **CUDA**, same PE32+ loader architecture hosting `nvaivpx.dll` at run time | Hardcoded to bypass mode only - the network path was removed entirely, not gated; AIVP's own neural path is dead (see `TASK.L17.md`, "Status: RETIRED"). GPU-resident (commit `fc999dd`). Opt-in (`WITH_RTXVSR`), not in the mandatory five-filter list, not yet wired into `UpscaleEngine.Option()` or the plugin's 5-place checklist. |
 | `vf_dlss.c` (`dlss`, `dlaa` game upscalers) | **Vulkan**, explicitly - see the file's own header comment: "through NGX's Vulkan path" | Stays Vulkan - checked 2026-09-22 and the installed NGX SDK does not offer a CUDA path for this feature. `NGX_SDK/include/nvsdk_ngx_helpers_cuda.h` only wraps `NVSDK_NGX_Feature_ImageSignalProcessing` (DLISP, NVIDIA's older sharpen/denoise filter - a different feature from DLSS SR). `NVSDK_NGX_Feature_SuperSampling`, the feature `vf_dlss.c` actually uses, has helper wrappers only in `nvsdk_ngx_helpers_d3d.h` and `nvsdk_ngx_helpers_vk.h` - never CUDA, anywhere in this SDK. Binds to a single `VkDevice` per process (see the file's `ngx_claim` comment) - only one `dlss` instance can run at a time as a result. |
 | `vf_fsr2.c` (`fsr2` game upscaler) | Vulkan compute, shares `gu_inputs.h` infrastructure with `vf_dlss.c` | |
 | `vf_oidn.c` (`oidn`, `oidn-fast` denoise) | CPU by default; device selectable (`device=cpu/default/...`) | GPU-side OIDN was measured and deliberately not adopted - see `improvements.md`, "Already tested and deliberately not re-proposed." |
@@ -52,12 +54,17 @@ See `hw-resident-encode-plan.md` for the full writeup, findings so far:
    Smoke-tested and confirmed failing on CT114, 2026-09-22.
 2. **Every CPU-side node boundary**: bigger in aggregate than (1). Each of `oidn`/`optix`/`ort`/
    `fsr2`/`dlss` round-trips system memory independently, regardless of (1). Not yet measured.
-3. **CUDA-to-CUDA sidestep**: `optix` and `ort` are already pure CUDA and could in principle chain
-   `AV_PIX_FMT_CUDA` hw frames directly between each other, and use stock `scale_cuda` instead of
-   `libplacebo` for the final resize when no Vulkan-only shader (FSRCNNX/RCAS/deband/chroma/dlss/
-   fsr2) is requested - staying 100% CUDA end to end for that session shape, no FFmpeg core patch
-   needed. Not yet scoped or measured; only covers sessions that skip the Vulkan-only shader
-   ladder entirely.
+3. **CUDA-to-CUDA sidestep**: `optix` now reads/writes `AV_PIX_FMT_CUDA` hw frames directly
+   (commit `61d6798`, see the table above) - the `vf_optix.c` half of this is done, not just
+   scoped. `vf_ort.c` is NOT yet converted, so an `optix`+`ort` chain still round-trips system
+   memory at the `ort` boundary. Separately, and not part of the original `optix`/`ort` framing
+   this item was written for: `optix` + `dlpp_rtcuda` + `vsr_rtcuda` (commits `61d6798`, `82bab39`,
+   `fc999dd`) is a three-filter chain that is ALL CUDA-native already - no FFmpeg core patch and,
+   per the correction below, no Vulkan-CUDA interop of any kind needed for that specific chain.
+   Stock `scale_cuda` in place of `libplacebo` for the final resize is still not done for any
+   chain. `dlpp_rtcuda`/`vsr_rtcuda` are not yet wired into `UpscaleEngine` (see `TASK.md`,
+   `INTEGRATION_DESIGN.md`), and running both hosted-DLL loaders alive in the same process at once
+   is explicitly UNVERIFIED - every test so far ran exactly one of the two.
 
 None of the three has a measurement yet of how much wall-clock time it would actually recover.
 Per this project's own discipline (`improvements.md`, "Measure first"), that should happen before
@@ -83,10 +90,28 @@ FSRCNNX/RCAS/deband/chroma/dlss/fsr2.
    Both already run their own CUDA context internally (see the table above) - this replaces
    "download input to system memory, then the filter re-uploads it" with "read the incoming
    device pointer directly." Scoped to files this project already owns and patches per-file.
-3. Final resize via stock `scale_cuda` instead of `libplacebo=` for this session shape.
+   **`vf_optix.c`'s half is DONE (commit `61d6798`)**, verified with a real decode->optix->NVENC
+   run, no hwupload/hwdownload anywhere in the graph, 140 real frames, PSNR 47.7dB/SSIM 0.998.
+   `vf_ort.c`'s half is still open - not converted, still round-trips system memory.
+3. Final resize via stock `scale_cuda` instead of `libplacebo=` for this session shape. Still not
+   done for any chain.
 
-Result: zero system-RAM touches, decode to encode, for that session shape. No FFmpeg upstream
-patch needed anywhere in this tier.
+Result for the session shape this tier targets: zero system-RAM touches, decode to encode. No
+FFmpeg upstream patch needed anywhere in this tier.
+
+**A second, separately-arrived instance of Tier 1 residency exists today**: `optix` +
+`dlpp_rtcuda` + `vsr_rtcuda` (commits `61d6798`, `82bab39`, `fc999dd`) is a three-filter chain
+that is entirely CUDA-native - `dlpp_rtcuda` and `vsr_rtcuda` each host their driver DLL via their
+own PE loader and never touch Vulkan (see the backend table above). Per the correction in
+`INTEGRATION_DESIGN.md`, made after that doc's first draft: because `vf_optix.c` is now also pure
+CUDA, this three-filter chain needs NO Vulkan-CUDA bridge at all, unlike the `optix`/`ort` pairing
+this section was originally scoped around. The broken Vulkan-CUDA interop documented in Tier 2
+below only blocks combining these three with the Vulkan-only stages (`sr`/`refine`/`chroma`/
+`deband`/`kernel`, `dlss`, `fsr2`), not the CUDA chain itself. Two things still stand between this
+and a shipped feature: `dlpp_rtcuda`/`vsr_rtcuda` are not wired into `UpscaleEngine` or the
+plugin's 5-place checklist yet (see `TASK.md`, `INTEGRATION_DESIGN.md`), and running both hosted
+loaders alive in the same ffmpeg process has never been tested - every test so far ran exactly one
+of the two.
 
 ### Tier 2 - blocked on the Vulkan-CUDA interop gap, or a much larger fork
 
@@ -119,15 +144,42 @@ Two ways past it, both substantial, neither started:
   reopens, it needs either a newer NGX SDK release that documents CUDA support for
   `Feature_SuperSampling`, or the `hwcontext_vulkan.c` interop patch above instead.
 
-Neither tier has been scoped into a build task yet. Tier 1 is the practical next step if GPU
-residency is worth pursuing at all - real, bounded, and answers the "does this even matter"
+Tier 2 has not been scoped into a build task. Tier 1 is partially done, not merely scoped: the
+`optix` hw-frame conversion (item 2's `optix` half, commit `61d6798`) is verified, and a second
+CUDA-native instance (`optix`+`dlpp_rtcuda`+`vsr_rtcuda`) now exists outside this section's
+original framing. What remains of Tier 1 - `vf_ort.c`'s conversion, `scale_cuda` for the final
+resize, and wiring the two new filters into `UpscaleEngine` - is the practical next step if GPU
+residency is worth pursuing further; it is real, bounded, and answers the "does this even matter"
 question before anyone touches Tier 2's shared risk.
 
-## Explored and blocked: NVIDIA Maxine VFX SDK (`vf_vsr.c`, not written)
+## Deployment: binary selection is per-invocation, not per-restart
 
-A candidate `vf_vsr.c` wrapping Maxine's Video Super Resolution effect (`NVVFX_FX_SUPER_RES`) was
-investigated as a pure-CUDA alternative to `vf_dlss.c` for plain video (no synthesised motion
-vectors/depth/jitter needed, unlike DLSS/FSR2) - would have been Tier-1-shaped, chainable with
-`vf_optix.c`/`vf_ort.c` via `AV_PIX_FMT_CUDA` hw frames. Stopped at Step 0: the SDK's open headers
-are public and MIT, but the trained models and runtime library are gated behind an NGC/NVIDIA
-Developer Program login this session doesn't have - no code was written. Full detail in `VSR.md`.
+The real production shim (`/usr/local/bin/jellyfin-ffmpeg-upscale` on CT114, not in this repo; see
+`shim/jellyfin-ffmpeg-upscale` for the local counterpart with the `PATCHED_FILTERS` tuple) re-probes
+the patched binary's filter list on every invocation, keyed by the binary's mtime/size, and fails
+open to stock ffmpeg on any problem. A rebuilt binary therefore goes live for real sessions the
+moment it's staged - **no Jellyfin restart is needed for an ffmpeg binary swap to take effect.**
+Confirmed on a real CT114 production build that swapped in the `61d6798` optix fix alongside all
+seven filters (`oidn`, `optix`, `ort`, `fsr2`, `dlss`, `dlpp_rtcuda`, `vsr_rtcuda`), verified present
+via `-filters`, `.prev` backup preserved. This matters for deployment-risk reasoning: a binary swap
+is live immediately, but a filter is only *reachable* once the shim's own `PATCHED_FILTERS` tuple
+names it - `dlpp_rtcuda` and `vsr_rtcuda` are compiled in today but not yet in that tuple, so they
+are live-swappable but not yet reachable from real sessions.
+
+## Explored and blocked, then retired: NVIDIA Maxine VFX SDK (`vf_vsr.c`)
+
+**RETIRED 2026-09-23** as a neural target - see `VSR.md`'s RETIRED banner. This section's original
+text below is now stale in one respect and is kept for history, corrected here: the SDK's access
+gate was resolved (an NGC key was obtained and used on CT114), `vf_vsr.c` was in fact written
+against the real installed headers, and it builds, links and registers correctly in `ffmpeg
+-filters`. The actual, still-standing blocker is that NVIDIA's NGC catalog ships zero TensorRT
+model files for this feature on any GPU architecture - not a licensing or access problem. The build
+flag was renamed `WITH_VSR` -> `WITH_MAXINE_VSR` (refuses to build without `MAXINE_VSR_UNRETIRE=1`)
+so it can't be confused with RTX VSR (`vsr_rtcuda`, see `RTXVSR.md`), which is the live target now
+under Track C in `TASK.md` and does NOT depend on Maxine or its missing models.
+
+Original framing, for context: a candidate `vf_vsr.c` wrapping Maxine's Video Super Resolution
+effect (`NVVFX_FX_VIDEO_SUPER_RES`) was investigated as a pure-CUDA alternative to `vf_dlss.c` for
+plain video (no synthesised motion vectors/depth/jitter needed, unlike DLSS/FSR2) - would have been
+Tier-1-shaped, chainable with `vf_optix.c`/`vf_ort.c` via `AV_PIX_FMT_CUDA` hw frames. Full detail
+in `VSR.md`.
