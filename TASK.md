@@ -1530,6 +1530,14 @@ does), not a context/thread problem at all.
        `+0x4a8`: overwriting it leaves md5 `25c94c00` unchanged. `+0x4ac` (source width) is read 12
        times, and any other value drops output to 14-16 dB, so it is live and already correct.
        Neither field explains the noise. Still next: the L16 channel-permutation test above.
+     - **2026-09-23 (L17 agent 7), network is deterministic and stateless.** New loader knob
+       `AIVP_PREV=file` (surf/tex I/O): first Process sees that frame, `AIVP_LOOP` calls see
+       `AIVP_INPUT`. With `AIVP_F10=0`: 3 fresh runs of `in_001200` all `25c94c00`, 2 of `in_003130`
+       all `fbefbed0`; `AIVP_LOOP=1/3/8` unchanged; a previous call on the other frame (x1 or x4)
+       leaves the next output bit-identical to single shot, both directions. So no temporal state
+       reaches the output. Scores vs 1080p GT (RGB/Y PSNR): net 1200 29.14/31.20, net 3130
+       25.65/30.02, bicubic 1200 34.70/32.93. Net still loses to bicubic: the L17 noise bug.
+       Script and logs: CT114 `analysis/t17/`.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
