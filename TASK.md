@@ -1885,6 +1885,38 @@ in the same black-box style as this session's `AIVP_PSIZE` probe, not disassembl
 Holds for both routes: codegen (we write the filter) and loader-in-ffmpeg (DLL host slots only
 issue launches; the interposer count must prove no frame data crosses the bus).
 
+## Track B: DLPP, agent 2 struct sweep + level 3/4 crash (2026-09-23)
+
+**Verdict: negative on Task 1, resolved on Task 2.** No struct field found that moves DLPP's
+output off the bicubic-identical baseline. The level 3/4 crash is real, reproducible, and
+confirmed to be inside `nvdlppx.dll` itself, not the loader.
+
+| Task | Result | Key finding |
+|---|---|---|
+| 1: sweep unknown struct dwords | Done, negative | Added `AIVP_SETI` (int32 write, parallel to `AIVP_SET`'s float write) and `AIVP_PDUMP` (dumps the full `params[0x50]` buffer dword by dword) to `loader/aivp.c`. Swept the 7 dwords with no assigned meaning (`+0x04`, `+0x14`, `+0x18`, `+0x1c`, `+0x44`, `+0x48`, `+0x4c`) with 0, 1, -1, 3, 4, 8, 15, 16, 32, 64, 100 as int32 and 0.5, 1.0, 2.0 as float -- 91 runs total on frame 1200, level 0, `AIVP_PSIZE=0x50`. Every run: identical launch count (23), identical output md5 to the untouched baseline. `AIVP_PDUMP` confirmed each write actually landed at its offset (spot-checked `+0x44=100` -> `+44=00000064` in the dump), so this is DLPP not reading the field, not the loader failing to write it. No frame 3130 confirmation needed since nothing moved on frame 1200. These 7 dwords look like padding at level 0; not ruled out at other levels (untested -- levels 1/2 give byte-identical output to level 0 per agent 14, so no reason to expect a different result there, and 3/4 crash before Process returns). |
+| 2: level 3/4 crash | Done | Reproduced cleanly: `AIVP_PSIZE=0x50 AIVP_IO=surf ./pe_map nvdlppx.dll --dlpp-process 960,540,1920,1080,32,32,3` (and `,4`) segfaults, exit code 139, after `hfuse_iconv_interleaved_*` (launch 21) and before `dlpp_postProcess`. Under `gdb`: `SIGSEGV` at `nvdlppx.dll+0x70eaa` (`0x7ffff4a8deaa`, inside the mapped image range `0x7ffff4a1d000`-`0x7ffff6200000` per `info proc mappings`, not in `libcuda.so` or `pe_map` itself) executing `mov 0x2858(%rax),%rcx` with `rax` near-null (backtrace frame #1 shows `0x18`) -- a near-null-pointer read, genuinely inside the DLL. Levels 3/4 do select different kernels before crashing: `conv3x3_fuse_conv1x1_with_pixel_shuffle3_bilinearAndSRBlockBicubic3_*` and `..._pixel_shuffle4_..._Bicubic4_*` appear (vs `..._pixel_shuffle2_..._Bicubic2_*` for levels 0-2), so the level field does reach kernel selection even though it dies before producing output. Not fixed: the null-ish pointer looks like an internal object DLPP expects to have set up by some CreateInstance-time host callback our loader answers only well enough for levels 0-2, not a buffer-size the loader itself controls, so there's no simple host-side size fix to apply. |
+
+VERIFIED (command + log line):
+- Field writes land correctly: `AIVP_SETI=0x44=100 AIVP_PDUMP=1 --dlpp-process ...,0` -> `+44=00000064` in the params dump.
+- No effect from any swept field: 91 sweep runs, all `md5=SAME` against `base_l0.ppm`, all `launches=23` -- see `/root/rtxv-spike/analysis/dlpp2/sw_*.log` on CT114.
+- Crash is in the DLL: `gdb -batch -ex run -ex bt -ex "info registers rip" -ex "info proc mappings"` on level 3 -> `SIGSEGV` at `0x7ffff4a8deaa`, which `info proc mappings` places inside the anonymous `rwxp` region `0x7ffff4a1d000`-`0x7ffff6200000` that matches the loader's own printed image base (`preferred base 0x180000000 -> actual 0x7ffff4a1d000`), i.e. `nvdlppx.dll+0x70eaa`.
+- Levels 3/4 select different kernel names before crashing: `grep -o 'pixel_shuffle[0-9]_.*Bicubic[0-9]_' gdb_l3.log` shows `pixel_shuffle3`/`Bicubic3` and `pixel_shuffle4`/`Bicubic4`, absent from levels 0-2's launch lists.
+
+ASSUMED / not reached: whether the 7 swept dwords do something at levels 1-4 (untested beyond the
+crash point for 3/4); whether some non-dword-aligned or bitfield encoding inside a byte the sweep
+did touch (e.g. a flag bit rather than the whole dword meaning something) was missed by treating
+each field as a single int32 or float; the exact host callback DLPP expects before Process at
+level 3/4 that our loader doesn't supply (not chased -- would need instrumenting CreateInstance's
+94 `cuModuleLoadData`/525 alloc callbacks by level, out of this session's scope).
+
+Commits: `rtx-video-re` `0dbf61f` -- `AIVP_SETI`/`AIVP_PDUMP` added to `loader/aivp.c`.
+
+Next step: the struct-sweep route (this session's and agent 14's) is exhausted for the fields
+either session could name. What's left is the construction-time route agent 14 flagged (94
+`cuModuleLoadData` calls vs AIVP's lighter CreateInstance) or giving up on "DLPP's own host drives
+its network correctly by default" and going back to forcing a field the way `AIVP_F10` did for
+AIVP, now that the 3/4 crash shows the level field does reach real kernel selection.
+
 ## Guardrails
 
 - Never restart `jellyfin.service`. Never touch the live plugin config XML. Always `--no-activate`.
