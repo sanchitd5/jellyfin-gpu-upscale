@@ -132,7 +132,7 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    (`analysis/t17/score.py`) and reports fresh bicubic numbers (34.699/32.929 frame 1200,
    35.341/34.705 frame 3130) without explaining the earlier 48.80-vs-41.66 discrepancy. The
    canonical-scoring paragraph in this file's "Where it stands" section admits "Bilinear/bypass
-   were not scored under this method on all frames" — i.e. the gap was carried forward, not
+   were not scored under this method on all frames" - i.e. the gap was carried forward, not
    closed. Next test: re-run whichever script produced 48.80 dB against the same
    `in_001200.rgba`/GT pair `score.py` now uses, and diff the two scorers line by line (crop,
    channel weights, clipping) until the numbers agree or the discrepancy is explained.
@@ -141,7 +141,7 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    13) was run on only `+0x3a8`/`+0x44`, the two fields that showed the largest single-field gain
    on frame 1200. It was never run on the other fields agent 9/12 found to move the score at all
    (`+0x150`, `+0x40`, `+0x48`, `+0x58`, `+0x68`, `+0x1a4`, `+0x200`, `+0xa8`, `+0xdc`, `+0x1e0`,
-   etc. — the 21-field list in `analysis/b6/improving_fields.tsv`), including `+0x150`, which
+   etc. - the 21-field list in `analysis/b6/improving_fields.tsv`), including `+0x150`, which
    agent 12 found is actually the *best single field on frame 3130*, better than `+0x3a8` there.
    So the one field with the best cross-frame signal never got the level-code sweep at all. Also,
    no agent dumped AIVP's internal per-level weight-select table (the `this+0x70+8*L` model
@@ -152,7 +152,7 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
 
 3. **Assumptions never independently re-verified: confirmed gap, two instances.** (a) `fmt=0x20`
    for RGBA8 is flagged "Assumed, not verified... colours come out right, so plausible" at the
-   first real-output milestone and was never revisited by later agents — no one tried a different
+   first real-output milestone and was never revisited by later agents - no one tried a different
    format code as a sweep value the way `+0x10` eventually was. (b) The level-0-remaps-to-4
    `cmove` was read once from one disassembly pass; combined with "all 5 levels give
    byte-identical output," no agent checked whether the per-level model-select path
@@ -167,7 +167,7 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    and 13 both stayed inside L17's own argbuf (combo search, frame cross-check) or moved to
    postProcess/slot 12/level-code framing. Neither touches `dlpp_preProcess`'s argbuf (launch 1)
    at all past agent 6's tail-decode, which only characterized two dimension fields, not a sweep
-   for a bias-injecting field. This is a real, unexplored gap, not a dead end — it is the one
+   for a bias-injecting field. This is a real, unexplored gap, not a dead end - it is the one
    suggested next step from the L17-specific rounds that was never attempted.
 
 5. **Harness's own hardcoded Process-param fields: confirmed gap, one new concrete instance.**
@@ -179,7 +179,7 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    `AIVP_F38` env is set (else stays 0 from zero-init, already tested by agent 4). `g_pfin`/
    `g_pfout` are the same class of bug as `+0x10`: values **we** hardcode from a CLI default,
    never reverse-engineered from the DLL, never swept as a candidate the way `+0x10` eventually
-   was — they are exactly the "assumed fmt=0x20" from point 3, and the harness write of them was
+   was - they are exactly the "assumed fmt=0x20" from point 3, and the harness write of them was
    never flagged as a candidate field in its own right. Next test: sweep `+0x30`/`+0x34` (i.e.
    `g_pfin`/`g_pfout`) across other plausible DXGI/CUDA format codes with network on, the same way
    `+0x10` was swept once someone noticed it was our own scaffolding.
@@ -189,23 +189,23 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    `0, 1, 0x2, 0x3, 0x8, 0x1c, 0x20 (current default), 0x21, 0x29, 0x36` together on `+0x30`/`+0x34`,
    network on (`AIVP_F10=0`), frame 1200. Launch count stays 19 for every value (host-side-visible
    behavior: the DLL branches on the format field without changing which/how many kernels run),
-   and the outputs collapse into exactly three md5 buckets — confirming the `0x20/0x29/0x36
+   and the outputs collapse into exactly three md5 buckets - confirming the `0x20/0x29/0x36
    special` comment in `aivp.c` really is observable black-box behavior, not a guess. `0x29`/`0x36`
    corrupt the image outright (1.48 dB). The rest of the tested values (`0, 1, 0x2, 0x3, 0x8, 0x1c,
    0x21`) share one bucket, and it beats our own `0x20` default: frame 1200 `0x1c` gives
    29.171/32.430 RGB/Y vs `0x20`'s 29.141/31.202 (Y +1.23 dB); frame 3130 `0x1c` gives
-   26.372/30.920 vs `0x20`'s 25.645/30.023 (RGB +0.73 dB, Y +0.90 dB) — same direction on both
+   26.372/30.920 vs `0x20`'s 25.645/30.023 (RGB +0.73 dB, Y +0.90 dB) - same direction on both
    frames, not a frame-1200 overfit. Also confirmed with `AIVP_F10=0` vs `1` under `0x1c` that
    format choice doesn't gate whether the network's contribution matters (md5s still differ,
    same as under `0x20`). Still well short of bicubic on both frames. **Verdict: real, modest,
-   cross-frame gain from fixing our own hardcoded default — closes this gap positive, though not
+   cross-frame gain from fixing our own hardcoded default - closes this gap positive, though not
    enough on its own to beat bicubic.** No DLL disassembly was needed or done; the branch was
    found purely from black-box md5/score differences across the swept values.
 
 6. **Frame/content choice: not a gap, a valid methodology flag.** Both CT114 test frames come
    from one already-decent 1080p library source downscaled to 960x540, then compared against that
    same 1080p as GT. Agent 8 found bicubic itself scores 47.20 dB with a 16px border cropped vs
-   34.70 dB full-frame uncropped, i.e. the canonical score is border-dominated — a real
+   34.70 dB full-frame uncropped, i.e. the canonical score is border-dominated - a real
    demonstration that this scoring setup is noisy/dominated by edge effects, which supports the
    concern. No new run needed to say this, but it is a real risk: a genuinely-working but *small*
    residual could be sitting below this setup's noise floor on this specific content, and would
@@ -216,7 +216,7 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
 7. **Early pipeline (pre-L17) work: mostly solid, one real gap found, confirmed via
    independent-check evidence.** The CreateInstance/`ppeGetExportTable`/`ppeGetVersion` chain was
    reversed against the *host's own* binary (`nvppex.dll`) disassembly, not guessed from the
-   feature DLL alone, and cross-checked with a byte-identical 16-byte GUID match on both sides —
+   feature DLL alone, and cross-checked with a byte-identical 16-byte GUID match on both sides -
    this is about as verified as reverse engineering gets and was not just assumed. Slots 1
    (CreateInstance) and 2 (Process) are confirmed by direct disassembly; slots 3 and others are
    explicitly still marked "weakly characterized... not confirmed," which is honest, not
@@ -226,9 +226,9 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    real content afterward (preProcess probe showing correctly-decoded real pixel values, not the
    earlier broken all-`-1.0` raw-pointer read). Agent 8's numpy re-implementation of L17, fed
    L16's *actual dumped output* from the real DLL run, independently supports that upstream data
-   (through L16) is real and non-degenerate. **The actual gap:** launches 3-15 — `dlpp_pixelFold`,
+   (through L16) is real and non-degenerate. **The actual gap:** launches 3-15 - `dlpp_pixelFold`,
    `all_fuse_with_pooling_fp16_*`, `conv2d_v4_fp16_*`, `hfuse_with_pooling_*`,
-   `upsampling_with_conv2d_fp16_*`, the entire conv-chain body between preProcess and L16 — were
+   `upsampling_with_conv2d_fp16_*`, the entire conv-chain body between preProcess and L16 - were
    never individually dumped or plausibility-checked at any point across all 13 agents. Only
    preProcess, L16 (agent 8's dump target), L17, and postProcess were ever probed. If something in
    that middle stretch is subtly wrong (wrong channel order, a saturated intermediate, a layer
@@ -253,19 +253,19 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
    gap negative: nothing upstream of L17 is silently broken; the "L17 ignores good input" framing
    from agents 1-13 still holds.**
 
-8. **`vf_aivp_spike` ffmpeg-hosting shortcut: confirmed gap — the actual neural-on path was never
+8. **`vf_aivp_spike` ffmpeg-hosting shortcut: confirmed gap - the actual neural-on path was never
    run through the filter.** Every `vf_aivp_spike`/shortcut-assumption verification
    (`AIVP_THREAD`, `AIVP_PRIMARY`, `AIVP_STREAM`, real-stream, no-LD_PRELOAD, the 400/440 fps
    numbers, the zero-alloc-after-init proof) checked md5 against either `AIVP_FLAGS=0x100`
    (explicit bypass, md5 `6d9a012a`) or default "flags 0" (md5 `b3c5094c`). `b3c5094c` is the same
    md5 reported elsewhere as the **network-off** baseline (e.g. the `AIVP_ARENA` test: "network-off
-   md5 unchanged (`b3c5094c`)") — it is the default-`+0x10=1.0` case where the network covers zero
+   md5 unchanged (`b3c5094c`)") - it is the default-`+0x10=1.0` case where the network covers zero
    columns, not `AIVP_F10=0` (md5 `25c94c00`), which is what every L17 bias-hunting agent actually
    used as "network on." So the filter integration and the actual (broken) neural path have never
    been run together: nobody has confirmed the filter's threading/context/stream setup behaves
    identically with `AIVP_F10=0` set, where the network's 19 launches actually feed into the split
    region. Given the launch sequence and count are the same regardless of the split value, this is
-   probably fine, but it is asserted, not verified — flag it before treating the filter shortcut
+   probably fine, but it is asserted, not verified - flag it before treating the filter shortcut
    as validated for a genuinely-fixed neural path later.
 
 9. **GPU-resident preset requirements: same gap as #8, one level up.** All of the GPU-resident
@@ -286,13 +286,13 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
     (`analysis/b6/improving_fields.tsv`), the best pair (`+0x3a8=1,+0x44=1`), and agent 12's best
     3/4-field combo (`+0xa8=-1,+0xdc=2.0f,+0x1e0=0x40,+0x3a8=1`) under `AIVP_PFIN=AIVP_PFOUT=0x1c`,
     both test frames. Result: the ranking is unchanged and the gains are additive, not
-    interacting — `0x1c` and the argbuf fixes each add roughly their own independent margin.
+    interacting - `0x1c` and the argbuf fixes each add roughly their own independent margin.
     Best combined result, combo under `0x1c`: frame 1200 RGB/Y 29.873/33.473 (bicubic
-    34.699/32.929 — RGB still ~4.8 dB short, but Y now edges past bicubic for the first time);
-    frame 3130 27.992/32.467 (bicubic 35.341/34.705 — RGB ~7.3 dB short, Y ~2.2 dB short). Not a
+    34.699/32.929 - RGB still ~4.8 dB short, but Y now edges past bicubic for the first time);
+    frame 3130 27.992/32.467 (bicubic 35.341/34.705 - RGB ~7.3 dB short, Y ~2.2 dB short). Not a
     cross-frame win. Also tried asymmetric pfin/pfout (`0x1c` on one side, `0x1/0x2/0x3/0x8/0x21`
     on the other, both directions): every combination is md5-identical to symmetric `0x1c/0x1c`,
-    confirming point 5's three-bucket finding holds at the pair level too — asymmetry inside one
+    confirming point 5's three-bucket finding holds at the pair level too - asymmetry inside one
     bucket carries no information. Did not reach a fresh sweep of previously-inert fields under
     `0x1c` (time budget); that remains open if a future agent wants it. **Closes negative: `0x1c`
     is confirmed the better default everywhere it was checked, but no combination found here, old
@@ -301,7 +301,7 @@ vsr_drv_cuda effort, not just the L17 bias sweeps).
     on CT114 (not version-controlled there).
 
 **Most promising concrete gap:** point 4 (preProcess never swept for a bias-injecting field) and
-point 7 (launches 3-15 never dumped/plausibility-checked) are the two live, unexplored leads —
+point 7 (launches 3-15 never dumped/plausibility-checked) are the two live, unexplored leads -
 point 7 is the deeper one, since it questions whether "L17 ignores good input" is even the right
 frame, versus "something upstream of L16 is already degenerate and L17 is just the layer where it
 became visible."
