@@ -1440,6 +1440,17 @@ does), not a context/thread problem at all.
        launch rc=0. Untested candidates: host slot 12 (`0x68`, x2, unnamed, returns 0) might be what
        binds/enables the residual branch; the L17 argbuf field `4670000000000001` / the tail floats
        `4000000000000003 000000043f000000` (2.0f, 0.5f); s12 as a real stream/event.
+     - **2026-09-23 (L17 agent), narrowed, not fixed.** rtx-video-re loader gains
+       `AIVP_CLOBBER=N:off:byte` (cuMemsetD8 the buffer at argbuf+off before launch N) and
+       `AIVP_ARGSET=N:off:val` (overwrite one argbuf qword). Filling L17's feature input (`+0`),
+       both conv weight/bias sets (`+0x8 +0x20 +0x250 +0x268`), both 8-byte `[1.0f,1.0f]` buffers
+       (`+0x230 +0x478`) and its own output (`+0x258`) with NaN or zero leaves the frame
+       byte-identical (`b3c5094c…`). Only the source image at `+0x490` changes it. So L17's conv
+       path is not computed, not "computed and discarded". A flip scan of all 181 L17 qwords
+       finds only dims/pitch (`+0x298 +0x2a0 +0x498 +0x4a8`), tile count 30 with its /30 magic
+       (`+0x198 +0x3e0 +0x3e8`) and the fp16 bicubic taps; the `4670…01` fields, the tail
+       2.0f/0.5f and every zero field set to 1 do nothing. Slot 12 is not yet tested; next
+       suspect is kernel-side gating (dynamic smem size s11=0x4080 or a missing launch attribute).
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
