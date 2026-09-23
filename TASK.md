@@ -1580,6 +1580,28 @@ does), not a context/thread problem at all.
        respectively on CT114 — inconsistent with a fixed per-field cause, so likely state-dependent
        (order of writes, or memory left over from the previous run) rather than the field itself.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
+     - **2026-09-23 (L17 agent 11), no-output runs explained, postProcess ruled out.**
+       Task 1: re-ran all 26 failing fields from agent 9's sweep, one value per field, 3 fresh
+       `pe_map` processes each (subprocess.run, no LD_PRELOAD, no shared state). All 78 trials
+       were stable: every field gave the SAME `cuCtxSynchronize` rc on every trial, no variance.
+       13 fields gave rc=700 (`CUDA_ERROR_ILLEGAL_ADDRESS`), 13 gave rc=716. The 700/716 split
+       lines up exactly with low/high dword of adjacent pointer-sized slots (e.g. `+0x1b0`=716,
+       `+0x1b4`=700, `+0x1b8`=716, `+0x1bc`=700, ... through `+0x1ec`), so these are pointer
+       fields corrupted by the write, not a state-dependent crash. Agent 9's disagreement between
+       rc0 and rc716 on the same field was not reproduced here; today's fresh-process runs were
+       fully deterministic. Ruled out: field/value-dependent non-determinism as the cause of the
+       114 no-output runs, at least under today's GPU/driver state. Scripts: CT114
+       `analysis/b5/task1b.py`, `task1_results.json`.
+     - Task 2: dumped launch 18 (`dlpp_postProcess`) argbuf in full (`AIVP_ARGALL=1`) network-on
+       and network-off, frame 1200. Argbuf is 10 qwords (0x50 bytes): `+0x0` input pointer
+       (differs on/off only because of ASLR), `+0x8`=2 (type/flag), `+0x10`/`+0x18`/`+0x20` dims
+       (0x780x0440, 0x780x0438 twice), `+0x28`..`+0x48` all zero. No unexplained scalar field
+       exists to sweep, so no bias/offset sweep was run. Kernel name, grid (240x135x1), block
+       (8x8x1) and argbuf size are byte-identical on/off. Confirmed: postProcess does not read
+       anything that could subtract L17's constant term, and cannot tell whether the network ran.
+       The bias must be cancelled inside L17 itself or upstream of it, not at launch 18. Scripts:
+       CT114 `analysis/b5/argall_on.log`, `argall_off.log`, `dump18.py`.
+       Neither task moved the network-on score; bicubic (34.699/32.929) is still ahead.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
      one harness `cuCtxSynchronize` per frame, timed). CT114, 960x540 -> 1920x1080, surf I/O,

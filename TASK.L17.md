@@ -47,14 +47,21 @@ finishing before drawing conclusions from partial numbers.
 
 ## Open items, roughly in order of promise
 
-1. **Explain the 114 no-output runs.** Only two of 26 affected fields were spot-checked, and those
-   two disagreed with each other on re-run. Get a clean rc/error per field x value (not reused
-   process state between writes), and check whether it's write-order-dependent: does the same
-   write fail only after certain other fields were touched in the same process?
-2. **A second bias/offset term outside the single argbuf dword space.** Agent 8's finding was that
-   no single dword cancels `W2·relu(b1)+b2`. Not yet tried: whether that constant is meant to be
-   subtracted by a *later* kernel (postProcess, launch 18) rather than by anything in L17 itself.
-   Dump postProcess's argbuf and check for a field that looks like an offset or bias-removal term.
+1. **DONE (L17 agent 11).** The 114 no-output runs are explained: 26 fields, one failing value
+   each, 3 fresh-process trials apiece (78 runs total), all fully deterministic. 13 fields give
+   `cuCtxSynchronize` rc=700 (`CUDA_ERROR_ILLEGAL_ADDRESS`), 13 give rc=716, split exactly along
+   low/high dword of adjacent pointer-sized slots (`+0x1b0..+0x1ec` alternating 716/700). These
+   are pointer fields; writing them corrupts a pointer and crashes predictably. No variance
+   between trials, unlike agent 9's spot check. See TASK.md "L17 agent 11" for the run script and
+   full breakdown. No further action needed unless a future sweep sees non-determinism again.
+2. **DONE, negative result (L17 agent 11).** postProcess's argbuf (10 qwords, 0x50 bytes) has no
+   unexplained scalar field: pointer, a type/flag dword (`+0x8`=2), dims at `+0x10/0x18/0x20`,
+   the rest zero. Byte-identical shape, kernel name, grid and block between network-on and
+   network-off. postProcess cannot be cancelling L17's constant term, and doesn't know whether the
+   network ran. Ruled out: the bias fix is not at launch 18. Whatever cancels
+   `W2·relu(b1)+b2` has to live inside L17 or upstream of it. Next idea worth trying: check L17's
+   *input* preprocessing (launch <17, the preProcess stage) for a field that could be biasing what
+   L17 sees, rather than continuing to search L17's own or postProcess's argbufs.
 3. **Uncommitted arena change.** `~/dev/rtx-video-re/loader/aivp.c` on CT114 has the `AIVP_ARENA=1`
    knob (md5 `6bb2ee60`) not yet committed to the repo. It changed no score, but it's real,
    working code (confirmed network-off byte-identical) and should not be lost. Commit it, or
