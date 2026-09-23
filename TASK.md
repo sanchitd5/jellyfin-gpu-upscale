@@ -1563,6 +1563,18 @@ does), not a context/thread problem at all.
        under 1.3 dB of a 5 dB gap, so no argbuf dword cancels the constant term. Ruled out:
        a single-dword offset/scale fix in L17's argbuf. Scripts: CT114 `analysis/b3/`
        (`sweep.py`, `sweep_001200.tsv`).
+     - **2026-09-23 (L17 agent 10), field combinations + contiguous arena, not fixed.**
+       Greedy search from `+0x3a8`=1 on frame 1200, network on: adds `+0x44`=1, then nothing
+       improves (6 runs). Pairwise grid over the top 5 fields agrees: best 3a8+44 = 29.809/32.359
+       (base 29.141/31.202, bicubic 34.70/32.93). Still about 5 dB short of bicubic in RGB.
+       Loader knob `AIVP_ARENA=1` (slot 0x10 carves 512 B aligned sub-buffers from one
+       `cuMemAlloc`, at least 1 MiB guard, size via `AIVP_ARENA_MB`): network-off md5 unchanged
+       (`b3c5094c`); network-on scores identical with and without it, base and best combo.
+       x=1919 column is not zeroed network-on (MAE x=1917..1919 8.58/7.51/5.72). Ruled out:
+       allocation layout as the cause. The 114 no-output runs from agent 9: 26 fields, all
+       values; some fail at sync with rc=716, some pass on re-run. Cause not established.
+       Frame 3130 not scored. Loader change uncommitted (aivp.c md5 `6bb2ee60`). Scripts: CT114
+       `analysis/b4/` (`search.py`, `search.tsv`, `col.py`).
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
