@@ -2278,6 +2278,88 @@ up with the existing `gt_rm6.rgba` reference frame index).
 Next step: this clears the three-concern precondition this file called out. Nothing here needs
 further work before the plugin's 5-place checklist as far as arbitrary-resolution correctness goes.
 
+## Track B: DLPP, resolution correctness extended to levels 2/3/4 (2026-09-23)
+
+Extends the pass above (level 1 only) to levels 2, 3, and 4, closing the "level 3/4 at a
+non-exact ratio" gap it left ASSUMED. Driven via the standalone loader (`loader/pe_map`
+`--dlpp-process`, `AIVP_IO=surf`, `AIVP_F10=0.0` to match the filter's baked wipe fix), not the
+real ffmpeg filter, since the loader lets `params+0x38` be set or deliberately left unset per
+run -- the real filter always writes it, so it cannot reproduce the unset case. Test-card
+gradient+checker source (the loader's existing default), `analysis/dlpp-res/check_ppm.py`
+reused unchanged. Output under `analysis/dlpp-res2/` on CT114.
+
+**Level 2, three scenarios (mirrors level 1): CONFIRMED, behaves like level 1.** Non-exact
+ratio (960x540->1706x960), non-16-aligned width (854x480->1708x960), small res
+(640x480->1280x960). All three: `Process`->0, correct output dimensions, low run-lengths at
+every edge column checked (max 3-6, never a full-column constant-fill/seam), nonzero edge
+variance. Level 2 does not touch `params+0x38` (same as level 1), so this was expected to
+carry over cleanly, and it does.
+
+**Level 3/4, exact native scale with non-16-aligned/small-res input: CONFIRMED, clean.**
+854x480->2562x1440 (level 3, scale 3.0) and ->3416x1920 (level 4, scale 4.0); 640x480->1920x1440
+(level 3) and ->2560x1920 (level 4). All four: `Process`->0, correct dims, no seam/padding
+artifact at any edge checked. The DLL's own internal padding for an odd input width holds at
+levels 3/4 the same way agent 3's original pass showed it holding at level 1.
+
+**Level 3/4, non-exact ratio (the flagged gap): CONFIRMED, falls back cleanly, no fix needed.**
+960x540 requested to 1920x1080 (actual ratio 2.0) at level 3 (native model ratio 3.0) and level 4
+(native model ratio 4.0), i.e. exactly the mismatched-scale scenario this file flagged as
+untested. Four variants run: `params+0x38` written to the *actual* ratio (2.0, what the real
+`vf_dlpp_spike.c`/`dlpp_embed.c` auto-derives as `ow/inlink->w` and always writes for
+`level>=3`), written to the *level's own nominal* scale (3.0 / 4.0, deliberately mismatched to
+the real output), and left entirely unset.
+- Written (either value, matching or mismatched): **no crash, no corruption.** `Process`->0,
+  correct 1920x1080 output, edge run-lengths 3-5 (no seam), edge variance nonzero at both level
+  3 and level 4. `dlpp_ResampleAndComposeFP16` appears in the launch list in every one of these
+  four runs (grepped from the raw stdout log), confirming the DLL's own resample/compose kernel
+  is what produces the correctly-sized output regardless of whether the scale field matches the
+  actual ratio -- the DLL does not rely on `params+0x38` alone to detect the non-exact case.
+  Byte diff between the "correct-ratio" and "mismatched-ratio" outputs at each level: ~68% of
+  bytes differ (4259449/6220817 at level 3, 4350517/6220817 at level 4), so the field is read
+  and does change internal processing, just never crashes or corrupts either way; no ground-
+  truth PSNR comparison was run to say which of the two is higher quality, only that both are
+  structurally valid, non-garbage images.
+- Unset: **crashes, exit 139, both levels.** Reproduces agent 3's already-diagnosed SIGSEGV
+  class (near-null pointer read inside the DLL) exactly, now confirmed to also apply when the
+  requested output is not an exact integer ratio, not just the exact-ratio case agent 3 tested.
+  No new root cause; same known bug.
+
+**No code fix needed.** `dlpp_embed.c`'s `build_params()` (in `~/dev/rtx-video-re/ffmpeg-spike/`,
+the scratch copy, unmodified by this session) already writes `params+0x38` unconditionally for
+every `level>=3` call, using `E.scale` which `vf_dlpp_spike.c` computes as the real requested
+ratio (`(float)s->ow / inlink->w`) rather than a hardcoded per-level constant -- it can never
+reach the unset/stale state that crashes, and it never writes a value disconnected from the
+actual request. The brief's proposed fix (only write the field on an exact match, else leave it
+unset) would have been *wrong* to implement: leaving it unset is exactly the crashing state just
+reproduced, and writing the real ratio is what the filter already does and what this pass shows
+working cleanly.
+
+VERIFIED (commands, all on CT114 via `pct exec 114`): `loader/pe_map` unchanged since last build
+(binary timestamp matches source, `make -q pe_map` rc=0). Every scenario's exit code, `Process
+-> 0` line, and `analysis/dlpp-res/check_ppm.py` dimensions/variance/maxrun output captured
+under `analysis/dlpp-res2/*.log` and `*.ppm`. Crash reproduction: exit code 139 for both unset
+runs (`l3_gap_unset`, `l4_gap_unset`). Kernel-name grep for `dlpp_ResampleAndComposeFP16` across
+all four non-crashing gap-test logs. Byte-diff script (`diffcheck.py`) run against the ppm pairs.
+No Jellyfin disruption: PID 548311 checked idle before starting, no other ffmpeg process touched.
+
+ASSUMED / not reached: relative quality (PSNR) between a correct-ratio-write and a
+mismatched-ratio-write at the same non-exact request -- both are confirmed non-corrupt, but which
+one is *better* was not measured, since the shipped filter always writes the correct-ratio value
+anyway and the mismatched case only exists here as a deliberate stress test of the flagged gap.
+Real-content (as opposed to test-card) confirmation of the non-exact-ratio case at level 3/4
+through the actual `vf_dlpp_spike` ffmpeg filter (rather than the standalone loader) was not
+re-run in this pass; the filter-level integration test already on file used level 1 and level 3
+at the exact-ratio case only.
+
+Commits: `jellyfin-gpu-upscale` (this TASK.md update). No `rtx-video-re` commit -- no filter code
+was changed, per the finding above that the existing unconditional auto-derived write is already
+correct.
+
+Next step: this closes the level 3/4 non-exact-ratio question the plan flagged as open. Nothing
+found here blocks the plugin's 5-place checklist; the only remaining gaps are the two ASSUMED
+items just above (PSNR ranking of the two scale-field choices, and a real-content re-run through
+the actual filter), neither of which is a correctness blocker.
+
 ## Track B: DLPP, `vf_dlpp_spike` ffmpeg integration, network genuinely on (2026-09-23)
 
 **Verdict: works end to end, GPU-resident, with the real network producing output, and the
