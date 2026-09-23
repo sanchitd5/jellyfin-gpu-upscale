@@ -1911,11 +1911,83 @@ level 3/4 that our loader doesn't supply (not chased -- would need instrumenting
 
 Commits: `rtx-video-re` `0dbf61f` -- `AIVP_SETI`/`AIVP_PDUMP` added to `loader/aivp.c`.
 
-Next step: the struct-sweep route (this session's and agent 14's) is exhausted for the fields
-either session could name. What's left is the construction-time route agent 14 flagged (94
-`cuModuleLoadData` calls vs AIVP's lighter CreateInstance) or giving up on "DLPP's own host drives
-its network correctly by default" and going back to forcing a field the way `AIVP_F10` did for
-AIVP, now that the 3/4 crash shows the level field does reach real kernel selection.
+Next step (superseded by agent 3 below): the struct-sweep route (this session's and agent 14's)
+is exhausted for the fields either session could name. What's left is the construction-time route
+agent 14 flagged (94 `cuModuleLoadData` calls vs AIVP's lighter CreateInstance) or giving up on
+"DLPP's own host drives its network correctly by default" and going back to forcing a field the
+way `AIVP_F10` did for AIVP, now that the 3/4 crash shows the level field does reach real kernel
+selection.
+
+## Track B: DLPP agent 3, native-scale field fixes level 3/4 crash (2026-09-23)
+
+**Verdict: confirmed and fixed.** The level 3/4 crash was caused by leaving `params+0x38`
+(the native-scale float the sourced FFmpeg patch documents, `ffmpeg-patches/0006-avfilter-add-
+dlpp-drv-cuda-the-driver-dlpp-super.patch`) unset. Writing any float to it avoids the crash
+entirely; writing the *correct* integer scale (2/3/4 matching the level) also gives the best
+output quality, not just a non-crash. The existing `AIVP_F38` env knob (already in `loader/aivp.c`,
+writes a float at `params+0x38`) was reused as-is -- no loader code change needed, so no loader
+commit.
+
+| Level | `params+0x38` | Output buffer | Result | Launches reached |
+|---|---|---|---|---|
+| 3 | unset (stale/0) | 2880x1620 | **crash**, SIGSEGV, exit 139 | 21 of 23 (dies before `dlpp_postProcess`) |
+| 3 | 3.0 (correct) | 2880x1620 (correct) | clean, `Process`->0 | 23 of 23, `dlpp_postProcess` runs twice (launch 22 + tail dump) |
+| 3 | 2.0 (wrong) | 2880x1620 | clean, `Process`->0 | 23 of 23 |
+| 3 | 3.0 (correct) | 1920x1080 (wrong) | clean, `Process`->0 | 23 of 23 |
+| 4 | 4.0 (correct) | 3840x2160 (correct) | clean, `Process`->0 | 23 of 23 |
+| 4 | 2.0 (wrong) | 3840x2160 | clean, `Process`->0 | 23 of 23 |
+| 4 | 4.0 (correct) | 1920x1080 (wrong) | clean, `Process`->0 | 23 of 23 |
+
+So the crash is specifically about the field being **unset**, not about which value it holds and
+not about buffer size -- any explicit write to `params+0x38` (right or wrong scale) reaches launch
+23 and returns 0. That refines the theory: the near-null pointer at `nvdlppx.dll+0x70eaa`
+(agent 2's finding) is DLPP dereferencing something set up from that field at `CreateInstance`
+time, and it dies when the field is stale/zero rather than any float.
+
+Output quality, however, does depend on getting the field right: all six outputs are finite,
+non-degenerate real images (variance ~990-1010, not blank or poison). Scored by area-resizing
+each output back to 1920x1080 (exact rational box filter, since 2880/1920 and 3840/1920 are not
+integer ratios) and comparing against the existing `gt_001200.rgba` -- an APPROXIMATION, since no
+ground truth exists yet at 2880x1620/3840x2160:
+
+- Level 3, scale=3.0 (correct): PSNR rgb=39.70 y=38.16
+- Level 3, scale=2.0 (wrong): PSNR rgb=34.77 y=32.97
+- Level 4, scale=4.0 (correct): PSNR rgb=37.48 y=35.80
+- Level 4, scale=2.0 (wrong): PSNR rgb=34.81 y=33.01
+
+The correct scale beats the wrong one by ~3-5 dB at both levels. The wrong-buffer-size controls
+(1920x1080 output while the DLL internally still ran a 2x path per its own field) score close to
+the correct 2x-equivalent baseline, consistent with the field, not the output buffer, driving
+which kernel path runs.
+
+VERIFIED (commands + logs on CT114, `/root/rtxv-spike/analysis/dlpp3/`):
+- Crash reproduced with field unset: `AIVP_PSIZE=0x50 AIVP_IO=surf AIVP_INPUT=frames/in_001200.rgba
+  ./pe_map ../dll/Display.Driver/nvdlppx.dll --dlpp-process 960,540,2880,1620,32,32,3` -> exit 139,
+  last launch 21, see `l3_nofield` run (log not kept, exit code and launch count captured live).
+- All six fixed/control combinations clean: `AIVP_PSIZE=0x50 AIVP_IO=surf AIVP_F38=<scale>
+  AIVP_INPUT=frames/in_001200.rgba AIVP_OUT=<out>.ppm ./pe_map ../dll/Display.Driver/nvdlppx.dll
+  --dlpp-process 960,540,<ow>,<oh>,32,32,<level>` -> `Process -> 0`, `RESULT: instance created`,
+  logs and ppms at `/root/rtxv-spike/analysis/dlpp3/{l3,l4}_{correct,wrongscale,wrongbuf}.{log,ppm}`.
+- Scoring script and method: `/root/rtxv-spike/analysis/dlpp3/score_dlpp3.py` (written this
+  session; `analysis/t17/score.py` and `analysis/b7/score_b7.py` are both hardcoded to 1920x1080
+  and not usable here despite the "generic" label). Parses each ppm's own P6 header for actual
+  size, checks finite/variance, area-resizes non-2x outputs back to 1920x1080 with an exact
+  rational box filter (upsample by the reduced ratio's numerator, block-average by its
+  denominator) before PSNR against `gt_001200.rgba`.
+
+ASSUMED: the PSNR numbers are an approximation against a 1920x1080 ground truth, not a native
+2880x1620/3840x2160 ground truth (none exists yet) -- resizing both directions loses information,
+so the gap between correct- and wrong-scale is a lower bound on the real difference, not exact.
+Not reached: whether `params+0x38` needs to be exactly the integer scale (2.0/3.0/4.0) or any
+value in a range works as well as the exact one (only 2.0-vs-correct was tested, not e.g. 2.9 or
+3.1); a native-resolution ground truth capture for exact PSNR.
+
+No loader code change (reused existing `AIVP_F38`), so no commit in `rtx-video-re`. This TASK.md
+update is the only commit for this session.
+
+Next step: capture native-resolution ground truth frames at 2880x1620 and 3840x2160 for exact
+(non-approximated) scoring, and confirm whether the exact float value matters beyond "set vs
+unset" by sweeping near the integer scale.
 
 ## Guardrails
 
