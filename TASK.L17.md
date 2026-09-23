@@ -66,10 +66,21 @@ finishing before drawing conclusions from partial numbers.
    knob (md5 `6bb2ee60`) not yet committed to the repo. It changed no score, but it's real,
    working code (confirmed network-off byte-identical) and should not be lost. Commit it, or
    explicitly decide to drop it if the arena approach is abandoned.
-4. **Cross-check frame 3130** against every finding above that was only run on frame 1200.
-5. **Multi-field combinations beyond pairs.** Only single fields (agent 9) and the top-5 pairwise
-   grid plus a 6-step greedy search (agent 10) were tried. A 3- or 4-field combination search was
-   never run. Low expected value given the greedy search plateaued, but not eliminated.
+4. **DONE, negative result (L17 agent 12).** Cross-checked agent 10's pair fix, the Task 5 combo,
+   and the top 10 individually-improving fields from `sweep_001200.tsv` on frame 3130. The pair
+   (26.165/31.098) and the combo (26.430/31.098) both improve over 3130's base (25.645/30.023) but
+   stay ~9 dB short of 3130's bicubic (35.341/34.705). More importantly, the single-field ranking
+   does **not** transfer: `+0x150` is 3130's best single field (26.855/30.621), beating `+0x3a8`
+   (25.934/30.982), which was the clear best on frame 1200 (29.763 there). So "best fix" is at
+   least partly overfit to frame content, not a fixed property of the network. No fix beats
+   bicubic on both frames. See TASK.md "L17 agent 12".
+5. **DONE, negative result (L17 agent 12).** Combinatorial search over 3- and 4-field subsets of
+   every field from `sweep_001200.tsv` that improves the score alone (21 fields), capped at 2000
+   runs, plus alternate-seed greedy search. Best combo: `+0xa8=-1 +0xdc=2.0f +0x1e0=L16(0x40)
+   +0x3a8=1` at 29.838/32.345, matching (not clearly beating) agent 10's pair (29.809/32.359).
+   Alternate greedy seeds converge to the same or a worse local optimum, never a better one. One
+   plateau, not several; not worth further multi-field search on this frame. See TASK.md
+   "L17 agent 12".
 6. **Slot 12 (host callback `0x68`)** is still functionally unnamed. It fires twice per Process
    with `a1=0`; one call passes a small host descriptor (`06 00 04 00 03 00 01 00 07 00 07 00 ...`).
    Never conclusively shown to affect L17, but never fully decoded either.

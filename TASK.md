@@ -1602,6 +1602,42 @@ does), not a context/thread problem at all.
        The bias must be cancelled inside L17 itself or upstream of it, not at launch 18. Scripts:
        CT114 `analysis/b5/argall_on.log`, `argall_off.log`, `dump18.py`.
        Neither task moved the network-on score; bicubic (34.699/32.929) is still ahead.
+     - **2026-09-23 (L17 agent 12), 3/4-field combos + frame 3130 cross-check, no gain.**
+       Task 1: from `sweep_001200.tsv`, 21 fields improve the score at all when set alone (list in
+       `analysis/b6/improving_fields.tsv`). Combinatorial search over 3- and 4-field subsets of
+       those 21, each field at its own best single-field value, capped at 2000 runs prioritising
+       combos containing `+0x3a8`/`+0x44` first: best is `+0xa8=-1 +0xdc=2.0f +0x1e0=L16(0x40)
+       +0x3a8=1` at 29.838/32.345 (vsbic 28.736, md5 `b5d3e8f9`), barely above agent 10's pair
+       (29.809/32.359) in RGB and slightly below it in Y. Not a real improvement over the pair.
+       Alternate greedy seeds (`+0x150`, `+0x290`, `+0x40` instead of `+0x3a8`) all plateau at or
+       below the same region: 29.658, 29.440, 29.808 respectively (seed `+0x40` reconverges onto
+       the same `+0x40+0x3a8` pair). One local optimum, not several. Still ~5 dB short of bicubic
+       (34.699/32.929) in every case.
+       Task 2: cross-checked on frame 3130 (base 25.645/30.023, bicubic 35.341/34.705). Agent 10's
+       pair (`+0x3a8=1+0x44=1`): 26.165/31.098, an improvement over base but ~9 dB short of
+       bicubic. The Task 1 combo: 26.430/31.098, better than the pair but still short. Cross-checked
+       the top 10 individually-improving fields from `sweep_001200.tsv` on 3130: **the ranking does
+       not agree with frame 1200.** `+0x150` is the best single field on 3130 (26.855/30.621),
+       overtaking `+0x3a8` (25.934/30.982, matches the frame-1200 sweep's own earlier 3130 spot
+       check exactly, confirming reproducibility) which was the clear best on frame 1200. The other
+       seven fields (`+0x40,+0x44,+0x48,+0x58,+0x68,+0x1a4,+0x200`) cluster near 25.90/30.34 on
+       3130, same relative order as on 1200 but all below `+0x150` and `+0x3a8`. So the "best fix"
+       is at least partly frame-dependent rather than a fixed property of the network's bias term;
+       no combination found here is safe to call a general correction. No fix, single or combined,
+       beats bicubic on either frame. Full data: `analysis/b6/` (`combo_search.py`,
+       `combo_search_001200.tsv`, `combo_best_001200.json`, `greedy_alt.py`,
+       `greedy_alt_001200.json`, `crosscheck_3130.py`, `crosscheck_3130.json`, `combo_3130.py`,
+       `combo_3130.json`, `runlib.py`).
+       Housekeeping: `analysis/b3/sweep.py`'s module-level code re-runs its whole 1956-row sweep as
+       an unconditional import side effect (the `if __name__=='__main__'` guard only covers the
+       single-run CLI branch below it, not the sweep loop). Importing it from a script that isn't
+       `sweep.py` itself, or piping through `python3 -c`, re-triggers the full sweep and overwrites
+       `sweep_001200.tsv`. This agent hit that, killed the partial re-run, and let a full re-run
+       finish; the regenerated file's field-level results matched the pre-incident data exactly
+       (checked field-by-field, not by file md5, which differs run to run). Wrote `analysis/b6/
+       runlib.py`, a copy of just `sweep.py`'s `run()` function, for any future script that needs to
+       call single argw runs without that side effect; agent 10's `search.py` has the same
+       `import sweep` pattern and carries the same risk if imported from anywhere but its own CLI.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
      one harness `cuCtxSynchronize` per frame, timed). CT114, 960x540 -> 1920x1080, surf I/O,
