@@ -86,6 +86,13 @@ WITH_MAXINE_VSR="${WITH_MAXINE_VSR:-0}"
 # headers, no shared gu_inputs.h), and registers under the name `dlpp_rtcuda`, never the
 # `dlpp_drv_cuda` name ffmpeg-patches/0006 already reserves for a different, Route B filter.
 WITH_RTXDLPP="${WITH_RTXDLPP:-0}"
+# Route A of Track C: RTX VSR bypass resampler (AIVP, nvaivpx.dll) hosted live via our own PE
+# loader, the same architecture as WITH_RTXDLPP just above (its own forked copy of the loader
+# files, not a shared dependency -- see RTXVSR.md). Off by default, and deliberately NOT added
+# to proxmox-build.sh's mandatory five-filter list, same reasoning as WITH_RTXDLPP. Registers
+# under the name `vsr_rtcuda`, never `vsr_drv_cuda`, which ffmpeg-patches/0005 already reserves
+# for a different, Route B filter (see .agent-briefs/vsr-drv-promote-to-production.md).
+WITH_RTXVSR="${WITH_RTXVSR:-0}"
 # Old name, renamed so it cannot be mistaken for RTX VSR (`vsr_drv_cuda`, planned as WITH_RTXCUDA).
 if [[ -n "${WITH_VSR:-}" ]]; then
     echo "WITH_VSR was renamed WITH_MAXINE_VSR (Maxine, retired). RTX VSR will be WITH_RTXCUDA (planned, TASK.md 2.2). Unset WITH_VSR." >&2
@@ -125,6 +132,9 @@ NVOF_SDK="${NVOF_SDK:-/root/gameupscale/NVIDIAOpticalFlowSDK-nvof_2_0_bsd}"
 # <prefix>/dlss for the DLSS runtime blob. Default matches the path RTXDLPP.md tells the user
 # to populate by hand.
 RTXDLPP_DLL="${RTXDLPP_DLL:-${PREFIX}/rtxdlpp/dll/nvdlppx.dll}"
+# Same shape as RTXDLPP_DLL just above: a runtime data file, not a build-time SDK. Default
+# matches the path RTXVSR.md tells the user to populate by hand.
+RTXVSR_DLL="${RTXVSR_DLL:-${PREFIX}/rtxvsr/dll/nvaivpx.dll}"
 # Headers only, from the NGC SDK Core package and the nvvfxvideosuperres feature package - see
 # VSR.md for where these downloads come from and why they are not fetched here.
 VFXSDK_DIR="${VFXSDK_DIR:-/root/gameupscale/vfx/VideoFX}"
@@ -228,6 +238,18 @@ if [[ "$WITH_RTXDLPP" == "1" ]]; then
     for f in gu_dlpp_pe_map.c gu_dlpp_aivp_loader.c gu_dlpp_ngx_isr.c gu_dlpp_embed.h \
              gu_dlpp_embed.c gu_dlpp_nv12_rgba.ptx vf_dlpp_rtcuda.c; do
         [[ -f "$HERE/ffmpeg/$f" ]] || die "WITH_RTXDLPP=1: $HERE/ffmpeg/$f missing"
+    done
+fi
+
+# Same reasoning as WITH_RTXDLPP just above: no SDK headers, the loader resolves everything from
+# the DLL's own PE export table at run time. Independent flag, independent file set -- see
+# RTXVSR.md "Flag naming" for why this is not folded into a shared WITH_RTXCUDA.
+if [[ "$WITH_RTXVSR" == "1" ]]; then
+    [[ -f "$RTXVSR_DLL" ]] \
+        || die "WITH_RTXVSR=1: no nvaivpx.dll at RTXVSR_DLL=$RTXVSR_DLL (see RTXVSR.md)"
+    for f in gu_vsr_pe_map.c gu_vsr_aivp_loader.c gu_vsr_ngx_isr.c gu_vsr_embed.h \
+             gu_vsr_embed.c gu_vsr_nv12_rgba.ptx vf_vsr_rtcuda.c; do
+        [[ -f "$HERE/ffmpeg/$f" ]] || die "WITH_RTXVSR=1: $HERE/ffmpeg/$f missing"
     done
 fi
 
@@ -464,6 +486,28 @@ if [[ "$WITH_RTXDLPP" == "1" ]]; then
 
     EXTRA_LIBS="$EXTRA_LIBS -ldl -lpthread"
 fi
+if [[ "$WITH_RTXVSR" == "1" ]]; then
+    say "wiring vsr_rtcuda into the build"
+    cp "$HERE/ffmpeg/gu_vsr_pe_map.c" "$HERE/ffmpeg/gu_vsr_aivp_loader.c" \
+       "$HERE/ffmpeg/gu_vsr_ngx_isr.c" "$HERE/ffmpeg/gu_vsr_embed.h" \
+       "$HERE/ffmpeg/gu_vsr_embed.c" "$HERE/ffmpeg/vf_vsr_rtcuda.c" libavfilter/
+
+    # gu_vsr_nv12_rgba_ptx.h is generated, not committed: same sed-to-C-string transform
+    # WITH_RTXDLPP uses for its own PTX-as-header file.
+    { echo 'static const char gu_vsr_nv12_rgba_ptx[] ='
+      sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$/\\n"/' \
+          "$HERE/ffmpeg/gu_vsr_nv12_rgba.ptx"
+      echo ';'; } > libavfilter/gu_vsr_nv12_rgba_ptx.h
+
+    grep -q vf_vsr_rtcuda libavfilter/Makefile ||
+        sed -i '/^OBJS-\$(CONFIG_SCALE_CUDA_FILTER)/i OBJS-$(CONFIG_VSR_RTCUDA_FILTER)           += vf_vsr_rtcuda.o gu_vsr_embed.o' \
+            libavfilter/Makefile
+    grep -q ff_vf_vsr_rtcuda libavfilter/allfilters.c ||
+        sed -i '/^extern const FFFilter ff_vf_scale_cuda;/i extern const FFFilter ff_vf_vsr_rtcuda;' \
+            libavfilter/allfilters.c
+
+    EXTRA_LIBS="$EXTRA_LIBS -ldl -lpthread"
+fi
 
 say "configure"
 PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}" ./configure \
@@ -481,6 +525,10 @@ PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
 if [[ "$WITH_RTXDLPP" == "1" ]]; then
     grep -q CONFIG_DLPP_RTCUDA_FILTER ffbuild/config.mak \
         || die "WITH_RTXDLPP=1: configure did not enable dlpp_rtcuda_filter -- check libavfilter/allfilters.c got the new extern before configure ran"
+fi
+if [[ "$WITH_RTXVSR" == "1" ]]; then
+    grep -q CONFIG_VSR_RTCUDA_FILTER ffbuild/config.mak \
+        || die "WITH_RTXVSR=1: configure did not enable vsr_rtcuda_filter -- check libavfilter/allfilters.c got the new extern before configure ran"
 fi
 
 say "make -j$(nproc)"
@@ -568,6 +616,11 @@ if [[ "$WITH_RTXDLPP" == "1" ]]; then
     "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bdlpp_rtcuda\b" \
         && echo "  dlpp_rtcuda: present (registered - see RTXDLPP.md for what's verified vs assumed)" \
         || die "dlpp_rtcuda filter missing from the build"
+fi
+if [[ "$WITH_RTXVSR" == "1" ]]; then
+    "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bvsr_rtcuda\b" \
+        && echo "  vsr_rtcuda: present (registered - see RTXVSR.md for what's verified vs assumed)" \
+        || die "vsr_rtcuda filter missing from the build"
 fi
 
 cat <<EOF

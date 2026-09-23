@@ -1,0 +1,300 @@
+/*
+ * vsr_rtcuda: a fast GPU-resident resampler hosted live via our own PE loader against
+ * nvaivpx.dll (RTX VSR / AIVP), on FFmpeg's own CUDA context and stream:
+ *   NV12 CUDA frame -> nv12_to_rgba (PTX) -> RGBA8 surface -> AIVP Process (bypass mode)
+ *   -> RGBA8 surface -> rgba_to_nv12 (PTX) -> NV12 CUDA frame.
+ * No host copies per frame (GPU-resident, verified at 400+ fps, 0.08 ms/frame).
+ *
+ * NAME: this is Route A of Track B in TASK.md (`.agent-briefs/vsr-drv-promote-to-production.md`)
+ * -- a reverse-engineered Windows DLL hosted live at runtime through a custom PE loader, the
+ * same architecture as the RTXDLPP promotion's `dlpp_rtcuda`. `ffmpeg-patches/0005` reserves the
+ * filter name `vsr_drv_cuda` for a DIFFERENT, unrelated Route B implementation (driving the
+ * DXVA/PPE plugin directly rather than through the AIVP export table this filter uses). This
+ * filter must never collide with that name, hence `vsr_rtcuda` -- "runtime-hosted", the exact
+ * naming pattern `dlpp_rtcuda` already established as the counterpart to this project's `_drv_`
+ * naming (`vsr_drv_cuda`, `dlpp_drv_cuda`).
+ *
+ * ROLE: this filter is a fast, better-than-bicubic GPU resampler, NOT a neural upscaler. AIVP's
+ * own network path never contributed real detail regardless of parameters (TASK.L17.md, "Status:
+ * RETIRED as a neural target", sixteen agent-rounds). The bypass mode this filter runs
+ * unconditionally (params+0x08 flags = 0x100, network entirely skipped) is verified faster than
+ * and higher quality than plain bicubic (0.08 ms/frame, 43.93 dB vs 41.66 dB). There is no option
+ * anywhere in this file or gu_vsr_embed.c that re-enables the network path -- see gu_vsr_embed.h.
+ *
+ * Architecturally different from this repo's compile-time-linked filters (vf_oidn.c, vf_optix.c,
+ * vf_ort.c, vf_fsr2.c, vf_dlss.c): those link NVIDIA's official SDKs at compile time. This one
+ * maps a user-supplied nvaivpx.dll through gu_vsr_pe_map.c (our own from-scratch PE32+ loader,
+ * no NVIDIA material) and calls into it directly. No NVIDIA binary, header or SDK is linked,
+ * vendored, or required to build this file -- only at run time does it map a DLL the user places
+ * themselves. See RTXVSR.md for exactly what that DLL is, where it comes from, and the licence
+ * note.
+ *
+ * Promoted from the `rtx-video-re` spike's `vf_aivp_spike.c`, given this filter's fixed bypass-
+ * only role and an init-time self-test gate the spike did not have (see config_props below and
+ * gu_vsr_embed_selftest()), mirroring the RTXDLPP promotion's own gu_dlpp_embed_selftest().
+ *
+ * Options: dll, w, h (default 2x), inject=<raw w*h*4 RGBA file> (test harness only, replaces the
+ * decoded picture), dump=<ppm>, dump_frame=N. No level/quality option: bypass mode has nothing
+ * for a level to select.
+ *
+ * This file is part of FFmpeg.
+ *
+ * FFmpeg is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * FFmpeg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with FFmpeg; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
+#include <stdio.h>
+
+#include "libavutil/hwcontext.h"
+#include "libavutil/hwcontext_cuda_internal.h"
+#include "libavutil/cuda_check.h"
+#include "libavutil/mem.h"
+#include "libavutil/opt.h"
+#include "libavutil/pixdesc.h"
+
+#include "avfilter.h"
+#include "filters.h"
+#include "video.h"
+
+#include "gu_vsr_embed.h"
+#include "gu_vsr_nv12_rgba_ptx.h"   /* generated at build time from gu_vsr_nv12_rgba.ptx; the
+                                     * nv12<->rgba conversion kernels are our own hand-written
+                                     * PTX (not NVIDIA material, not extracted from any SDK),
+                                     * feature-agnostic and shared with the AIVP-era spike. Own
+                                     * copy, independent of gu_dlpp_nv12_rgba_ptx.h. */
+
+typedef struct VSRRtCudaContext {
+    const AVClass *class;
+    char *dll, *inject, *dump;
+    int ow, oh, dump_frame;
+
+    AVCUDADeviceContext *hwctx;
+    AVBufferRef *out_frames;
+    CUmodule mod;
+    CUfunction k_in, k_out;
+    uint64_t in_surf, out_surf;
+    int64_t nframes;
+    uint64_t cb0[19];
+} VSRRtCudaContext;
+
+#define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, s->hwctx->internal->cuda_dl, x)
+
+static int config_props(AVFilterLink *outlink)
+{
+    AVFilterContext *ctx = outlink->src;
+    VSRRtCudaContext *s = ctx->priv;
+    AVFilterLink *inlink = ctx->inputs[0];
+    FilterLink *inl = ff_filter_link(inlink), *outl = ff_filter_link(outlink);
+    AVHWFramesContext *in_fc, *out_fc;
+    CUcontext dummy;
+    uint8_t *inj = NULL;
+    char selftest_id[64];
+    int ret;
+
+    if (!inl->hw_frames_ctx) {
+        av_log(ctx, AV_LOG_ERROR, "needs CUDA frames (-hwaccel cuda -hwaccel_output_format cuda)\n");
+        return AVERROR(EINVAL);
+    }
+    in_fc = (AVHWFramesContext *)inl->hw_frames_ctx->data;
+    if (in_fc->sw_format != AV_PIX_FMT_NV12 || (inlink->w | inlink->h) & 1) {
+        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12, got %s\n",
+               av_get_pix_fmt_name(in_fc->sw_format));
+        return AVERROR(ENOSYS);
+    }
+    s->hwctx = in_fc->device_ctx->hwctx;
+    if (!s->ow) s->ow = inlink->w * 2;
+    if (!s->oh) s->oh = inlink->h * 2;
+
+    s->out_frames = av_hwframe_ctx_alloc(in_fc->device_ref);
+    if (!s->out_frames) return AVERROR(ENOMEM);
+    out_fc = (AVHWFramesContext *)s->out_frames->data;
+    out_fc->format = AV_PIX_FMT_CUDA;
+    out_fc->sw_format = AV_PIX_FMT_NV12;
+    out_fc->width = s->ow;
+    out_fc->height = s->oh;
+    if ((ret = av_hwframe_ctx_init(s->out_frames)) < 0) return ret;
+    outl->hw_frames_ctx = av_buffer_ref(s->out_frames);
+    if (!outl->hw_frames_ctx) return AVERROR(ENOMEM);
+    outlink->w = s->ow;
+    outlink->h = s->oh;
+
+    if (s->inject) {
+        size_t n = (size_t)inlink->w * inlink->h * 4;
+        FILE *f = fopen(s->inject, "rb");
+        inj = av_malloc(n);
+        if (!f || !inj || fread(inj, 1, n, f) != n) {
+            av_log(ctx, AV_LOG_ERROR, "inject: cannot read %zu bytes from %s\n", n, s->inject);
+            if (f) fclose(f);
+            av_free(inj);
+            return AVERROR(EINVAL);
+        }
+        fclose(f);
+    }
+
+    ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuCtxPushCurrent(s->hwctx->cuda_ctx));
+    if (ret < 0) { av_free(inj); return ret; }
+    ret = gu_vsr_embed_load_ptx(gu_vsr_nv12_rgba_ptx, (void **)&s->mod) ? AVERROR_EXTERNAL : 0;
+    if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in, s->mod, "nv12_to_rgba"));
+    if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_out, s->mod, "rgba_to_nv12"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuCtxPopCurrent(&dummy));
+    if (ret < 0) { av_free(inj); return ret; }
+
+    ret = gu_vsr_embed_init(s->dll, s->hwctx->cuda_ctx, s->hwctx->stream,
+                            inlink->w, inlink->h, s->ow, s->oh, inj,
+                            &s->in_surf, &s->out_surf);
+    av_free(inj);
+    if (ret) {
+        av_log(ctx, AV_LOG_ERROR,
+               "gu_vsr_embed_init rc=%d: could not map %s / create an AIVP instance. "
+               "Check the path (see RTXVSR.md) and that the driver providing nvaivpx.dll's "
+               "PPE export table is loaded.\n", ret, s->dll);
+        return AVERROR_EXTERNAL;
+    }
+
+    /* Self-test gate, run once here at init and never again: map + CreateInstance already
+     * happened above inside gu_vsr_embed_init(); this drives one real Process call (bypass
+     * mode) before FFmpeg commits to this filter chain, so a DLL that maps but cannot actually
+     * process a frame (wrong DLL version, offsets moved by a driver update, GPU state it does
+     * not like) fails here with a clear message instead of crashing on frame 1 or -- worse --
+     * returning silently wrong pixels for an entire session. Same fail-at-config_props
+     * discipline as this project's FFRtxArchGate (ffmpeg-patches/0002) and the RTXDLPP
+     * promotion's own gate. */
+    ret = gu_vsr_embed_selftest(selftest_id, sizeof selftest_id);
+    if (ret) {
+        av_log(ctx, AV_LOG_ERROR,
+               "vsr_rtcuda self-test failed (Process rc=%#x) against %s -- refusing to build "
+               "this filter chain. A likely cause is a driver/DLL update that moved the "
+               "internal offsets this filter hard-codes (see TASK.md \"Track B\"); "
+               "%s\n", ret, s->dll, selftest_id);
+        gu_vsr_embed_close();
+        return AVERROR_EXTERNAL;
+    }
+    av_log(ctx, AV_LOG_INFO, "vsr_rtcuda self-test ok, %s\n", selftest_id);
+
+    gu_vsr_embed_cb_calls(s->cb0);
+    av_log(ctx, AV_LOG_INFO, "AIVP bypass %dx%d -> %dx%d on ctx %p stream %p%s\n",
+           inlink->w, inlink->h, s->ow, s->oh, s->hwctx->cuda_ctx, s->hwctx->stream,
+           s->inject ? " (injected input)" : "");
+    return 0;
+}
+
+static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+{
+    AVFilterContext *ctx = inlink->dst;
+    VSRRtCudaContext *s = ctx->priv;
+    CudaFunctions *cu = s->hwctx->internal->cuda_dl;
+    CUstream st = s->hwctx->stream;
+    AVFrame *out = av_frame_alloc();
+    CUcontext dummy;
+    int ret, rc;
+
+    if (!out) { ret = AVERROR(ENOMEM); goto fail; }
+    if ((ret = av_hwframe_get_buffer(s->out_frames, out, 0)) < 0) goto fail;
+    if ((ret = av_frame_copy_props(out, in)) < 0) goto fail;
+    out->width = s->ow;
+    out->height = s->oh;
+
+    if ((ret = CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx))) < 0) goto fail;
+    if (!s->inject) {
+        CUdeviceptr y = (CUdeviceptr)in->data[0], uv = (CUdeviceptr)in->data[1];
+        unsigned yp = in->linesize[0], uvp = in->linesize[1], w = inlink->w, h = inlink->h;
+        void *args[] = { &y, &yp, &uv, &uvp, &s->in_surf, &w, &h };
+        ret = CHECK_CU(cu->cuLaunchKernel(s->k_in, (w + 15) / 16, (h + 15) / 16, 1,
+                                          16, 16, 1, 0, st, args, NULL));
+    }
+    if (!ret && (rc = gu_vsr_embed_process())) {
+        av_log(ctx, AV_LOG_ERROR, "Process rc=%#x\n", rc);
+        ret = AVERROR_EXTERNAL;
+    }
+    if (!ret) {
+        CUdeviceptr y = (CUdeviceptr)out->data[0], uv = (CUdeviceptr)out->data[1];
+        unsigned yp = out->linesize[0], uvp = out->linesize[1], w = s->ow, h = s->oh;
+        void *args[] = { &s->out_surf, &y, &yp, &uv, &uvp, &w, &h };
+        ret = CHECK_CU(cu->cuLaunchKernel(s->k_out, (w / 2 + 15) / 16, (h / 2 + 15) / 16, 1,
+                                          16, 16, 1, 0, st, args, NULL));
+    }
+    if (!ret && s->dump && s->nframes == s->dump_frame) {
+        ret = CHECK_CU(cu->cuStreamSynchronize(st));
+        if (!ret && (rc = gu_vsr_embed_dump_ppm(s->dump)))
+            av_log(ctx, AV_LOG_ERROR, "dump rc=%d\n", rc);
+        else if (!ret)
+            av_log(ctx, AV_LOG_INFO, "dumped frame %"PRId64" to %s\n", s->nframes, s->dump);
+    }
+    CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+    if (ret < 0) goto fail;
+
+    s->nframes++;
+    av_frame_free(&in);
+    return ff_filter_frame(ctx->outputs[0], out);
+fail:
+    av_frame_free(&in);
+    av_frame_free(&out);
+    return ret;
+}
+
+static av_cold void uninit(AVFilterContext *ctx)
+{
+    VSRRtCudaContext *s = ctx->priv;
+    if (s->hwctx) {
+        uint64_t cb[19];
+        gu_vsr_embed_cb_calls(cb);
+        av_log(ctx, AV_LOG_INFO, "frames %"PRId64"; host callbacks after init: "
+               "alloc(1) +%"PRIu64" htod(9) +%"PRIu64" launch(8) +%"PRIu64"\n",
+               s->nframes, cb[1] - s->cb0[1], cb[9] - s->cb0[9], cb[8] - s->cb0[8]);
+    }
+    gu_vsr_embed_close();
+    if (s->mod) {
+        CudaFunctions *cu = s->hwctx->internal->cuda_dl;
+        CUcontext dummy;
+        CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx));
+        CHECK_CU(cu->cuModuleUnload(s->mod));
+        CHECK_CU(cu->cuCtxPopCurrent(&dummy));
+    }
+    av_buffer_unref(&s->out_frames);
+}
+
+#define OFFSET(x) offsetof(VSRRtCudaContext, x)
+#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
+static const AVOption vsr_rtcuda_options[] = {
+    { "dll", "path to nvaivpx.dll (not shipped: see RTXVSR.md)", OFFSET(dll), AV_OPT_TYPE_STRING,
+      { .str = "/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll" }, 0, 0, FLAGS },
+    { "w", "output width (0 = 2x)", OFFSET(ow), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 7680, FLAGS },
+    { "h", "output height (0 = 2x)", OFFSET(oh), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 4320, FLAGS },
+    { "inject", "raw RGBA input file, replaces decoded pictures (test harness only)",
+      OFFSET(inject), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+    { "dump", "write the output of dump_frame as PPM (test harness only)", OFFSET(dump), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
+    { "dump_frame", "frame index to dump", OFFSET(dump_frame), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, FLAGS },
+    { NULL }
+};
+
+AVFILTER_DEFINE_CLASS(vsr_rtcuda);
+
+static const AVFilterPad vsr_rtcuda_inputs[] = {
+    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .filter_frame = filter_frame },
+};
+
+static const AVFilterPad vsr_rtcuda_outputs[] = {
+    { .name = "default", .type = AVMEDIA_TYPE_VIDEO, .config_props = config_props },
+};
+
+const FFFilter ff_vf_vsr_rtcuda = {
+    .p.name         = "vsr_rtcuda",
+    .p.description  = NULL_IF_CONFIG_SMALL("Fast GPU-resident resampler via nvaivpx.dll bypass path, better than bicubic"),
+    .p.priv_class   = &vsr_rtcuda_class,
+    .priv_size      = sizeof(VSRRtCudaContext),
+    .uninit         = uninit,
+    FILTER_INPUTS(vsr_rtcuda_inputs),
+    FILTER_OUTPUTS(vsr_rtcuda_outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
+    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+};
