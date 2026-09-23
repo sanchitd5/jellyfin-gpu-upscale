@@ -1460,6 +1460,22 @@ does), not a context/thread problem at all.
        Windows-package DLL the user must supply, hard-coded RVAs (IID `0x202cd8`, level remap,
        slot layout) break on driver update and need a version/hash gate, and a fault inside the DLL
        kills ffmpeg, so the filter must self-test at init and drop itself, like `vf_dlss`.
+   - **2026-09-23, shortcut assumptions tested.** rtx-video-re `78e3429` (`AIVP_THREAD=teb|none`,
+     `AIVP_PRIMARY=1`, `AIVP_STREAM=1`). CT114, same setup as above, `AIVP_LOOP=200`, run with
+     `env -u LD_PRELOAD` (no interposer), logs in `/root/rtxv-spike/loader/sc2/`:
+     - VERIFIED: Process from a second pthread after init on main works. md5 `b3c5094c...` (flags
+       0). A fresh per-thread TEB reusing the main PE TLS array (TEB+0x58) is enough; so is no
+       `%gs` setup at all (`AIVP_THREAD=none`), so Process itself does not read the TEB there.
+     - VERIFIED: `cuDevicePrimaryCtxRetain` + `cuCtxSetCurrent` instead of the private ctx: md5
+       unchanged, 4.48 ms/frame.
+     - VERIFIED: real `CUstream` (non-blocking) passed as launch stream, s12 ignored: 3819/3819
+       launches on it, per-frame sync dropped, one `cuStreamSynchronize` at end, md5 unchanged.
+     - VERIFIED: all three together: 4.29 ms/frame, md5 `b3c5094c...`; bypass (`AIVP_FLAGS=0x100`)
+       0.08 ms, md5 `6d9a012a...`. Zero per-frame alloc/HtoD still holds.
+     - VERIFIED: no LD_PRELOAD needed. `nvaivpx.dll` imports only api-ms-win-* and `USER32.dll`;
+       libcuda comes through the loader's `dlopen("libcuda.so.1")` + `dlsym`. The interposer was
+       only for tracing.
+     - Not attempted: the `vf_aivp_spike` scratch filter.
 
 ## Track C: integration, once a data dir exists
 
