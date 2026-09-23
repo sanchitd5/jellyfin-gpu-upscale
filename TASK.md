@@ -1574,7 +1574,11 @@ does), not a context/thread problem at all.
        allocation layout as the cause. The 114 no-output runs from agent 9: 26 fields, all
        values; some fail at sync with rc=716, some pass on re-run. Cause not established.
        Frame 3130 not scored. Loader change uncommitted (aivp.c md5 `6bb2ee60`). Scripts: CT114
-       `analysis/b4/` (`search.py`, `search.tsv`, `col.py`).
+       `analysis/b4/` (`search.py`, `search.tsv`, `col.py`). The 114 failures break down by value
+       as 0.5f 26, 1 21, -1 19, 1.0f 26, 2.0f 22, across 26 distinct fields. Re-running two of the
+       failing writes (`17;1c0:4:0`, `17;3f8:4:ffffffff`) gave `cuCtxSynchronize` rc=0 and rc=716
+       respectively on CT114 — inconsistent with a fixed per-field cause, so likely state-dependent
+       (order of writes, or memory left over from the previous run) rather than the field itself.
      - 1.5 not started: capturing a network whose output is discarded would not capture VSR.
    - **2026-09-23, shortcut assessed: host the loader inside ffmpeg instead of capture+codegen.**
      rtx-video-re `9911328` (`AIVP_LOOP=N`: N more Process calls on one instance, same surfaces,
