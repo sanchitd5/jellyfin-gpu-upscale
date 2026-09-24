@@ -152,6 +152,17 @@ resize, and wiring the two new filters into `UpscaleEngine` - is the practical n
 residency is worth pursuing further; it is real, bounded, and answers the "does this even matter"
 question before anyone touches Tier 2's shared risk.
 
+## Web client: real ES modules, bundled at build time
+
+This file covers server-side GPU/filter architecture; the browser-side panel (`web/`) has its own
+module structure, documented where it is maintained rather than duplicated here: `CLAUDE.md`'s
+"Before you change the client" section for the file-by-file layout, `context-map.md` at the repo
+root for the full module/export/import list, and `WEB_PANEL_DESIGN.md` section 9/9.1 for how it got
+there. In one line: `web/src/{lib,model,controller,view}/*.js` and `web/src/bootstrap.js` are real
+ES modules, bundled by esbuild (build-time only, see `scripts/build-web-panel.sh`) into the single
+plain IIFE (`web/gpu-upscale.js`) that `scripts/jellyfin-gpuupscale-webinject` publishes - no ES
+module support is needed, or used, at runtime in the browser.
+
 ## Deployment: binary selection is per-invocation, not per-restart
 
 The real production shim (`/usr/local/bin/jellyfin-ffmpeg-upscale` on CT114, not in this repo; see

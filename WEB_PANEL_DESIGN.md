@@ -597,48 +597,60 @@ daemon confirmed active, no build/deploy/restart done - see report)
 ## 9. Client restructuring and the open items this pass implemented (2026-09-24,
    `.agent-briefs/modularize-web-panel.md`)
 
-`web/gpu-upscale.js` is no longer hand-edited. It is now a generated, committed build output:
-source lives in `web/src/*.js`, one file per real seam (numeric prefix fixes the concatenation
-order), and `scripts/build-web-panel.sh` concatenates them with a three-line generated-file banner
-on top. The split was done as literal line-range slices of the working file at the time, so the
-first build was diffed byte-for-byte against the pre-split file (identical past the banner) before
-any of the changes below were made - see `CLAUDE.md`'s "Before you change the client" section for
-the file-by-file layout. `scripts/jellyfin-gpuupscale-webinject` is unmodified: it still copies one
-file, `web/gpu-upscale.js`, and nothing about its behaviour changed.
+`web/gpu-upscale.js` is no longer hand-edited. It is now a generated, committed build output.
+
+**Superseded 2026-09-24** (`.agent-briefs/real-es-modules.md`): the numeric-prefix, `cat`-based
+split described below (one paragraph, kept for history) was replaced with real ES modules and a
+real bundler. Source now lives in `web/src/{lib,model,controller,view}/*.js` plus the entry point
+`web/src/bootstrap.js`, using real `import`/`export`; `scripts/build-web-panel.sh` runs esbuild
+(installed under `web/node_modules` from `web/package-lock.json`, gitignored, build-time only) to
+bundle that module graph into one IIFE, banner-prefixed from `web/src/banner.txt`, with no
+`import`/`export` surviving into the output and no runtime module system needed. See `CLAUDE.md`'s
+"Before you change the client" section for the current file-by-file layout, and `context-map.md`
+at the repo root for the full module list with what each one exports and imports.
+`scripts/jellyfin-gpuupscale-webinject` copies the same one file, `web/gpu-upscale.js`, unchanged
+in that respect; its cache-buster derivation changed separately (see its own header comment).
+
+*(History, superseded above.)* The numbered-file split concatenated `web/src/*.js` in one shared
+function scope, one file per real seam, numeric prefix fixing the concatenation order, with
+`scripts/build-web-panel.sh` (`cat`, at the time) writing a three-line generated-file banner on
+top. The split was done as literal line-range slices of the working file at the time, so the first
+build was diffed byte-for-byte against the pre-split file (identical past the banner) before any of
+the changes below were made.
 
 Client-side items from sections 1-4 implemented this pass, all tolerant of an older server that
 does not send the new probe keys (same "degrades to no new UI, not wrong UI" rule as every other
 probe-driven field in this file):
 
-- **1.3(a)** - the `neural` control's label is now `Detail engine (RTX / neural)` (`web/src/10-
-  controls.js`); the matching live-block row (`web/src/60-live-block.js`) is now `Detail engine`.
+- **1.3(a)** - the `neural` control's label is now `Detail engine (RTX / neural)` (`web/src/model/
+  controls-data.js`); the matching live-block row (`web/src/controller/live-block.js`) is now `Detail engine`.
   **JUDGMENT CALL, not the user's**: the doc's own two alternatives were "GPU detail engine" and
   "Detail (RTX / neural)" - this pass picked the latter. Flag for revisit.
-- **1.3(b)** - `<optgroup>` rendering in the neural picker (`controlRow()`, `web/src/90-panel-
+- **1.3(b)** - `<optgroup>` rendering in the neural picker (`controlRow()`, `web/src/view/panel-
   dom.js`), driven by two new optional probe keys the control now declares (`familiesKey:
-  'NeuralFamilies'`, `familyLabelsKey: 'NeuralFamilyLabels'`, `web/src/10-controls.js`) and threaded
-  through by `axisControls()` (`web/src/40-probe.js`). Off and any ungrouped id render flat (Off
+  'NeuralFamilies'`, `familyLabelsKey: 'NeuralFamilyLabels'`, `web/src/model/controls-data.js`) and threaded
+  through by `axisControls()` (`web/src/controller/probe.js`). Off and any ungrouped id render flat (Off
   first, ungrouped ids last); everything else groups in first-seen order. A server that sends
   neither key gets today's flat list, unchanged.
 - **2.2/2.3** - a one-line, server-worded note for the CURRENT level (`notesKey: 'NeuralNotes'`),
   rendered under the picker when the probe supplies one for the selected id. No number, no ranking
   language - the note is whatever the probe sends, verbatim.
-- **3.2** - `neuralIsCudaNative()`/`CONFLICTS` (`web/src/80-conflicts.js`) now read `NeuralCudaLevels`
+- **3.2** - `neuralIsCudaNative()`/`CONFLICTS` (`web/src/model/conflicts.js`) now read `NeuralCudaLevels`
   and `NeuralCudaDisables` from the probe when present, falling back to the exact literal lists
   `ef083b9` shipped (still an exact-match test, never a prefix test, per that commit's own warning
   about the `vsr` placeholder). The seven CUDA-native `CONFLICTS` entries are generated from the
   disables list rather than hand-written per axis, and their `why` text was generalised to name any
   axis the list carries (a small wording simplification from `ef083b9`'s per-axis sentences).
 - **3.3** - denoise gets OPTION-level inertness rather than row-level: a new `optionInert(c, id)`
-  hook (`web/src/80-conflicts.js`), consulted per chip and per `<select>` option in `controlRow()`,
+  hook (`web/src/model/conflicts.js`), consulted per chip and per `<select>` option in `controlRow()`,
   reads `CudaDenoiseLevels` (probe key, fallback `['off','optix','optix-temporal']`) and disables
   only the denoise levels not on it, leaving `optix`/`optix-temporal` live exactly as the server
   does on that branch.
 - **3.4** - the consequence note: when a CUDA-native `neural` level is picked and at least one
   disabled axis is set away from its own default, one note renders directly under the `neural` row
   naming which axes will be turned off, in `CONTROLS[].label` wording (`cudaSuppressedLabels()`,
-  `web/src/90-panel-dom.js`). Silent when nothing would be lost, per the design's own rule.
-- **3.5** - `Pipeline` and `Denoise dropped` rows added to `LIVE_ROWS` (`web/src/60-live-block.js`).
+  `web/src/view/panel-dom.js`). Silent when nothing would be lost, per the design's own rule.
+- **3.5** - `Pipeline` and `Denoise dropped` rows added to `LIVE_ROWS` (`web/src/controller/live-block.js`).
   Both are read straight off the session record like every other row here and print nothing until a
   server actually sends `Pipeline`/`DenoiseDroppedForPatchedBinary` - the server-side half of 3.5
   (deciding what `Pipeline` should say, confirming `DenoiseDroppedForPatchedBinary`'s shape) is a
@@ -658,10 +670,29 @@ purpose:
 - Section 8, item 4 (inline "(off on CUDA path)" text for TV clients without tooltips) - the design
   doc itself says "cheap to add; not in this pass unless wanted." Still not wanted this pass either.
 
-**VERIFIED**: `node --check` on the built `web/gpu-upscale.js` (valid syntax); the pre-improvement
-build is byte-identical to the prior single file past the added three-line generated banner (`diff`
-against a saved copy). **ASSUMED, not verified**: the new rendering paths (optgroup construction,
-option-level inertness, the two new notes) were reviewed by reading, not by driving a browser -
-this environment has no jsdom or browser available, and the task's own hard limits keep this pass
-off any live server. Whoever opens the Advanced disclosure on `dlpp-3`/`vsr-rtcuda` next, on a real
-server that sends the new probe keys, is the actual test.
+**VERIFIED** (for this pass, against the `cat`-based build that existed at the time): `node --check`
+on the built `web/gpu-upscale.js` (valid syntax); the pre-improvement build is byte-identical to the
+prior single file past the added three-line generated banner (`diff` against a saved copy).
+**ASSUMED, not verified**: the new rendering paths (optgroup construction, option-level inertness,
+the two new notes) were reviewed by reading, not by driving a browser - this environment has no
+jsdom or browser available, and the task's own hard limits keep this pass off any live server.
+Whoever opens the Advanced disclosure on `dlpp-3`/`vsr-rtcuda` next, on a real server that sends the
+new probe keys, is the actual test.
+
+### 9.1 Real ES modules rebuild (2026-09-24, `.agent-briefs/real-es-modules.md`)
+
+The `web/src/NN-name.js` / `cat`-concatenation mechanism described above is retired. See the
+superseding note at the top of section 9 for what replaced it, and `context-map.md` for the full
+module list. **VERIFIED**: `node --check` on the rebuilt `web/gpu-upscale.js` (valid syntax); a
+Node smoke run of the bundled IIFE against stubbed `document`/`window`/`localStorage`/
+`MutationObserver` completes `install()` with `state.installed === true` and both webpack chunk
+globals hooked, i.e. every top-level hook (`hookWebpack`, `hookFetch`, `hookXhr`,
+`watchPlaybackInfoDialog`, `probeServer`) runs to completion with no thrown error; a function-name
+census of the bundle (103 `function` declarations, before and after) matches 1:1 against the
+`726cbc5` build modulo comment-text false positives, esbuild's `function`-to-`let` rewrite of one
+nested closure (`makeDraggable`'s `end()`), and this pass's own small, intentional additions (the
+`install()` entry wrapper, a named `loadPrefs()` IIFE, one duplicated `isOff`-shaped predicate kept
+local to avoid an extra import edge). **ASSUMED, not verified**: no live browser or Jellyfin server
+was driven this pass either (same hard limits as 9's own pass) - the rendering paths themselves are
+unchanged from what 9 already reviewed, and the new risk surface is the module boundaries and the
+bundler, which the syntax check, function census and smoke run cover, not a real playback session.

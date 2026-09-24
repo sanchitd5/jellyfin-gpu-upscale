@@ -11,12 +11,18 @@ set -euo pipefail
 WEB=/usr/share/jellyfin/web
 SRC=/usr/lib/jellyfin-gpuupscale/gpu-upscale.js
 
-# Bumped whenever gpu-upscale.js changes, so a browser holding an older copy re-fetches it.
-VERSION=33
-TAG="<script defer=\"defer\" src=\"gpu-upscale.js?v=$VERSION\"></script>"
-
 [ -f "$SRC" ] || { echo "gpu-upscale: source $SRC missing, nothing to do"; exit 0; }
 [ -f "$WEB/index.html" ] || { echo "gpu-upscale: $WEB/index.html missing, nothing to do"; exit 0; }
+
+# The cache-buster is derived from the CONTENT of $SRC every time this script runs, not tracked
+# as a separate integer a human has to remember to bump. It is therefore structurally impossible
+# for it to drift from what is actually being installed: an unchanged rebuild reuses the same
+# hash and installs under the same URL (a no-op cache-wise, correctly), and any real content
+# change gets a new URL automatically, with no edit to this script required either way. This
+# replaces a hand-maintained VERSION=N that was wrong in both directions when forgotten - see
+# CLAUDE.md, "Deploying, and the one step that is easy to forget".
+VERSION=$(sha256sum "$SRC" | cut -c1-10)
+TAG="<script defer=\"defer\" src=\"gpu-upscale.js?v=$VERSION\"></script>"
 
 # One pristine backup, taken the first time only.
 [ -f "$WEB/index.html.gpuupscale-orig" ] || cp -a "$WEB/index.html" "$WEB/index.html.gpuupscale-orig"

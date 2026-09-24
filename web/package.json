@@ -1,0 +1,11 @@
+{
+  "name": "jellyfin-gpuupscale-web",
+  "private": true,
+  "description": "Build-time only. Bundles web/src/**/*.js (real ES modules) into web/gpu-upscale.js, the single plain script the injector publishes. Never required at runtime on the server or in the browser.",
+  "scripts": {
+    "build": "../scripts/build-web-panel.sh"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

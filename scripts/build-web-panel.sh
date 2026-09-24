@@ -1,45 +1,49 @@
 #!/bin/bash
 # Builds web/gpu-upscale.js (the single file the injector actually publishes,
-# scripts/jellyfin-gpuupscale-webinject copies exactly this path) from the source modules in
-# web/src/. Plain concatenation, no dependency: the runtime script is one global-scope IIFE
-# (jellyfin-web's injection context does not support ES module import/export at this stage), and
-# the modules are just that IIFE's body pre-split at real seams, in numeric-prefix order, sharing
-# one function/variable scope exactly as the unsplit file did.
+# scripts/jellyfin-gpuupscale-webinject copies exactly this path) from the real ES modules in
+# web/src/. The source is honest modules with real import/export (web/src/bootstrap.js is the
+# entry point; web/src/{lib,model,controller,view}/*.js are the modules it pulls in); esbuild
+# bundles that module graph into ONE plain IIFE with no runtime module system, because
+# jellyfin-web's injection context does not support ES module import/export at this stage.
+#
+# esbuild is a BUILD-TIME-ONLY dependency, installed under web/node_modules (gitignored) from
+# web/package-lock.json, which IS checked in. It never appears in the runtime output and is never
+# needed on the server/CT114 - only on whichever machine runs this script. Node.js (and thus npm)
+# is required on that build machine to install and run esbuild; nothing else is.
 #
 # Usage: scripts/build-web-panel.sh
-#   Regenerates web/gpu-upscale.js from web/src/*.js. Does NOT touch VERSION in
-#   scripts/jellyfin-gpuupscale-webinject and does NOT publish or copy the output anywhere -
-#   that stays a separate, explicit step. Commit the rebuilt web/gpu-upscale.js like any other
-#   generated-but-checked-in artifact.
+#   Regenerates web/gpu-upscale.js from web/src/bootstrap.js and everything it imports. Does NOT
+#   touch VERSION/the cache-buster in scripts/jellyfin-gpuupscale-webinject and does NOT publish
+#   or copy the output anywhere - that stays a separate, explicit step. Commit the rebuilt
+#   web/gpu-upscale.js like any other generated-but-checked-in artifact.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SRC_DIR=web/src
+WEB_DIR=web
+ENTRY=web/src/bootstrap.js
 OUT=web/gpu-upscale.js
+BANNER=web/src/banner.txt
 
-shopt -s nullglob
-files=("$SRC_DIR"/*.js)
-shopt -u nullglob
-
-if [ "${#files[@]}" -eq 0 ]; then
-    echo "build-web-panel: no source files found in $SRC_DIR" >&2
+if [ ! -f "$ENTRY" ]; then
+    echo "build-web-panel: entry point $ENTRY not found" >&2
     exit 1
 fi
 
-# Sorted lexically, which is why every module file carries a numeric prefix: that prefix IS the
-# build order, not a naming decoration.
-IFS=$'\n' sorted=($(printf '%s\n' "${files[@]}" | sort))
-unset IFS
+if [ ! -d "$WEB_DIR/node_modules/esbuild" ]; then
+    echo "build-web-panel: esbuild not installed under $WEB_DIR/node_modules; run 'npm install' in $WEB_DIR first" >&2
+    exit 1
+fi
 
-{
-    echo "// GENERATED FILE. Do not edit directly."
-    echo "// Source lives in web/src/*.js; rebuild with scripts/build-web-panel.sh."
-    echo "// See CLAUDE.md, \"Before you change the client\", for the module layout."
-    for f in "${sorted[@]}"; do
-        cat "$f"
-    done
-} > "$OUT.tmp"
+(
+    cd "$WEB_DIR"
+    ./node_modules/.bin/esbuild src/bootstrap.js \
+        --bundle \
+        --format=iife \
+        --target=es2018 \
+        --banner:js="$(cat src/banner.txt)" \
+        --outfile=gpu-upscale.js.tmp
+)
 
 mv "$OUT.tmp" "$OUT"
-echo "build-web-panel: wrote $OUT from ${#sorted[@]} module(s)"
+echo "build-web-panel: wrote $OUT from $ENTRY (esbuild, bundled)"
