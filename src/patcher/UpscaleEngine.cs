@@ -1065,8 +1065,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     return Plan.No("ineligible", "unknown source size");
                 }
 
-                int sw = vs.Width.Value;
-                int sh = vs.Height.Value;
+                (int sw, int sh) = UprightSize(vs.Width.Value, vs.Height.Value, vs.Rotation);
 
                 var plan = new Plan { SourceWidth = sw, SourceHeight = sh, Width = sw, Height = sh };
 
@@ -1566,6 +1565,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         }
 
         /// <summary>
+        /// The size of the picture as it is displayed. A phone video is often stored sideways with a
+        /// rotation of 90 or 270 degrees in its metadata, and Jellyfin turns it upright in the
+        /// filter chain (transpose_cuda, transpose, or ffmpeg's own autorotate), so everything after
+        /// that point sees the swapped dimensions. Reading the stored size made a 848x480 source
+        /// stored sideways get a landscape 3816x2160 target for a portrait picture.
+        /// </summary>
+        private static (int Width, int Height) UprightSize(int width, int height, int? rotation)
+        {
+            int quarterTurns = ((rotation ?? 0) % 360 + 360) % 360;
+            return quarterTurns == 90 || quarterTurns == 270 ? (height, width) : (width, height);
+        }
+
+        /// <summary>
         /// Would an upscale actually apply to a source of this size, under the current settings?
         ///
         /// This is the same arithmetic <see cref="Decide"/> uses for the upscale target, factored
@@ -1573,7 +1585,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// If the two ever disagreed, the override would force expensive transcodes for material
         /// the engine then declined to enhance, which is the worst of both worlds.
         /// </summary>
-        public static bool WouldEnhanceSource(int? width, int? height)
+        public static bool WouldEnhanceSource(int? width, int? height, int? rotation = null)
         {
             try
             {
@@ -1588,7 +1600,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     return false;
                 }
 
-                int sh = height.Value;
+                int sh = UprightSize(width.Value, height.Value, rotation).Height;
                 if (sh > cfg.MaxSourceHeight)
                 {
                     return false;

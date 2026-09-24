@@ -265,7 +265,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                         continue;
                     }
 
-                    if (!UpscaleEngine.WouldEnhanceSource(stream.Width, stream.Height))
+                    if (!UpscaleEngine.WouldEnhanceSource(stream.Width, stream.Height, stream.Rotation))
                     {
                         return;
                     }
