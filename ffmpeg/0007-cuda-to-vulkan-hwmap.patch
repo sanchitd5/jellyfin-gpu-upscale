@@ -1,6 +1,6 @@
 --- a/libavutil/hwcontext_vulkan.c	2026-09-24 19:00:00
 +++ b/libavutil/hwcontext_vulkan.c	2026-09-24 19:05:20
-@@ -4084,6 +4084,61 @@
+@@ -4084,6 +4084,37 @@
          else
              return AVERROR(ENOSYS);
  #endif
@@ -21,30 +21,6 @@
 +        int err;
 +
 +        if (!hwfc->pool && !hwfci->pool_internal) {
-+            /* Force one VkImage per plane instead of a combined multi-planar
-+             * image. AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE's own doc comment
-+             * already says this is "required to export/import images from
-+             * CUDA" -- confirmed the hard way: with a combined nv12 image,
-+             * vulkan_export_to_cuda()'s multi-plane fallback (offsets via
-+             * VK_IMAGE_ASPECT_MEMORY_PLANE_x_BIT_EXT) hands
-+             * cuExternalMemoryGetMappedMipmappedArray a layout it can't
-+             * actually use: CUDA_ERROR_INVALID_VALUE on a plain
-+             * hwupload+hwmap chain, a segfault a few frames later on this
-+             * bridged one. The device-level `disable_multiplane=1` device
-+             * option fixes the same bug for a real -init_hw_device vulkan=
-+             * instance (verified directly), but this pool is auto-derived
-+             * with no such device string to attach an option to, so the
-+             * frames-level flag has to be forced here instead. yuv420p
-+             * (3 single-plane images already) was never affected -- Vulkan
-+             * only packs a combined image for formats it CAN represent as
-+             * one, i.e. semiplanar ones like nv12/p010le, which is also
-+             * exactly the NVDEC-native format family this bridge exists to
-+             * carry. See livetestbox.md for the CLI-flag proof this is
-+             * built on and the real repro this fixes. */
-+            AVVulkanFramesContext *vkfc = hwfc->hwctx;
-+            av_log(NULL, AV_LOG_ERROR, "GU_DEBUG: hwfc=%p hwctx=%p pool=%p\n", hwfc, vkfc, hwfc->pool);
-+            vkfc->flags |= AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
-+
 +            err = hwfci->hw_type->frames_init(hwfc);
 +            if (err < 0)
 +                return err;
@@ -62,3 +38,29 @@
      default:
          return AVERROR(ENOSYS);
      }
+@@ -4896,6 +4927,25 @@
+ static int vulkan_frames_derive_to(AVHWFramesContext *dst_fc,
+                                    AVHWFramesContext *src_fc, int flags)
+ {
++    /* av_hwframe_ctx_create_derived() calls this BEFORE the derived context's
++     * first frame ever reaches vulkan_map_to()'s AV_PIX_FMT_CUDA case above --
++     * libavfilter/vf_hwmap.c's config_output calls av_hwframe_ctx_init() right
++     * after create_derived(), which runs frames_init() through this hook, so
++     * by the time any frame arrives the pool already exists and that case's
++     * own (now dead) lazy-init branch never fires. This is therefore the
++     * actual place to force AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE for a pool
++     * being derived FROM a CUDA source -- confirmed nb_images==1 combined
++     * multi-planar nv12 images are what vulkan_export_to_cuda() can't
++     * reliably export (CUDA_ERROR_INVALID_VALUE / segfault, see
++     * livetestbox.md); AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE's own doc comment
++     * already says as much ("required to export/import images from CUDA").
++     * A pool this project derives FROM Vulkan TO somewhere else (unaffected --
++     * this hook only runs for derivation INTO Vulkan) or from any non-CUDA
++     * source keeps the driver's normal default. */
++    if (src_fc->device_ctx->type == AV_HWDEVICE_TYPE_CUDA) {
++        AVVulkanFramesContext *vkfc = dst_fc->hwctx;
++        vkfc->flags |= AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
++    }
+     return vulkan_frames_init(dst_fc);
+ }
+
