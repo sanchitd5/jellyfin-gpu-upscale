@@ -304,6 +304,11 @@ function doApply() {
         // re-negotiation this whole mechanism depends on is not silently dropped.
         var nudged = state.bitrateNudgeUp ? current + 1 : Math.max(1, current - 1);
         state.bitrateNudgeUp = !state.bitrateNudgeUp;
+        // Tag the OLD session id right before the re-negotiation fires, so the request it
+        // triggers can carry it as the "swapfrom" marker (see wireParams() in network.js). This
+        // is what lets the server try the A/B swap instead of today's plain tear-down-and-
+        // restart - see LIVE_APPLY_DESIGN.md. Cleared once the new PlaySessionId lands.
+        state.swapFrom = previousId;
         pm.setMaxStreamingBitrate({ enableAutomaticBitrateDetection: false, maxBitrate: nudged });
         log('asked the player to renegotiate at the current position (nudged bitrate ' + current + ' -> ' + nudged + ')');
         watchApplied(previousId);

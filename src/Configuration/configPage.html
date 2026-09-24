@@ -496,6 +496,13 @@
                     <div class="fieldDescription">Past this many live upscaling transcodes, new sessions use the stock path.</div>
                 </div>
 
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MaxConcurrentSwaps" label="Maximum concurrent live-apply swaps" min="0" max="16" required />
+                    <div class="fieldDescription">A mid-playback setting change briefly runs a second ffmpeg process (the A/B swap) so the
+                        old stream keeps serving until the new one is ready. Separate from the cap above, which it also counts against
+                        while it runs. Past this many at once, a live-apply change falls back to today's tear-down-and-restart.</div>
+                </div>
+
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
                         <input is="emby-checkbox" type="checkbox" id="GpuResidentEncode" />
@@ -853,6 +860,8 @@
                         config.SrMinScaleFactor == null ? 1.6 : config.SrMinScaleFactor;
                     page.querySelector('#MaxSourceHeight').value = config.MaxSourceHeight;
                     page.querySelector('#MaxConcurrent').value = config.MaxConcurrent;
+                    page.querySelector('#MaxConcurrentSwaps').value =
+                        config.MaxConcurrentSwaps == null ? 4 : config.MaxConcurrentSwaps;
                     page.querySelector('#GpuResidentEncode').checked = config.GpuResidentEncode === true;
                     page.querySelector('#RequireClientOptIn').checked = config.RequireClientOptIn;
                     page.querySelector('#ForceTranscode').checked = config.ForceTranscode;
@@ -929,6 +938,7 @@
                     config.SrMinScaleFactor = parseFloat(page.querySelector('#SrMinScaleFactor').value);
                     config.MaxSourceHeight = parseInt(page.querySelector('#MaxSourceHeight').value, 10);
                     config.MaxConcurrent = parseInt(page.querySelector('#MaxConcurrent').value, 10);
+                    config.MaxConcurrentSwaps = parseInt(page.querySelector('#MaxConcurrentSwaps').value, 10);
                     config.GpuResidentEncode = page.querySelector('#GpuResidentEncode').checked;
                     config.RequireClientOptIn = page.querySelector('#RequireClientOptIn').checked;
                     config.ForceTranscode = page.querySelector('#ForceTranscode').checked;

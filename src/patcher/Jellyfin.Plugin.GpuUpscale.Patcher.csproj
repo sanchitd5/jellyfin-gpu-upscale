@@ -31,6 +31,14 @@
       <HintPath>$(JellyfinBin)/Jellyfin.Data.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- The concrete transcode-job-lifecycle owner (TranscodeManager) for the A/B live-apply
+         swap patches (SwapPatches.cs). ITranscodeManager/TranscodingJob/TranscodingJobType live
+         in MediaBrowser.Controller.MediaEncoding (MediaBrowser.Controller.dll, above) and need no
+         extra reference; only the concrete sealed class lives in this assembly. -->
+    <Reference Include="MediaBrowser.MediaEncoding">
+      <HintPath>$(JellyfinBin)/MediaBrowser.MediaEncoding.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>

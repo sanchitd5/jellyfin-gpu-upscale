@@ -64,6 +64,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public int MaxConcurrent { get; set; } = 4;
 
         /// <summary>
+        /// Maximum simultaneous A/B live-apply swaps. Separate from MaxConcurrent - see
+        /// PluginConfiguration.MaxConcurrentSwaps for why - and read by UpscaleEngine.TryAdmitSwap,
+        /// which is the only place this value is enforced.
+        /// </summary>
+        public int MaxConcurrentSwaps { get; set; } = 4;
+
+        /// <summary>
         /// Hand the libplacebo output to NVENC as a CUDA frame (hwmap=derive_device=cuda) instead
         /// of hwdownload,format=yuv420p. Off by default: needs the patched binary's Vulkan-CUDA
         /// interop confirmed on the server before it can be trusted on a live session.

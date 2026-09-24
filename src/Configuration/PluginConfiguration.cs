@@ -133,6 +133,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         public int MaxConcurrent { get; set; } = 4;
 
         /// <summary>
+        /// Maximum simultaneous A/B live-apply swaps (a second ffmpeg process briefly running
+        /// alongside the one it is replacing, for a smooth mid-playback setting change). Separate
+        /// from MaxConcurrent, which bounds enhanced transcodes in aggregate and which a swap's
+        /// extra process is ALSO counted against while it runs - this cap exists on top of that one
+        /// to bound how many viewers can be mid-swap at the same moment, a different failure mode
+        /// (a transient GPU spike concentrated in a short window) than the aggregate cap catches.
+        /// Past this, a live-apply falls back to today's tear-down-and-restart and the session
+        /// reports "swap-capacity". See LIVE_APPLY_DESIGN.md.
+        /// </summary>
+        public int MaxConcurrentSwaps { get; set; } = 4;
+
+        /// <summary>
         /// Hand the libplacebo output to NVENC as a CUDA frame (hwmap=derive_device=cuda) instead
         /// of hwdownload,format=yuv420p, skipping the Vulkan-to-system-memory-to-CUDA round trip
         /// at output size. Off by default: it needs the patched binary's Vulkan-CUDA interop

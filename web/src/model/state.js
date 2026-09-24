@@ -123,6 +123,12 @@ export var state = {
     // which is what actually triggers changeStream() rather than a same-value call that a naive
     // equality guard would drop silently. 1 bps either side of a real bitrate is imperceptible.
     bitrateNudgeUp: true,
+    // The OLD playSessionId, set right before a live-apply re-negotiation and sent on that one
+    // request as the "swapfrom" marker (see network.js wireParams()), so the server can tell a
+    // live-apply's re-negotiation apart from a fresh playback start and try the A/B swap instead
+    // of today's plain tear-down-and-restart. Cleared once the new PlaySessionId lands (see
+    // rewriteBody() in network.js) so it never rides a later, unrelated negotiation.
+    swapFrom: null,
     prefs: Object.assign({}, DEFAULT_PREFS)
 };
 

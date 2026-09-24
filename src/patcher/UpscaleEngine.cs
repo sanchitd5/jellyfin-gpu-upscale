@@ -5,8 +5,10 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Streaming;
+using MediaBrowser.MediaEncoding.Transcoding;
 
 namespace Jellyfin.Plugin.GpuUpscale.Patcher
 {
@@ -161,6 +163,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public string Status { get; set; }
 
         public string Reason { get; set; }
+
+        /// <summary>
+        /// Null when this session never asked for a live A/B swap. Otherwise one of: swapping (the
+        /// new ffmpeg process is admitted and starting), swap-capacity (refused; degraded to
+        /// today's tear-down-and-restart), swapped (the new process was ready and the old one's
+        /// teardown ran), swap-timeout (the new process never arrived in time; the old one's
+        /// teardown ran anyway so it is never left running forever). See
+        /// UpscaleEngine.TryAdmitSwap/OnNewJobReady and LIVE_APPLY_DESIGN.md.
+        /// </summary>
+        public string SwapStatus { get; set; }
 
         /// <summary>A one-line summary for a player overlay.</summary>
         public string Summary { get; set; }
@@ -1611,6 +1623,200 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private static readonly TimeSpan CapacityWindow = TimeSpan.FromSeconds(2);
         private static int _capacityLive;
         private static DateTime _capacityAt = DateTime.MinValue;
+
+        /* --------------------------------------------------------------- live A/B swap (KEYED BY THE OLD PlaySessionId) */
+
+        /// <summary>
+        /// One live-apply swap in flight: the old ffmpeg job is still running, a new one has been
+        /// admitted, and the old job's teardown (KillTranscodingJobs, called by stock Jellyfin when
+        /// the client's re-negotiation reports the old session stopped) is being held until the new
+        /// job's first segment is ready - or until this entry times out.
+        /// </summary>
+        private sealed class SwapState
+        {
+            public string DeviceId;
+            public DateTime RegisteredUtc;
+            public bool KillRequested;
+            public TranscodeManager Manager;
+            public string PendingKillDeviceId;
+            public Func<string, bool> PendingDelete;
+        }
+
+        private static readonly ConcurrentDictionary<string, SwapState> _pendingSwaps =
+            new ConcurrentDictionary<string, SwapState>(StringComparer.OrdinalIgnoreCase);
+
+        private static int _activeSwapCount;
+
+        /// <summary>
+        /// How long a swap may stay pending before its deferred kill is forced through anyway. Long
+        /// enough for a real transcode start (probe + first segment), short enough that a client
+        /// that never re-negotiates does not hold a GPU slot indefinitely.
+        /// </summary>
+        private static readonly TimeSpan SwapTimeout = TimeSpan.FromSeconds(15);
+
+        /// <summary>
+        /// Admits a live-apply swap for the OLD session id, if HasCapacity() has room for the extra
+        /// process AND the separate swap cap (MaxConcurrentSwaps) is not exhausted. Total: any
+        /// surprise here refuses the swap rather than risking a stuck teardown.
+        /// </summary>
+        public static string TryAdmitSwap(string oldSessionId, string deviceId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(oldSessionId))
+                {
+                    return null;
+                }
+
+                SweepExpiredSwaps();
+
+                int cap = Settings?.MaxConcurrentSwaps ?? 0;
+                if (cap <= 0 || _activeSwapCount >= cap || !HasCapacity())
+                {
+                    return "swap-capacity";
+                }
+
+                var swap = new SwapState { DeviceId = deviceId, RegisteredUtc = DateTime.UtcNow };
+                if (_pendingSwaps.TryAdd(oldSessionId, swap))
+                {
+                    Interlocked.Increment(ref _activeSwapCount);
+                }
+
+                return "swapping";
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Called from the KillTranscodingJobs Harmony prefix. Returns true (and the caller skips
+        /// the real kill) only while a swap for this exact old session id is still admitted and not
+        /// expired - the kill arguments are remembered so the real teardown can be replayed once the
+        /// new job is ready, or by the timeout sweep if it never arrives.
+        /// </summary>
+        public static bool TryDeferKill(TranscodeManager manager, string oldSessionId, string deviceId, Func<string, bool> deleteFiles)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(oldSessionId))
+                {
+                    return false;
+                }
+
+                SweepExpiredSwaps();
+                if (!_pendingSwaps.TryGetValue(oldSessionId, out var swap))
+                {
+                    return false;
+                }
+
+                swap.Manager = manager;
+                swap.PendingKillDeviceId = deviceId;
+                swap.PendingDelete = deleteFiles;
+                swap.KillRequested = true;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Called from the StartFfMpeg Harmony postfix once the new ffmpeg process has produced its
+        /// first segment - StartFfMpeg's own wait loop already blocks on exactly that before
+        /// returning, so no separate readiness watch was needed. Finds a pending swap for the SAME
+        /// DEVICE (old and new PlaySessionIds differ; DeviceId does not) and, if the old job's
+        /// teardown was already requested and deferred, replays it for real now - this is the cut.
+        /// </summary>
+        public static void OnNewJobReady(TranscodingJob newJob)
+        {
+            try
+            {
+                string deviceId = newJob?.DeviceId;
+                if (string.IsNullOrEmpty(deviceId))
+                {
+                    return;
+                }
+
+                string foundKey = null;
+                SwapState found = null;
+                foreach (var kv in _pendingSwaps)
+                {
+                    if (string.Equals(kv.Value.DeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        foundKey = kv.Key;
+                        found = kv.Value;
+                        break;
+                    }
+                }
+
+                if (found == null)
+                {
+                    return;
+                }
+
+                CompleteSwap(foundKey, found, "swapped", newJob.PlaySessionId);
+            }
+            catch (Exception)
+            {
+                // never break a real cutover for a bookkeeping failure
+            }
+        }
+
+        /// <summary>Sweeps swaps whose new job never arrived, forcing the deferred kill through so the old job is never orphaned or double-counted forever.</summary>
+        private static void SweepExpiredSwaps()
+        {
+            try
+            {
+                foreach (var kv in _pendingSwaps)
+                {
+                    if (DateTime.UtcNow - kv.Value.RegisteredUtc > SwapTimeout)
+                    {
+                        CompleteSwap(kv.Key, kv.Value, "swap-timeout");
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // best effort; a swap left pending here is still bounded by MaxConcurrentSwaps
+            }
+        }
+
+        private static void CompleteSwap(string oldSessionId, SwapState swap, string finalStatus, string newSessionId = null)
+        {
+            if (_pendingSwaps.TryRemove(oldSessionId, out _))
+            {
+                Interlocked.Decrement(ref _activeSwapCount);
+            }
+
+            if (swap.KillRequested && swap.Manager != null)
+            {
+                try
+                {
+                    _ = swap.Manager.KillTranscodingJobs(swap.PendingKillDeviceId, oldSessionId, swap.PendingDelete ?? (p => false));
+                }
+                catch (Exception)
+                {
+                    // the old job may now leak until its own ping timeout; better than crashing
+                    // the path that would otherwise have torn it down
+                }
+            }
+
+            if (_bySession.TryGetValue(oldSessionId, out var oldRecord))
+            {
+                oldRecord.SwapStatus = finalStatus;
+            }
+
+            if (!string.IsNullOrEmpty(newSessionId) && _bySession.TryGetValue(newSessionId, out var newRecord))
+            {
+                newRecord.SwapStatus = finalStatus;
+            }
+        }
+
+        /// <summary>Public read of a session's own option, for callers outside this class (BuildVerdict's swapfrom marker).</summary>
+        public static string OptionValue(EncodingJobInfo state, string name) => RawOption(state, name);
 
         /* ------------------------------------------------------------------- encoder selection */
 

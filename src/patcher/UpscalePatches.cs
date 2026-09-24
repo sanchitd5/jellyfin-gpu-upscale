@@ -161,6 +161,29 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         private static void ApplyOptional(Harmony harmony, ILogger logger, List<string> applied, List<string> failed)
         {
+            // The A/B live-apply swap: MediaBrowser.MediaEncoding.Transcoding.TranscodeManager, a
+            // second assembly this patcher references directly (unlike MediaInfoHelper below, which
+            // is resolved by name). Its own try/catch, ahead of the MediaInfoHelper block below on
+            // purpose - that block returns out of this whole method on its own failure path, which
+            // would otherwise skip this one entirely.
+            try
+            {
+                SwapPatches.Apply(harmony, logger);
+                if (SwapPatches.Available)
+                {
+                    applied.Add("A/B live-apply swap (cap " + (UpscaleEngine.Settings?.MaxConcurrentSwaps ?? 0).ToString(CultureInfo.InvariantCulture) + ")");
+                }
+                else
+                {
+                    failed.Add("A/B live-apply swap (falls back to tear-down-and-restart)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("A/B live-apply swap (falls back to tear-down-and-restart)");
+                logger?.LogWarning(ex, "GpuUpscale: the A/B live-apply swap patches could not be installed. Live-apply still works, via today's tear-down-and-restart.");
+            }
+
             // MediaInfoHelper lives in Jellyfin.Api, a different assembly from the core targets, and
             // is resolved BY NAME so that the patcher does not need a compile-time reference to a
             // web-API assembly it would then be version-pinned to.
@@ -281,6 +304,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             public string Status { get; set; } = "ineligible";
 
             public string Reason { get; set; } = "n/a";
+
+            /// <summary>
+            /// Set once, from the "swapfrom" marker on the request (see web/src/controller/
+            /// network.js), independent of Act: a live-apply swap is admitted or refused on its own
+            /// cap regardless of whether this session's own enhancement plan runs. Null when the
+            /// request carried no swap marker at all.
+            /// </summary>
+            public string SwapStatus { get; set; }
         }
 
         private static readonly ConcurrentDictionary<string, Verdict> _verdicts =
@@ -320,6 +351,21 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             var verdict = new Verdict();
             try
             {
+                // A LIVE-APPLY SWAP IS DECIDED FIRST AND SEPARATELY FROM THE ENHANCEMENT PLAN.
+                //
+                // "swapfrom" carries the OLD PlaySessionId when this request is the re-negotiation
+                // a live-apply change triggers (see wireParams()/live-apply.js on the client). It
+                // travels exactly like the other 14 axes - a lowercase query parameter Jellyfin puts
+                // into StreamOptions - so it needs no new transport, only a new reader. Admission
+                // (HasCapacity() plus the separate MaxConcurrentSwaps cap) is checked once, here,
+                // regardless of what this session's OWN plan decides: a swap is about handing the
+                // OLD job's teardown a smooth timing, not about whether THIS session enhances.
+                string swapFrom = UpscaleEngine.OptionValue(state, "swapfrom");
+                if (!string.IsNullOrEmpty(swapFrom))
+                {
+                    verdict.SwapStatus = UpscaleEngine.TryAdmitSwap(swapFrom, DeviceIdOf(state));
+                }
+
                 verdict.Plan = UpscaleEngine.Decide(state);
                 verdict.Status = verdict.Plan.Status;
                 verdict.Reason = verdict.Plan.Reason;
@@ -351,6 +397,32 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 verdict.Act = false;
                 return verdict;
             }
+        }
+
+        /// <summary>Best-effort DeviceId off the request, for swap admission. Never throws.</summary>
+        private static string DeviceIdOf(EncodingJobInfo state)
+        {
+            try
+            {
+                return state?.BaseRequest?.DeviceId;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Builds and records a SessionRecord in one place, so every call site carries the swap
+        /// status the verdict already decided instead of a handful of copies of
+        /// "Record(Describe(...))" silently drifting out of sync with each other.
+        /// </summary>
+        private static SessionRecord RecordFor(EncodingJobInfo state, Verdict verdict, UpscaleEngine.Plan plan, string status, string reason)
+        {
+            var record = UpscaleEngine.Describe(state, plan, status, reason);
+            record.SwapStatus = verdict.SwapStatus;
+            UpscaleEngine.Record(record);
+            return record;
         }
 
         /// <summary>
@@ -425,7 +497,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
                     if (verdict.Status != "ineligible")
                     {
-                        UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, verdict.Status, verdict.Reason));
+                        RecordFor(state, verdict, plan, verdict.Status, verdict.Reason);
                     }
 
                     return;
@@ -440,7 +512,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     verdict.Act = false;
                     verdict.Status = "subtitle-burn-in";
                     verdict.Reason = "subtitles are burned in";
-                    UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, "subtitle-burn-in", "subtitles are burned in"));
+                    RecordFor(state, verdict, plan, "subtitle-burn-in", "subtitles are burned in");
                     return;
                 }
 
@@ -448,8 +520,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 string chain = UpscaleEngine.BuildChain(plan);
                 __result = " -vf \"" + (kept.Count > 0 ? string.Join(",", kept) + "," + chain : chain) + "\"";
 
-                var record = UpscaleEngine.Describe(state, plan, "applied", "filter chain injected");
-                UpscaleEngine.Record(record);
+                var record = RecordFor(state, verdict, plan, "applied", "filter chain injected");
                 _logger?.LogInformation("GpuUpscale: {Summary} for {Path}", record.Summary, state.MediaPath);
             }
             catch (Exception ex)
@@ -570,7 +641,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     // plugin that did not run.
                     if (verdict.Status == "concurrency-cap")
                     {
-                        UpscaleEngine.Record(UpscaleEngine.Describe(state, plan, verdict.Status, verdict.Reason));
+                        RecordFor(state, verdict, plan, verdict.Status, verdict.Reason);
                     }
 
                     return;

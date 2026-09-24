@@ -83,6 +83,15 @@ export function wireParams() {
         params.maxHeight = params.upscale;
     }
 
+    // The A/B live-apply swap marker: the OLD PlaySessionId, present only for the one
+    // re-negotiation live-apply.js just triggered (see doApply()), riding the same lowercase-
+    // query-parameter transport as every other axis here rather than a new one. Rides on the
+    // negotiation request AND the HLS requests it produces for the same reason the other axes
+    // do (see markHlsUrl below): the server reads it wherever a session's own options are read.
+    if (state.swapFrom) {
+        params.swapfrom = state.swapFrom;
+    }
+
     return params;
 }
 
@@ -173,6 +182,14 @@ function rewriteBody(bodyText) {
     }
 
     if (info.PlaySessionId) {
+        // The swap marker has done its job once a session id actually comes back on this
+        // negotiation - clearing it here (not right after sending) is what lets it also ride
+        // the HLS master/variant requests this same negotiation produces, without leaking onto
+        // a later, unrelated one.
+        if (info.PlaySessionId !== state.playSessionId) {
+            state.swapFrom = null;
+        }
+
         state.playSessionId = info.PlaySessionId;
     }
 
