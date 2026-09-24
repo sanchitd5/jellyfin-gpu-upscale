@@ -1,5 +1,5 @@
 --- a/libavutil/hwcontext_vulkan.c	2026-09-24 16:22:56
-+++ b/libavutil/hwcontext_vulkan.c	2026-09-24 16:22:56
++++ b/libavutil/hwcontext_vulkan.c	2026-09-24 16:34:39
 @@ -70,6 +70,11 @@
  #include "hwcontext_cuda_internal.h"
  #include "cuda_check.h"
@@ -12,34 +12,51 @@
  #endif
 
  typedef struct VulkanDeviceFeatures {
-@@ -4293,6 +4298,30 @@
+@@ -4292,6 +4297,47 @@
+         else
              return AVERROR(ENOSYS);
  #endif
- #endif
++#endif
 +#if CONFIG_CUDA
 +    case AV_PIX_FMT_CUDA: {
 +        /* NVIDIA imports the Vulkan image into CUDA as an external-memory texture array,
 +         * not a linear device pointer, and NVENC's CUDA input wants linear/pitched memory --
 +         * so this can never be a true zero-copy alias. It is still GPU-resident: the transfer
 +         * below is a device-to-device cuMemcpy2DAsync, with no system-RAM round trip, which is
-+         * the bar this project's own GPU-resident preset uses (see gpu-only-filters.md). */
++         * the bar this project's own GPU-resident preset uses (see gpu-only-filters.md).
++         *
++         * dst->hw_frames_ctx is hwmap's auto-derived context. av_hwframe_ctx_init() treats any
++         * derived context as "already initialised" and never runs frames_init() on it, because
++         * the normal derived contract is a view (map_from/map_to) over the source's own memory
++         * with no separate allocation -- true for the DRM/VAAPI cases above, not here. Calling
++         * av_hwframe_get_buffer() on it would recurse back into this same map_from with a
++         * *new*, unrelated Vulkan frame from the derived context's source, not the src frame
++         * this call was actually given. So this lazily runs CUDA's own frames_init()/
++         * frames_get_buffer() directly the first time the context is used instead. */
++        AVHWFramesContext *dst_fc;
++        FFHWFramesContext *dst_fci;
 +        int err;
 +
 +        if (!dst->hw_frames_ctx)
 +            return AVERROR(EINVAL);
 +
-+        err = av_hwframe_get_buffer(dst->hw_frames_ctx, dst, 0);
++        dst_fc  = (AVHWFramesContext *)dst->hw_frames_ctx->data;
++        dst_fci = ffhwframesctx(dst_fc);
++
++        if (!dst_fc->pool && !dst_fci->pool_internal) {
++            err = dst_fci->hw_type->frames_init(dst_fc);
++            if (err < 0)
++                return err;
++        }
++        if (!dst_fc->pool && dst_fci->pool_internal)
++            dst_fc->pool = dst_fci->pool_internal;
++
++        err = dst_fci->hw_type->frames_get_buffer(dst_fc, dst);
 +        if (err < 0)
 +            return err;
 +
-+        err = vulkan_transfer_data_to_cuda(hwfc, dst, src);
-+        if (err < 0) {
-+            av_frame_unref(dst);
-+            return err;
-+        }
-+        return 0;
++        return vulkan_transfer_data_to_cuda(hwfc, dst, src);
 +    }
-+#endif
+ #endif
      default:
          break;
-     }
