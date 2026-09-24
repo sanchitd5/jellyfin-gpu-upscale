@@ -57,6 +57,14 @@ happens inside the transcode. A batch pass was planned and dropped for exactly t
 written a second copy of every processed item into the library. See the programme in
 `improvements.md` for what that cost and what survives.
 
+## CUDA kernels: never hand-write PTX
+
+Write kernels as real CUDA C (`.cu`), compile via `clang -x cuda --cuda-device-only -S -nocudainc
+-nocudalib` (or `nvcc` if present) to PTX. Never author `.ptx` by hand. Better correctness,
+readability, maintainability - hand-written PTX is how the p010le bug went unnoticed as long as it
+did. Fall back to hand-written PTX only if neither compiler path works on the build machine, and
+say so explicitly in the report/commit if that fallback is used.
+
 ## Adding a level or an axis
 
 The client is data-driven by design, because levels and axes keep arriving:

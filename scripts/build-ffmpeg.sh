@@ -168,6 +168,26 @@ die () { printf '!! %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "run as root: it installs build deps and writes to ${PREFIX}"
 
+# --- CUDA C -> PTX ----------------------------------------------------------------------------
+# gu_optix_nv12_rgbf32.cu / gu_dlpp_nv12_rgba.cu / gu_vsr_nv12_rgba.cu are ordinary CUDA C,
+# compiled to PTX with clang's own NVPTX backend plus clang's bundled
+# __clang_cuda_builtin_vars.h (blockIdx/threadIdx/blockDim) -- no nvcc, no CUDA toolkit
+# install; CT114 has neither. -nocudainc/-nocudalib skip the search for an actual CUDA SDK.
+# The handful of bindless-surface (`sust`/`suld`) accesses inside those .cu files stay
+# inline PTX asm because CUDA's own surface intrinsics live in headers this deliberately
+# doesn't pull in -- everything else in them is ordinary, auditable C. Never hand-write PTX
+# for a new or modified kernel: write real C and compile it here instead.
+CLANG_CUDA="${CLANG_CUDA:-$(command -v clang-18 || command -v clang || true)}"
+compile_cuda_to_header () {
+    local cu="$1" sym="$2" out_h="$3" ptx="${1%.cu}.ptx.generated"
+    "$CLANG_CUDA" -x cuda --cuda-device-only -nocudainc -nocudalib \
+        -S -O2 --cuda-gpu-arch=sm_52 -o "$ptx" "$cu" \
+        || die "clang (\$CLANG_CUDA=$CLANG_CUDA) failed to compile $cu to PTX"
+    { echo "static const char ${sym}[] ="
+      sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$/\\n"/' "$ptx"
+      echo ';'; } > "$out_h"
+}
+
 # --- preflight ------------------------------------------------------------------------------------
 free_gb=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
 (( free_gb >= 12 )) || die "need ~12G free for the build tree, have ${free_gb}G"
@@ -178,6 +198,11 @@ if [[ "$WITH_OPTIX" == "1" ]]; then
         || die "WITH_OPTIX=1 needs OPTIX_SDK=/path/to/optix-dev (see OPTIX.md)"
     [[ -n "${NVOF_SDK:-}" ]] \
         || die "WITH_OPTIX=1 needs NVOF_SDK=/path/to/NVIDIAOpticalFlowSDK (see OPTIX.md)"
+    # nv12_to_rgbf32/p010_to_rgbf32/rgbf32_to_nv12/smooth_luma_dev/p010_smooth_luma_dev/
+    # expand_flow_dev are real CUDA C (gu_optix_nv12_rgbf32.cu), compiled to PTX below with
+    # clang's NVPTX backend -- no nvcc needed, but a clang built with NVPTX support is.
+    [[ -n "$CLANG_CUDA" ]] \
+        || die "WITH_OPTIX=1 needs a clang with NVPTX support to compile gu_optix_nv12_rgbf32.cu (apt-get install clang-18); set CLANG_CUDA=/path/to/clang to override"
 fi
 
 # The patches stack: 0003 patches lines 0002 added, 0004 patches lines 0003 added. Enforced here
@@ -236,9 +261,11 @@ if [[ "$WITH_RTXDLPP" == "1" ]]; then
     [[ -f "$RTXDLPP_DLL" ]] \
         || die "WITH_RTXDLPP=1: no nvdlppx.dll at RTXDLPP_DLL=$RTXDLPP_DLL (see RTXDLPP.md)"
     for f in gu_dlpp_pe_map.c gu_dlpp_aivp_loader.c gu_dlpp_ngx_isr.c gu_dlpp_embed.h \
-             gu_dlpp_embed.c gu_dlpp_nv12_rgba.ptx vf_dlpp_rtcuda.c; do
+             gu_dlpp_embed.c gu_dlpp_nv12_rgba.cu vf_dlpp_rtcuda.c; do
         [[ -f "$HERE/ffmpeg/$f" ]] || die "WITH_RTXDLPP=1: $HERE/ffmpeg/$f missing"
     done
+    [[ -n "$CLANG_CUDA" ]] \
+        || die "WITH_RTXDLPP=1 needs a clang with NVPTX support to compile gu_dlpp_nv12_rgba.cu (apt-get install clang-18); set CLANG_CUDA=/path/to/clang to override"
 fi
 
 # Same reasoning as WITH_RTXDLPP just above: no SDK headers, the loader resolves everything from
@@ -248,9 +275,11 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
     [[ -f "$RTXVSR_DLL" ]] \
         || die "WITH_RTXVSR=1: no nvaivpx.dll at RTXVSR_DLL=$RTXVSR_DLL (see RTXVSR.md)"
     for f in gu_vsr_pe_map.c gu_vsr_aivp_loader.c gu_vsr_ngx_isr.c gu_vsr_embed.h \
-             gu_vsr_embed.c gu_vsr_nv12_rgba.ptx vf_vsr_rtcuda.c; do
+             gu_vsr_embed.c gu_vsr_nv12_rgba.cu vf_vsr_rtcuda.c; do
         [[ -f "$HERE/ffmpeg/$f" ]] || die "WITH_RTXVSR=1: $HERE/ffmpeg/$f missing"
     done
+    [[ -n "$CLANG_CUDA" ]] \
+        || die "WITH_RTXVSR=1 needs a clang with NVPTX support to compile gu_vsr_nv12_rgba.cu (apt-get install clang-18); set CLANG_CUDA=/path/to/clang to override"
 fi
 
 # 0005's patch context assumes 0001-0004 all applied (see the note above this script's header) -
@@ -395,11 +424,12 @@ patch -p1 < "$HERE/ffmpeg/0001-add-oidn-filter-to-build.patch"
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/
-    # vf_optix.c now takes AV_PIX_FMT_CUDA frames directly and embeds a small hand-written PTX
-    # module for the on-GPU NV12<->RGB conversion (roadmap step 1, GPU-resident conversion) --
-    # this header is committed pre-generated (CT114 has no nvcc/clang for device code), unlike
-    # the DLPP/VSR PTX headers below which this script generates from their .ptx at build time.
-    cp "$HERE/ffmpeg/gu_optix_nv12_rgbf32_ptx.h" libavfilter/
+    # vf_optix.c takes AV_PIX_FMT_CUDA frames directly (both nv12 and p010le sw_format) and
+    # embeds a small CUDA C module for the on-GPU NV12/P010<->RGB conversion (roadmap step 1,
+    # GPU-resident conversion), compiled to PTX below the same way the DLPP/VSR modules are.
+    cp "$HERE/ffmpeg/gu_optix_nv12_rgbf32.cu" libavfilter/
+    compile_cuda_to_header libavfilter/gu_optix_nv12_rgbf32.cu \
+        gu_optix_nv12_rgbf32_ptx libavfilter/gu_optix_nv12_rgbf32_ptx.h
     mkdir -p libavfilter/optix-compat
     cp "$HERE"/ffmpeg/optix-compat/* libavfilter/optix-compat/
     patch -p1 < "$HERE/ffmpeg/0002-add-optix-filter-to-build.patch"
@@ -473,14 +503,14 @@ if [[ "$WITH_RTXDLPP" == "1" ]]; then
     say "wiring dlpp_rtcuda into the build"
     cp "$HERE/ffmpeg/gu_dlpp_pe_map.c" "$HERE/ffmpeg/gu_dlpp_aivp_loader.c" \
        "$HERE/ffmpeg/gu_dlpp_ngx_isr.c" "$HERE/ffmpeg/gu_dlpp_embed.h" \
-       "$HERE/ffmpeg/gu_dlpp_embed.c" "$HERE/ffmpeg/vf_dlpp_rtcuda.c" libavfilter/
+       "$HERE/ffmpeg/gu_dlpp_embed.c" "$HERE/ffmpeg/vf_dlpp_rtcuda.c" \
+       "$HERE/ffmpeg/gu_dlpp_nv12_rgba.cu" libavfilter/
 
-    # gu_dlpp_nv12_rgba_ptx.h is generated, not committed: same sed-to-C-string transform the
-    # spike's build.sh uses for its own PTX-as-header file.
-    { echo 'static const char gu_dlpp_nv12_rgba_ptx[] ='
-      sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$/\\n"/' \
-          "$HERE/ffmpeg/gu_dlpp_nv12_rgba.ptx"
-      echo ';'; } > libavfilter/gu_dlpp_nv12_rgba_ptx.h
+    # gu_dlpp_nv12_rgba_ptx.h is generated, not committed: real CUDA C compiled to PTX with
+    # clang's NVPTX backend (compile_cuda_to_header, defined above), then the same
+    # sed-to-C-string transform the spike's build.sh uses for its own PTX-as-header file.
+    compile_cuda_to_header libavfilter/gu_dlpp_nv12_rgba.cu \
+        gu_dlpp_nv12_rgba_ptx libavfilter/gu_dlpp_nv12_rgba_ptx.h
 
     grep -q vf_dlpp_rtcuda libavfilter/Makefile ||
         sed -i '/^OBJS-\$(CONFIG_SCALE_CUDA_FILTER)/i OBJS-$(CONFIG_DLPP_RTCUDA_FILTER)          += vf_dlpp_rtcuda.o gu_dlpp_embed.o' \
@@ -495,14 +525,13 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
     say "wiring vsr_rtcuda into the build"
     cp "$HERE/ffmpeg/gu_vsr_pe_map.c" "$HERE/ffmpeg/gu_vsr_aivp_loader.c" \
        "$HERE/ffmpeg/gu_vsr_ngx_isr.c" "$HERE/ffmpeg/gu_vsr_embed.h" \
-       "$HERE/ffmpeg/gu_vsr_embed.c" "$HERE/ffmpeg/vf_vsr_rtcuda.c" libavfilter/
+       "$HERE/ffmpeg/gu_vsr_embed.c" "$HERE/ffmpeg/vf_vsr_rtcuda.c" \
+       "$HERE/ffmpeg/gu_vsr_nv12_rgba.cu" libavfilter/
 
-    # gu_vsr_nv12_rgba_ptx.h is generated, not committed: same sed-to-C-string transform
+    # gu_vsr_nv12_rgba_ptx.h is generated, not committed: same compile_cuda_to_header path
     # WITH_RTXDLPP uses for its own PTX-as-header file.
-    { echo 'static const char gu_vsr_nv12_rgba_ptx[] ='
-      sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$/\\n"/' \
-          "$HERE/ffmpeg/gu_vsr_nv12_rgba.ptx"
-      echo ';'; } > libavfilter/gu_vsr_nv12_rgba_ptx.h
+    compile_cuda_to_header libavfilter/gu_vsr_nv12_rgba.cu \
+        gu_vsr_nv12_rgba_ptx libavfilter/gu_vsr_nv12_rgba_ptx.h
 
     grep -q vf_vsr_rtcuda libavfilter/Makefile ||
         sed -i '/^OBJS-\$(CONFIG_SCALE_CUDA_FILTER)/i OBJS-$(CONFIG_VSR_RTCUDA_FILTER)           += vf_vsr_rtcuda.o gu_vsr_embed.o' \

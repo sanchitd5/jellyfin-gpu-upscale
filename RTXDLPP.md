@@ -35,6 +35,15 @@ of the standalone harness's own measurement for the same content/level. **The ga
 content-dependent and modest** — never negative across the six frames tested, but not a dramatic
 jump either. See `TASK.md` for the numbers; do not restate them from memory when tuning defaults.
 
+**p010le (10-bit) input, fixed 2026-09-24.** `config_props` accepts both `nv12` and `p010le`
+`sw_format`, and `filter_frame` picks `p010_to_rgba` instead of `nv12_to_rgba` when the input is
+p010le. NVDEC decodes 10-bit sources (real HDR library content, e.g. `Rick and Morty S08E06`,
+`yuv420p10le`) straight to p010le — 10-bit samples packed into 16-bit little-endian words, not
+`nv12`'s 8-bit bytes — and the original nv12-only kernel silently misread that layout until the
+"needs even-sized NV12" check caught it and killed the transcode. `p010_to_rgba` reduces each
+16-bit word to the 8-bit domain (`word >> 8`) before running the same BT.709 matrix `nv12_to_rgba`
+uses, since DLPP itself and `rgba_to_nv12`'s output are 8-bit regardless of input.
+
 ## What you must fetch yourself
 
 | what | from | licence |
@@ -62,10 +71,11 @@ the plugin yet (see "Where this stands"); today this is a build-and-smoke-test-o
 ## Licensing — NOTHING FROM NVIDIA IS IN THIS REPOSITORY
 
 `ffmpeg/vf_dlpp_rtcuda.c`, `ffmpeg/gu_dlpp_embed.[ch]`, `ffmpeg/gu_dlpp_pe_map.c`,
-`ffmpeg/gu_dlpp_aivp_loader.c`, `ffmpeg/gu_dlpp_ngx_isr.c` and `ffmpeg/gu_dlpp_nv12_rgba.ptx` are
+`ffmpeg/gu_dlpp_aivp_loader.c`, `ffmpeg/gu_dlpp_ngx_isr.c` and `ffmpeg/gu_dlpp_nv12_rgba.cu` are
 **our own code**, LGPL-2.1-or-later, and contain no NVIDIA material — the PE loader is a from-
-scratch minimal PE32+/Win64-ABI shim, and the PTX is hand-written CUDA assembly for NV12↔RGBA
-conversion, not extracted from any SDK or sample. `nvdlppx.dll` itself is NVIDIA proprietary,
+scratch minimal PE32+/Win64-ABI shim, and `gu_dlpp_nv12_rgba.cu` is our own CUDA C for NV12/P010↔RGBA
+conversion (compiled to PTX at build time with clang's NVPTX backend, no nvcc needed), not extracted
+from any SDK or sample. `nvdlppx.dll` itself is NVIDIA proprietary,
 **not vendored, and must not be**: it is loaded at run time from a path the user supplies, exactly
 the same trust boundary as `<prefix>/dlss` for the DLSS runtime blob (see `DLSS.md`). No NVIDIA
 binary, cubin, weight, or DLL of any kind is ever committed to this repository.

@@ -63,10 +63,12 @@
 #include "video.h"
 
 #include "gu_dlpp_embed.h"
-#include "gu_dlpp_nv12_rgba_ptx.h"   /* generated at build time from gu_dlpp_nv12_rgba.ptx; the
-                                      * nv12<->rgba conversion kernels are our own hand-written
-                                      * PTX (not NVIDIA material, not extracted from any SDK),
-                                      * feature-agnostic and shared with the AIVP-era spike. */
+#include "gu_dlpp_nv12_rgba_ptx.h"   /* generated at build time from gu_dlpp_nv12_rgba.cu (real
+                                      * CUDA C, compiled to PTX with clang's NVPTX backend -- not
+                                      * NVIDIA material, not extracted from any SDK); the nv12/p010
+                                      * conversion kernels are feature-agnostic and shared with the
+                                      * AIVP-era spike. p010_to_rgba handles p010le input (NVDEC's
+                                      * 10-bit decode format) alongside the original nv12_to_rgba. */
 
 typedef struct DLPPRtCudaContext {
     const AVClass *class;
@@ -76,10 +78,11 @@ typedef struct DLPPRtCudaContext {
     AVCUDADeviceContext *hwctx;
     AVBufferRef *out_frames;
     CUmodule mod;
-    CUfunction k_in, k_out;
+    CUfunction k_in, k_in_p010, k_out;
     uint64_t in_surf, out_surf;
     int64_t nframes;
     uint64_t cb0[19];
+    int is_p010;   /* input sw_format was p010le, not nv12 */
 } DLPPRtCudaContext;
 
 #define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, s->hwctx->internal->cuda_dl, x)
@@ -102,11 +105,13 @@ static int config_props(AVFilterLink *outlink)
         return AVERROR(EINVAL);
     }
     in_fc = (AVHWFramesContext *)inl->hw_frames_ctx->data;
-    if (in_fc->sw_format != AV_PIX_FMT_NV12 || (inlink->w | inlink->h) & 1) {
-        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12, got %s\n",
+    if ((in_fc->sw_format != AV_PIX_FMT_NV12 && in_fc->sw_format != AV_PIX_FMT_P010LE) ||
+        (inlink->w | inlink->h) & 1) {
+        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12 or P010LE, got %s\n",
                av_get_pix_fmt_name(in_fc->sw_format));
         return AVERROR(ENOSYS);
     }
+    s->is_p010 = in_fc->sw_format == AV_PIX_FMT_P010LE;
     s->hwctx = in_fc->device_ctx->hwctx;
     if (!s->ow) s->ow = inlink->w * 2;
     if (!s->oh) s->oh = inlink->h * 2;
@@ -146,6 +151,7 @@ static int config_props(AVFilterLink *outlink)
     if (ret < 0) { av_free(inj); return ret; }
     ret = gu_dlpp_embed_load_ptx(gu_dlpp_nv12_rgba_ptx, (void **)&s->mod) ? AVERROR_EXTERNAL : 0;
     if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in, s->mod, "nv12_to_rgba"));
+    if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in_p010, s->mod, "p010_to_rgba"));
     if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_out, s->mod, "rgba_to_nv12"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuCtxPopCurrent(&dummy));
     if (ret < 0) { av_free(inj); return ret; }
@@ -211,7 +217,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         CUdeviceptr y = (CUdeviceptr)in->data[0], uv = (CUdeviceptr)in->data[1];
         unsigned yp = in->linesize[0], uvp = in->linesize[1], w = inlink->w, h = inlink->h;
         void *args[] = { &y, &yp, &uv, &uvp, &s->in_surf, &w, &h };
-        ret = CHECK_CU(cu->cuLaunchKernel(s->k_in, (w + 15) / 16, (h + 15) / 16, 1,
+        CUfunction k_in = s->is_p010 ? s->k_in_p010 : s->k_in;
+        ret = CHECK_CU(cu->cuLaunchKernel(k_in, (w + 15) / 16, (h + 15) / 16, 1,
                                           16, 16, 1, 0, st, args, NULL));
     }
     if (!ret && (rc = gu_dlpp_embed_process())) {

@@ -54,15 +54,23 @@
  * filter used to declare AV_PIX_FMT_GBRPF32LE and do its own cuMemcpyHtoD /
  * cuMemcpyDtoH round trip every frame, on top of whatever hwdownload /
  * hwupload ffmpeg had to insert around it.  It was pure CUDA already, so
- * instead it now takes AV_PIX_FMT_CUDA frames directly: a small hand-written
- * PTX module (gu_optix_nv12_rgbf32.ptx, embedded via
- * gu_optix_nv12_rgbf32_ptx.h -- CT114 has no nvcc/clang for device code, same
- * convention as gu_dlpp_nv12_rgba.ptx / gu_vsr_nv12_rgba.ptx) converts
- * NV12 <-> the interleaved float3 RGB buffer OptiX wants, and two more small
- * kernels in the same module smooth the NVOFA luma input and expand its
- * S10.5 flow grid, both device-to-device.  Nothing above this filter has to
- * hwdownload/hwupload around it any more, and nothing inside it touches
- * host memory on the per-frame path.
+ * instead it now takes AV_PIX_FMT_CUDA frames directly (both nv12 and p010le
+ * sw_format): a small CUDA C module (gu_optix_nv12_rgbf32.cu, compiled to PTX
+ * at build time with clang's NVPTX backend and embedded via
+ * gu_optix_nv12_rgbf32_ptx.h -- CT114 has no nvcc, same convention as
+ * gu_dlpp_nv12_rgba.cu / gu_vsr_nv12_rgba.cu) converts NV12 or P010LE <-> the
+ * interleaved float3 RGB buffer OptiX wants, and two more small kernels in
+ * the same module smooth the NVOFA luma input (nv12 and p010le variants) and
+ * expand its S10.5 flow grid, both device-to-device.  Nothing above this
+ * filter has to hwdownload/hwupload around it any more, and nothing inside
+ * it touches host memory on the per-frame path.
+ *
+ * p010le support: NVDEC decodes 10-bit sources straight to p010le (10-bit
+ * samples packed into 16-bit little-endian words, value = sample << 6), not
+ * nv12.  config_props below accepts either sw_format and filter_frame /
+ * compute_flow_dev pick the matching kernel; the p010 kernels reduce to the
+ * 8-bit domain (word >> 8) before the same BT.709 matrix the nv12 kernels
+ * use, since the denoiser's own output stays 8-bit NV12 regardless of input.
  */
 
 #include <string.h>
@@ -124,7 +132,9 @@ typedef struct OptixContext {
     AVBufferRef *out_frames;
 
     CUmodule   mod;
-    CUfunction k_nv12_to_rgbf32, k_rgbf32_to_nv12, k_smooth_luma, k_expand_flow;
+    CUfunction k_nv12_to_rgbf32, k_p010_to_rgbf32, k_rgbf32_to_nv12;
+    CUfunction k_smooth_luma, k_p010_smooth_luma, k_expand_flow;
+    int is_p010;   /* input sw_format was p010le, not nv12 */
 
     OptixDeviceContext optix_ctx;
     OptixDenoiser      denoiser;
@@ -296,8 +306,10 @@ static int config_props_pushed(AVFilterContext *ctx)
 
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleLoadData(&s->mod, gu_optix_nv12_rgbf32_ptx));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_nv12_to_rgbf32, s->mod, "nv12_to_rgbf32"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_p010_to_rgbf32, s->mod, "p010_to_rgbf32"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_rgbf32_to_nv12, s->mod, "rgbf32_to_nv12"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_smooth_luma, s->mod, "smooth_luma_dev"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_p010_smooth_luma, s->mod, "p010_smooth_luma_dev"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_expand_flow, s->mod, "expand_flow_dev"));
 
     CHECK_OPTIX(optixInit());
@@ -373,11 +385,13 @@ static int config_props(AVFilterLink *outlink)
         return AVERROR(EINVAL);
     }
     in_fc = (AVHWFramesContext *)inl->hw_frames_ctx->data;
-    if (in_fc->sw_format != AV_PIX_FMT_NV12 || (inlink->w | inlink->h) & 1) {
-        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12, got %s\n",
+    if ((in_fc->sw_format != AV_PIX_FMT_NV12 && in_fc->sw_format != AV_PIX_FMT_P010LE) ||
+        (inlink->w | inlink->h) & 1) {
+        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12 or P010LE, got %s\n",
                av_get_pix_fmt_name(in_fc->sw_format));
         return AVERROR(ENOSYS);
     }
+    s->is_p010 = in_fc->sw_format == AV_PIX_FMT_P010LE;
     s->hwctx = in_fc->device_ctx->hwctx;
     s->w = inlink->w;
     s->h = inlink->h;
@@ -433,8 +447,9 @@ static int compute_flow_dev(AVFilterContext *ctx, AVFrame *in)
     CUdeviceptr y = (CUdeviceptr)in->data[0];
     unsigned yp = in->linesize[0], dp = s->nvof_in_pitch, w = s->w, h = s->h;
     void *smooth_args[] = { &y, &yp, &dst, &dp, &w, &h };
+    CUfunction k_smooth = s->is_p010 ? s->k_p010_smooth_luma : s->k_smooth_luma;
 
-    CHECK_CU(cu->cuLaunchKernel(s->k_smooth_luma, (w + 15) / 16, (h + 15) / 16, 1,
+    CHECK_CU(cu->cuLaunchKernel(k_smooth, (w + 15) / 16, (h + 15) / 16, 1,
                                 16, 16, 1, 0, st_, smooth_args, NULL));
 
     if (!s->have_previous) {
@@ -500,7 +515,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         unsigned yp = in->linesize[0], uvp = in->linesize[1];
         unsigned dp = s->w * 3 * sizeof(float), w = s->w, h = s->h;
         void *args[] = { &y, &yp, &uv, &uvp, &s->d_in, &dp, &w, &h };
-        if ((ret = CHECK_CU_EXPR(cu->cuLaunchKernel(s->k_nv12_to_rgbf32, (w + 15) / 16, (h + 15) / 16, 1,
+        CUfunction k_in = s->is_p010 ? s->k_p010_to_rgbf32 : s->k_nv12_to_rgbf32;
+        if ((ret = CHECK_CU_EXPR(cu->cuLaunchKernel(k_in, (w + 15) / 16, (h + 15) / 16, 1,
                                                      16, 16, 1, 0, st_, args, NULL))) < 0)
             goto fail_ctx;
     }
