@@ -1,0 +1,40 @@
+--- a/libavutil/hwcontext_vulkan.c	2026-09-24 19:00:00
++++ b/libavutil/hwcontext_vulkan.c	2026-09-24 19:05:20
+@@ -4084,6 +4084,37 @@
+         else
+             return AVERROR(ENOSYS);
+ #endif
++#if CONFIG_CUDA
++    case AV_PIX_FMT_CUDA: {
++        /* Mirror of 0006's Vulkan->CUDA case in vulkan_map_from(), the other direction.
++         * dst->hw_frames_ctx here (== hwfc) is hwmap's auto-derived context, which
++         * av_hwframe_ctx_init() never runs frames_init() on (the derived contract assumes
++         * a view over the source's own memory, true for the DRM/VAAPI cases above, not
++         * here) -- so this lazily runs Vulkan's own frames_init()/frames_get_buffer()
++         * the first time this context is used, exactly as the reverse direction already
++         * does. vulkan_transfer_data_from_cuda() (above) is the existing, already-wired
++         * transfer primitive normally reached only via av_hwframe_transfer_data(); this
++         * reuses it as a real device-to-device cuMemcpy2DAsync, not true zero-copy, for
++         * the same reason 0006 gives: CUDA and Vulkan cannot alias the same memory here,
++         * only copy device-to-device with no host round trip. */
++        FFHWFramesContext *hwfci = ffhwframesctx(hwfc);
++        int err;
++
++        if (!hwfc->pool && !hwfci->pool_internal) {
++            err = hwfci->hw_type->frames_init(hwfc);
++            if (err < 0)
++                return err;
++        }
++        if (!hwfc->pool && hwfci->pool_internal)
++            hwfc->pool = hwfci->pool_internal;
++
++        err = hwfci->hw_type->frames_get_buffer(hwfc, dst);
++        if (err < 0)
++            return err;
++
++        return vulkan_transfer_data_from_cuda(hwfc, dst, src);
++    }
++#endif
+     default:
+         return AVERROR(ENOSYS);
+     }

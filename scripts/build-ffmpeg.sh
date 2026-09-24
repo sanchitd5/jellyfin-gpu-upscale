@@ -430,6 +430,16 @@ patch -p1 < "$HERE/ffmpeg/0001-add-oidn-filter-to-build.patch"
 # with ENOSYS/-38; see livetestbox.md's "GpuResidentEncode" entry for how that was root-caused.
 patch -p1 < "$HERE/ffmpeg/0006-vulkan-to-cuda-hwmap.patch"
 
+# The reverse direction of 0006, also always applied: adds an AV_PIX_FMT_CUDA case to
+# vulkan_map_to() so `hwmap=derive_device=vulkan` can resolve a CUDA source frame (e.g. the
+# output of optix/dlpp_rtcuda/vsr_rtcuda feeding back into a Vulkan libplacebo chain). Reuses
+# vulkan_transfer_data_from_cuda(), which already existed upstream and is normally reached
+# only via av_hwframe_transfer_data() -- hwmap's own av_hwframe_map() tries CUDA's .map_from
+# first (absent: CUDA's HWContextType has no such callback at all) and falls back to trying
+# Vulkan's own .map_to, which only had VAAPI/DRM_PRIME cases before this patch. Same GPU-to-GPU
+# cuMemcpy2DAsync reasoning as 0006, not a true zero-copy map, no host round trip.
+patch -p1 < "$HERE/ffmpeg/0007-cuda-to-vulkan-hwmap.patch"
+
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/
