@@ -1,0 +1,60 @@
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -3767,15 +3767,36 @@
+ #endif
+ 
+ #if CONFIG_CUDA
++#ifndef CUDA_EXTERNAL_MEMORY_DEDICATED
++#define CUDA_EXTERNAL_MEMORY_DEDICATED 0x1
++#endif
++
+ static int export_mem_to_cuda(AVHWDeviceContext *ctx,
+                               AVHWDeviceContext *cuda_cu, CudaFunctions *cu,
+                               AVVkFrameInternal *dst_int, int idx,
+-                              VkDeviceMemory mem, size_t size)
++                              VkDeviceMemory mem, size_t size, VkImage image)
+ {
+     VkResult ret;
+     VulkanDevicePriv *p = ctx->hwctx;
+     AVVulkanDeviceContext *hwctx = &p->p;
+     FFVulkanFunctions *vk = &p->vkctx.vkfn;
++    VkImageMemoryRequirementsInfo2 req_desc = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
++        .image = image,
++    };
++    VkMemoryDedicatedRequirements ded_req = {
++        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS,
++    };
++    VkMemoryRequirements2 req = {
++        .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
++        .pNext = &ded_req,
++    };
++
++    /* alloc_bind_mem() allocates this image's memory as a dedicated
++     * allocation when the driver prefers or requires it. CUDA must be told
++     * so at import, otherwise its array view of the memory does not match
++     * Vulkan's tiling and reads come back scrambled. */
++    vk->GetImageMemoryRequirements2(hwctx->act_dev, &req_desc, &req);
+ 
+ #ifdef _WIN32
+     CUDA_EXTERNAL_MEMORY_HANDLE_DESC ext_desc = {
+@@ -3819,6 +3840,9 @@
+         return AVERROR_EXTERNAL;
+     }
+ #endif
++
++    if (ded_req.prefersDedicatedAllocation || ded_req.requiresDedicatedAllocation)
++        ext_desc.flags = CUDA_EXTERNAL_MEMORY_DEDICATED;
+ 
+     ret = CHECK_CU(cu->cuImportExternalMemory(&dst_int->ext_mem[idx], &ext_desc));
+     if (ret < 0) {
+@@ -3928,7 +3952,8 @@
+         nb_images = ff_vk_count_images(dst_f);
+         for (int i = 0; i < nb_images; i++) {
+             err = export_mem_to_cuda(ctx, cuda_cu, cu, dst_int, i,
+-                                     dst_f->mem[i], dst_f->size[i]);
++                                     dst_f->mem[i], dst_f->size[i],
++                                     dst_f->img[i]);
+             if (err < 0)
+                 goto fail;
+ 

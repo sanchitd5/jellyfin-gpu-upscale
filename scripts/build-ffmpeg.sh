@@ -473,6 +473,33 @@ patch -p1 < "$HERE/ffmpeg/0007-cuda-to-vulkan-hwmap.patch"
 patch -p1 < "$HERE/ffmpeg/0008-hwmap-chain-format.patch"
 patch -p1 < "$HERE/ffmpeg/0009-hwmap-query-formats.patch"
 
+# Vendored from upstream FFmpeg PR #22493 (code.ffmpeg.org/FFmpeg/FFmpeg/pulls/22493, merged),
+# "avfilter: add transpose_cuda video filter" - its own Changelog entry places it under
+# "version <next>", i.e. after the 8.1 release this project's FFMPEG_VER pins, so the n8.1.2
+# tree never had it. Not one of this project's own filters and applies unconditionally, same as
+# 0006-0009: Jellyfin's own core EncodingHelper (not this project's code - grepped src/, no
+# match) emits "transpose_cuda" for a rotated source on the CUDA hwaccel path regardless of any
+# GpuUpscale setting, and the prebuilt jellyfin-ffmpeg binary this project runs alongside already
+# carries it (confirmed via -filters), so a session choosing a CUDA-native GpuUpscale level
+# (dlpp-1..4/vsr-rtcuda) on a rotated source hit "No such filter: 'transpose_cuda'" and failed
+# outright on this project's own binary - a real production failure, not hypothetical, see
+# livetestbox.md. Trimmed from the upstream PR: its Changelog and libavfilter/version.h hunks
+# (a version-number bump) don't apply cleanly against 8.1.2 and carry no functional weight -
+# skipped rather than hand-patched, since neither changes what actually runs. Everything that
+# does was reapplied and reverified: configure, doc/filters.texi, libavfilter/Makefile,
+# libavfilter/allfilters.c, and the two new files (vf_transpose_cuda.c, vf_transpose_cuda.cu -
+# a real CUDA kernel file, compiled through the same cuda_nvcc/cuda_llvm path this tree's other
+# *_cuda filters already use, not hand-written PTX).
+patch -p1 < "$HERE/ffmpeg/0010-add-transpose-cuda-filter.patch"
+
+# 0011: hwcontext_vulkan.c's export_mem_to_cuda() imported Vulkan memory into CUDA without
+# CUDA_EXTERNAL_MEMORY_DEDICATED even though alloc_bind_mem() allocates it as a dedicated
+# allocation on NVIDIA. CUDA's array view then disagrees with Vulkan's tiling: a CUDA->Vulkan
+# hwmap followed by any Vulkan-side read (libplacebo, hwdownload) returned scrambled frames,
+# ~6-9 dB PSNR against the clean decode. cuda->vulkan->cuda alone stayed bit-exact because both
+# hops misread the memory the same way, which is why exit-code and frame-count checks all passed.
+patch -p1 < "$HERE/ffmpeg/0011-vulkan-cuda-import-dedicated.patch"
+
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/
