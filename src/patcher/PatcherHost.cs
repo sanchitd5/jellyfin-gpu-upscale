@@ -233,6 +233,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ["RefineLevel"] = "off",
                     ["ChromaLevel"] = "off",
                     ["SrBypassed"] = false,
+                    ["Pipeline"] = null,
                     ["Encoder"] = null,
                     ["Status"] = UpscalePatches.Active ? "unknown" : "patches-inactive",
                     ["Summary"] = UpscalePatches.Active ? "No enhancement" : "Enhancement unavailable",
@@ -280,6 +281,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["SrOwnsSharpening"] = record.SrOwnsSharpening,
                 ["Upscaler"] = record.Upscaler,
                 ["DeblurLevel"] = record.DeblurLevel ?? "off",
+                ["Pipeline"] = record.Pipeline,
                 // Levels are deliberately NOT here. The panel polls this record every three
                 // seconds while it is open, and the level lists change only on a config change or
                 // an install, so re-serialising the whole set into every response was several

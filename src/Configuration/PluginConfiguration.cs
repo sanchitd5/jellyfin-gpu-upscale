@@ -147,10 +147,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// <summary>
         /// Hand the libplacebo output to NVENC as a CUDA frame (hwmap=derive_device=cuda) instead
         /// of hwdownload,format=yuv420p, skipping the Vulkan-to-system-memory-to-CUDA round trip
-        /// at output size. Off by default: it needs the patched binary's Vulkan-CUDA interop
-        /// confirmed on the server before it can be trusted on a live session - see improvements.md.
+        /// at output size. On by default: the patched binary's Vulkan-CUDA interop
+        /// (ffmpeg/0006-vulkan-to-cuda-hwmap.patch) is verified on CT114 for every libplacebo axis
+        /// (chroma, deband, kernel/scaling, refine, deblur) - see improvements.md. Does not affect
+        /// dlss, dlaa, fsr2, ort or oidn, which stay on their own existing chain regardless of this
+        /// flag - see UpscaleEngine.BuildChain.
         /// </summary>
-        public bool GpuResidentEncode { get; set; }
+        public bool GpuResidentEncode { get; set; } = true;
 
         /// <summary>
         /// Encoder used when this plugin forces a transcode. Blank or "auto" follows the codec the

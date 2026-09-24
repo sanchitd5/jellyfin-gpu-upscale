@@ -72,10 +72,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         /// <summary>
         /// Hand the libplacebo output to NVENC as a CUDA frame (hwmap=derive_device=cuda) instead
-        /// of hwdownload,format=yuv420p. Off by default: needs the patched binary's Vulkan-CUDA
-        /// interop confirmed on the server before it can be trusted on a live session.
+        /// of hwdownload,format=yuv420p. On by default: the patched binary's Vulkan-CUDA interop
+        /// (ffmpeg/0006-vulkan-to-cuda-hwmap.patch) is verified for every libplacebo axis. Does not
+        /// affect dlss, dlaa, fsr2, ort or oidn.
         /// </summary>
-        public bool GpuResidentEncode { get; set; }
+        public bool GpuResidentEncode { get; set; } = true;
 
         /// <summary>
         /// The encoder to use when this plugin forces a transcode. Blank or "auto" means follow the

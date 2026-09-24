@@ -63,6 +63,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public bool CudaNeuralBypass { get; set; }
 
+        /// <summary>
+        /// The branch UpscaleEngine actually took for this session's encode handoff: "CUDA (RTX)"
+        /// for a CudaNeuralBypass session (dlpp-1..4, vsr-rtcuda - never reaches libplacebo at
+        /// all), "Vulkan (GPU-resident)" when GpuResidentEncode handed NVENC a mapped CUDA frame
+        /// straight off the Vulkan chain (hwmap=derive_device=cuda - see
+        /// ffmpeg/0006-vulkan-to-cuda-hwmap.patch, verified on real GPU for every libplacebo axis),
+        /// or "Vulkan" for the older hwdownload round trip. Null when nothing ran. See
+        /// WEB_PANEL_DESIGN.md section 3.5, which named this row before the server sent it.
+        /// </summary>
+        public string Pipeline { get; set; }
+
         public bool GameApplied { get; set; }
 
         /// <summary>True only when libplacebo debanding really went into the command.</summary>
@@ -532,6 +543,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 GameDepthDowngraded = plan.Act && plan.GameApplied && plan.GameDepthDowngraded,
                 DenoiseDroppedForPatchedBinary = plan.Act ? plan.DenoiseDroppedForPatchedBinary : null,
                 CudaNeuralBypass = plan.Act && plan.UsesCudaNeural,
+                Pipeline = !plan.Act
+                    ? null
+                    : plan.UsesCudaNeural
+                        ? "CUDA (RTX)"
+                        : (Settings?.GpuResidentEncode == true ? "Vulkan (GPU-resident)" : "Vulkan"),
                 Status = status,
                 Reason = reason,
             };
