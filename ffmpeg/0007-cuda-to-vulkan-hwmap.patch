@@ -1,6 +1,6 @@
 --- a/libavutil/hwcontext_vulkan.c	2026-09-24 19:00:00
 +++ b/libavutil/hwcontext_vulkan.c	2026-09-24 19:05:20
-@@ -4084,6 +4084,59 @@
+@@ -4084,6 +4084,60 @@
          else
              return AVERROR(ENOSYS);
  #endif
@@ -39,8 +39,8 @@
 +             * only packs a combined image for formats it CAN represent as
 +             * one, i.e. semiplanar ones like nv12/p010le, which is also
 +             * exactly the NVDEC-native format family this bridge exists to
-+             * carry. Not yet build-verified against this exact code path
-+             * (unlike the CLI-flag case) -- see livetestbox.md. */
++             * carry. See livetestbox.md for the CLI-flag proof this is
++             * built on and the real repro this fixes. */
 +            AVVulkanFramesContext *vkfc = hwfc->hwctx;
 +            vkfc->flags |= AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
 +
