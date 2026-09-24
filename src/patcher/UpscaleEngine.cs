@@ -755,13 +755,27 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     r.OutputHeight,
                     // A game upscaler hands libplacebo a picture already at the target size, so the
                     // scale is a no-op and the SR level was forced off to avoid enlarging twice.
-                    // Reporting that as "plain scaling" names the pass that did nothing and hides
-                    // the one that did the work.
+                    // A CUDA-native neural session (dlpp-*/vsr-rtcuda) is the same story: it takes
+                    // UpscaleEngine's separate CUDA hwaccel branch (see Decide()), the Vulkan/SR
+                    // shader chain never runs, and the resize this line reports on was actually
+                    // done by vsr_rtcuda (levels 3/4 conforming dlpp_rtcuda's fixed 2x output to
+                    // the real target, or vsr-rtcuda alone) or by dlpp_rtcuda itself (levels 1/2,
+                    // which take the requested size directly - see ShaderLibrary.CudaNeuralFilter).
+                    // Reporting either of those as "plain scaling" names a pass that never ran
+                    // (libplacebo's own scaler) and hides the one that did - the exact honesty
+                    // failure AGENTS.md's reporting invariant exists to catch.
                     !string.Equals(r.SrLevel, "off", StringComparison.OrdinalIgnoreCase) ? r.SrLevel
                         : r.GameApplied && !string.IsNullOrEmpty(r.GameLevel)
                             && !string.Equals(r.GameLevel, "off", StringComparison.OrdinalIgnoreCase)
                             ? r.GameLevel + ", which produced the output size itself"
-                            : "plain scaling"));
+                            : r.CudaNeuralBypass && ShaderLibrary.IsVsrRtcudaLevel(r.NeuralLevel)
+                                ? "vsr_rtcuda, fast GPU resample"
+                                : r.CudaNeuralBypass && ShaderLibrary.IsDlppLevel(r.NeuralLevel)
+                                    && ShaderLibrary.DlppLevelNumber(r.NeuralLevel) >= 3
+                                    ? "vsr_rtcuda, conforming " + r.NeuralLevel + "'s fixed 2x output to this size"
+                                    : r.CudaNeuralBypass && ShaderLibrary.IsDlppLevel(r.NeuralLevel)
+                                        ? r.NeuralLevel + ", native output size"
+                                        : "plain scaling"));
             }
 
             if (r.DeblurApplied)

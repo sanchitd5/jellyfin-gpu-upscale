@@ -638,7 +638,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public static bool IsCudaNeuralLevel(string level) => IsDlppLevel(level) || IsVsrRtcudaLevel(level);
 
-        private static int DlppLevelNumber(string level) =>
+        public static int DlppLevelNumber(string level) =>
             int.TryParse(
                 level.Trim().Substring("dlpp-".Length),
                 NumberStyles.Integer,
