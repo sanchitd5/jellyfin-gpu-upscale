@@ -196,6 +196,45 @@ def patched_has(filters):
         return list(filters)
 
 
+def patched_encoders():
+    """Encoder names the patched binary carries, cached per build like patched_has(); None if unknown."""
+    try:
+        st = os.stat(PATCHED_FFMPEG)
+        os.makedirs(SLOT_DIR, exist_ok=True)
+        cache = os.path.join(SLOT_DIR, ".encoders-%d-%d" % (st.st_size, int(st.st_mtime)))
+        try:
+            with open(cache) as fh:
+                have = set(fh.read().split())
+        except Exception:
+            out = subprocess.run([PATCHED_FFMPEG, "-hide_banner", "-encoders"],
+                                 capture_output=True, text=True, timeout=30).stdout
+            have = set(re.findall(r"^\s*[VAS][A-Z.]{5}\s+(\S+)", out, re.M))
+            if have:
+                try:
+                    with open(cache, "w") as fh:
+                        fh.write(" ".join(sorted(have)))
+                except Exception:
+                    pass
+        return have or None
+    except Exception:
+        return None
+
+
+def substitute_missing_encoders(cfg, args):
+    """Jellyfin picks the audio encoder from the stock ffmpeg, which is linked against libfdk-aac
+    (non-free). The patched build is not, so a session that needs its audio re-encoded and also
+    needs a patched filter died with "Unknown encoder 'libfdk_aac'". Use ffmpeg's own AAC encoder
+    there instead of failing the session. Fail open: if the encoder list cannot be read, leave the
+    command alone."""
+    if "libfdk_aac" not in args:
+        return args
+    have = patched_encoders()
+    if not have or "libfdk_aac" in have:
+        return args
+    log(cfg, "patched ffmpeg has no libfdk_aac; using its native aac encoder for this session")
+    return ["aac" if a == "libfdk_aac" else a for a in args]
+
+
 def pick_binary(cfg, args):
     """The ffmpeg to run for this command, and the argument list to run it with."""
     wanted = wants_patched(args)
@@ -205,7 +244,7 @@ def pick_binary(cfg, args):
         missing = [f for f in wanted if f not in patched_has(wanted)]
         if not missing:
             log(cfg, "routing to the patched ffmpeg build for this session (%s)" % ", ".join(wanted))
-            return PATCHED_FFMPEG, args
+            return PATCHED_FFMPEG, substitute_missing_encoders(cfg, args)
         log(cfg, "%s requested but %s does not carry %s; running stock without those nodes"
             % ("/".join(wanted), PATCHED_FFMPEG, "/".join(missing)))
         return REAL_FFMPEG, strip_patched(args)
