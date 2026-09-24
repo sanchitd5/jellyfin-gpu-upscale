@@ -1435,7 +1435,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// session, ran clean.
         /// </summary>
         public static string CudaNeuralFilter(
-            string level, int outputWidth, int outputHeight, out string levelUsed, UpscaleSettings cfg = null)
+            string level, int outputWidth, int outputHeight, out string levelUsed, UpscaleSettings cfg = null,
+            bool keepAspect = false)
         {
             levelUsed = "off";
 
@@ -1447,7 +1448,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 }
 
                 levelUsed = VsrRtcudaLevel;
-                return VsrRtcudaNode(outputWidth, outputHeight, cfg);
+                return VsrRtcudaNode(outputWidth, outputHeight, cfg, keepAspect);
             }
 
             if (IsDlppLevel(level))
@@ -1460,35 +1461,47 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 int n = DlppLevelNumber(level);
                 levelUsed = level.Trim().ToLowerInvariant();
 
-                if (n <= 2)
+                // dlpp_rtcuda only ever runs at its own fixed 2x, and vsr_rtcuda is the scaler that
+                // brings the result to the real target, at every level. dlpp then sees the source
+                // resolution rather than a picture something else already blew up, and one filter
+                // owns the resize instead of two disagreeing about it. Levels 3/4 have no safe way
+                // to reach an arbitrary ratio on their own (a non-integer one segfaults), so
+                // without vsr_rtcuda they are not offered at all - fail closed, not "run at the
+                // risky ratio anyway" (AvailableNeuralLevels already withholds them from the probe
+                // on the same condition; this is the same rule applied at the call site, reached by
+                // any hand-crafted request that bypasses the probe).
+                if (!RtxVsrOffered(cfg))
                 {
+                    if (n > 2)
+                    {
+                        return null;
+                    }
+
+                    // Levels 1/2 can still take the size directly when vsr_rtcuda is missing.
                     return string.Format(
                         CultureInfo.InvariantCulture,
                         "dlpp_rtcuda=dll={0}:level={1}:w={2}:h={3}",
                         RtxDlppDllPathFor(cfg), n, outputWidth, outputHeight);
                 }
 
-                // Levels 3/4: fixed safe 2x internally, vsr_rtcuda conforms to the real target.
-                // No CUDA-native way to reach the requested size without vsr_rtcuda, so without it
-                // this level is not offered here either - fail closed, not "run at the risky ratio
-                // anyway" (AvailableNeuralLevels already withholds it from the probe on the same
-                // condition; this is the same rule applied again at this call site, reached by any
-                // hand-crafted request that bypasses the probe).
-                if (!RtxVsrOffered(cfg))
-                {
-                    return null;
-                }
-
                 string dlppNode = string.Format(
                     CultureInfo.InvariantCulture, "dlpp_rtcuda=dll={0}:level={1}", RtxDlppDllPathFor(cfg), n);
-                return dlppNode + "," + VsrRtcudaNode(outputWidth, outputHeight, cfg);
+                return dlppNode + "," + VsrRtcudaNode(outputWidth, outputHeight, cfg, keepAspect);
             }
 
             return null;
         }
 
-        private static string VsrRtcudaNode(int w, int h, UpscaleSettings cfg) =>
-            string.Format(CultureInfo.InvariantCulture, "vsr_rtcuda=dll={0}:w={1}:h={2}", RtxVsrDllPathFor(cfg), w, h);
+        /// <summary>
+        /// keepAspect passes the width as -2, which vf_vsr_rtcuda resolves from the frame that
+        /// actually arrives (aspect kept from the height, rounded to even) instead of from a width
+        /// the plugin worked out beforehand. Used when Jellyfin has rotated the picture with
+        /// transpose_cuda upstream, the one case where stream metadata and the frame disagree.
+        /// </summary>
+        private static string VsrRtcudaNode(int w, int h, UpscaleSettings cfg, bool keepAspect = false) =>
+            string.Format(
+                CultureInfo.InvariantCulture, "vsr_rtcuda=dll={0}:w={1}:h={2}",
+                RtxVsrDllPathFor(cfg), keepAspect ? -2 : w, h);
 
         /// <summary>
         /// The bare "optix" node for the CUDA-native branch - no format=gbrpf32le wrap, because

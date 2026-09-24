@@ -129,6 +129,15 @@ static int classify_nvdec_format(enum AVPixelFormat fmt, int *is_planar444,
     }
 }
 
+/* The dimension that keeps in_num:in_den in the same proportion as `known`, rounded to a multiple
+ * of `mult` and never below it. */
+static int keep_aspect(int known, int in_num, int in_den, int mult)
+{
+    int64_t v = av_rescale(known, in_num, in_den);
+    v = (v + mult / 2) / mult * mult;
+    return (int)FFMAX(v, mult);
+}
+
 static int config_props(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
@@ -153,6 +162,22 @@ static int config_props(AVFilterLink *outlink)
         return AVERROR(ENOSYS);
     }
     s->hwctx = in_fc->device_ctx->hwctx;
+    /* w/h follow the scale filter: 0 is the default of twice the input, and a negative value keeps
+     * the input's aspect ratio from the other dimension, rounded to a multiple of |value| (-1
+     * exact, -2 even). A caller can then size the output from the frame that really arrives here
+     * instead of from stream metadata that a rotation upstream (transpose_cuda) has already made
+     * wrong. */
+    if (s->ow < 0 && s->oh < 0) {
+        av_log(ctx, AV_LOG_ERROR, "w and h cannot both keep the aspect ratio\n");
+        return AVERROR(EINVAL);
+    }
+    if (s->ow < 0) {
+        if (!s->oh) s->oh = inlink->h * 2;
+        s->ow = keep_aspect(s->oh, inlink->w, inlink->h, -s->ow);
+    } else if (s->oh < 0) {
+        if (!s->ow) s->ow = inlink->w * 2;
+        s->oh = keep_aspect(s->ow, inlink->h, inlink->w, -s->oh);
+    }
     if (!s->ow) s->ow = inlink->w * 2;
     if (!s->oh) s->oh = inlink->h * 2;
 
@@ -321,8 +346,8 @@ static av_cold void uninit(AVFilterContext *ctx)
 static const AVOption vsr_rtcuda_options[] = {
     { "dll", "path to nvaivpx.dll (not shipped: see RTXVSR.md)", OFFSET(dll), AV_OPT_TYPE_STRING,
       { .str = "/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll" }, 0, 0, FLAGS },
-    { "w", "output width (0 = 2x)", OFFSET(ow), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 7680, FLAGS },
-    { "h", "output height (0 = 2x)", OFFSET(oh), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 4320, FLAGS },
+    { "w", "output width (0 = 2x, -1/-2 = keep aspect from h, rounded to 1/2)", OFFSET(ow), AV_OPT_TYPE_INT, { .i64 = 0 }, -2, 7680, FLAGS },
+    { "h", "output height (0 = 2x, -1/-2 = keep aspect from w, rounded to 1/2)", OFFSET(oh), AV_OPT_TYPE_INT, { .i64 = 0 }, -2, 4320, FLAGS },
     { "inject", "raw RGBA input file, replaces decoded pictures (test harness only)",
       OFFSET(inject), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },
     { "dump", "write the output of dump_frame as PPM (test harness only)", OFFSET(dump), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, FLAGS },

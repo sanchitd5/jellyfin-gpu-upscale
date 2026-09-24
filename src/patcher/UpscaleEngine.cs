@@ -346,6 +346,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             public bool UsesCudaNeural { get; set; }
 
             /// <summary>
+            /// The source is stored sideways (rotation of 90 or 270 degrees), so Jellyfin turns it
+            /// upright in the chain - with transpose_cuda on the CUDA path. The plugin's own size
+            /// arithmetic already works on the upright picture; this lets the CUDA-native branch
+            /// hand the final width to ffmpeg to work out from the frame that really arrives.
+            /// </summary>
+            public bool SourceSideways { get; set; }
+
+            /// <summary>
             /// The bare "optix" node (no format=gbrpf32le wrap) to run ahead of the CUDA-native
             /// neural filter(s), or null when this session's denoise choice does not carry over
             /// (see ShaderLibrary.CudaDenoiseFilter - only optix/optix-temporal qualify).
@@ -751,7 +759,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             if (r.CudaNeuralBypass && ShaderLibrary.IsDlppLevel(r.NeuralLevel))
             {
-                return ShaderLibrary.DlppLevelNumber(r.NeuralLevel) >= 3
+                // vsr_rtcuda resizes after dlpp at every level while it is available; levels 1/2
+                // only take the size themselves when it is not (CudaNeuralFilter).
+                return ShaderLibrary.DlppLevelNumber(r.NeuralLevel) >= 3 || ShaderLibrary.RtxVsrOffered(Settings)
                     ? "vsr_rtcuda, conforming " + r.NeuralLevel + "'s fixed 2x output to this size"
                     : r.NeuralLevel + ", native output size";
             }
@@ -1067,7 +1077,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
                 (int sw, int sh) = UprightSize(vs.Width.Value, vs.Height.Value, vs.Rotation);
 
-                var plan = new Plan { SourceWidth = sw, SourceHeight = sh, Width = sw, Height = sh };
+                var plan = new Plan
+                {
+                    SourceWidth = sw, SourceHeight = sh, Width = sw, Height = sh,
+                    SourceSideways = IsQuarterTurn(vs.Rotation),
+                };
 
                 // A source that never declared its range is the one case libplacebo has to guess
                 // at, and guessing full on limited material lifts black by about 9/255 across the
@@ -1345,7 +1359,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     // this fix, and deblock/denoise already have their own drop-and-report path
                     // (plan.DenoiseDroppedForPatchedBinary) for a different, pre-existing reason.
                     plan.NeuralFilter = ShaderLibrary.CudaNeuralFilter(
-                        neuralLevel, plan.Width, plan.Height, out string cudaNeuralUsed, cfg);
+                        neuralLevel, plan.Width, plan.Height, out string cudaNeuralUsed, cfg,
+                        keepAspect: plan.SourceSideways);
                     plan.NeuralLevel = cudaNeuralUsed;
                     plan.NeuralApplied = plan.NeuralFilter != null;
                     plan.UsesCudaNeural = plan.NeuralApplied;
@@ -1571,10 +1586,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// that point sees the swapped dimensions. Reading the stored size made a 848x480 source
         /// stored sideways get a landscape 3816x2160 target for a portrait picture.
         /// </summary>
-        private static (int Width, int Height) UprightSize(int width, int height, int? rotation)
+        private static (int Width, int Height) UprightSize(int width, int height, int? rotation) =>
+            IsQuarterTurn(rotation) ? (height, width) : (width, height);
+
+        /// <summary>True when the stream is stored sideways: a rotation of 90 or 270 degrees.</summary>
+        private static bool IsQuarterTurn(int? rotation)
         {
-            int quarterTurns = ((rotation ?? 0) % 360 + 360) % 360;
-            return quarterTurns == 90 || quarterTurns == 270 ? (height, width) : (width, height);
+            int degrees = ((rotation ?? 0) % 360 + 360) % 360;
+            return degrees == 90 || degrees == 270;
         }
 
         /// <summary>
@@ -2525,7 +2544,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     // that one leading comma and nothing else does, so TrimStart(',') is exact, not
                     // a heuristic.
                     var bridgeSb = new StringBuilder();
-                    AppendLibplaceboSegment(bridgeSb, plan, cfg);
+                    AppendLibplaceboSegment(bridgeSb, plan, cfg, keepInputSize: plan.NeuralApplied);
                     cudaNodes.Add(bridgeSb.ToString().TrimStart(','));
 
                     cudaNodes.Add("hwmap=derive_device=cuda");
@@ -2634,13 +2653,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// or start empty (the CUDA bridge, which strips the one resulting leading comma before
         /// using this as a single filtergraph node - see BuildChain).
         /// </summary>
-        private static void AppendLibplaceboSegment(StringBuilder sb, Plan plan, UpscaleSettings cfg)
+        private static void AppendLibplaceboSegment(
+            StringBuilder sb, Plan plan, UpscaleSettings cfg, bool keepInputSize = false)
         {
+            // keepInputSize: a neural session lets dlpp_rtcuda and vsr_rtcuda own the resize, so
+            // libplacebo only runs its shaders at the size it is handed. Giving it the final target
+            // as well upscaled the picture first, then dlpp doubled that, then vsr shrank it back.
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
                 ",libplacebo=w={0}:h={1}:upscaler={2}",
-                plan.Width,
-                plan.Height,
+                keepInputSize ? "iw" : plan.Width.ToString(CultureInfo.InvariantCulture),
+                keepInputSize ? "ih" : plan.Height.ToString(CultureInfo.InvariantCulture),
                 string.IsNullOrWhiteSpace(plan.Upscaler) ? "ewa_lanczos" : plan.Upscaler);
 
             // Debanding. grain=0 is not a detail: libplacebo defaults it to 6, which dithers

@@ -97,8 +97,46 @@ case_run "libplacebo between bridges 1920x1080"  1920x1080 "$VK" \
     "format=nv12,hwupload_cuda,hwmap,libplacebo=w=1920:h=1080:deband=1,hwmap=derive_device=cuda,hwdownload,format=nv12" psnr \
     "format=nv12,hwupload,libplacebo=w=1920:h=1080:deband=1,hwdownload,format=nv12"
 
+# Output SIZE cases. A rotated portrait picture came out landscape once the neural chain was
+# handed a width worked out from stream metadata instead of from the frame that arrived after
+# transpose_cuda, so these check the shape of what comes out, in bytes of raw nv12.
+# size_case NAME EXPECTED_WxH DEV_ARGS SOURCE_WxH FILTER
+size_case() {
+    local name="$1" want="$2" dev="$3" src="$4" vf="$5" tag w h expect got
+    tag="$(echo "$name" | tr -c 'A-Za-z0-9' _)"
+    w="${want%x*}"; h="${want#*x}"; expect=$((w * h * 3 / 2 * FRAMES))
+    run_ff $dev $(SRC "$src") -vf "$vf" -f rawvideo -y "$WORK/size_$tag.nv12" 2>"$WORK/size_$tag.err"
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        printf '  %-44s ffmpeg exit %s: %s\n' "$name" "$rc" "$(head -c 160 "$WORK/size_$tag.err" | tr '\n' ' ')"
+        failed=1; return
+    fi
+    got="$(stat -c %s "$WORK/size_$tag.nv12" 2>/dev/null || echo 0)"
+    if [ "$got" -eq "$expect" ]; then printf '  %-44s ok (%s)\n' "$name" "$want"
+    else printf '  %-44s WRONG SHAPE (%s bytes, wanted %s for %s)\n' "$name" "$got" "$expect" "$want"; failed=1; fi
+}
+
+size_case "libplacebo w=iw:h=ih keeps the size"  640x360  "$VK" 640x360 \
+    "format=nv12,hwupload_cuda,hwmap,libplacebo=w=iw:h=ih,hwmap=derive_device=cuda,hwdownload,format=nv12"
+
+BIN_DIR="$(dirname "$FF")"
+VSR_DLL="$BIN_DIR/rtxvsr/dll/nvaivpx.dll"
+DLPP_DLL="$BIN_DIR/rtxdlpp/dll/nvdlppx.dll"
+if [ -f "$VSR_DLL" ]; then
+    size_case "portrait via transpose_cuda, vsr w=-2" 720x1280 "$CU" 640x360 \
+        "format=nv12,hwupload_cuda,transpose_cuda=dir=clock,vsr_rtcuda=dll=$VSR_DLL:w=-2:h=1280,hwdownload,format=nv12"
+    if [ -f "$DLPP_DLL" ]; then
+        # dlpp doubles 360x640 to 720x1280 and vsr resizes that to 1920 high, so the resize is not
+        # an identity and the expected width has to come out of the aspect ratio: 1080.
+        size_case "portrait via dlpp then vsr w=-2" 1080x1920 "$CU" 640x360 \
+            "format=nv12,hwupload_cuda,transpose_cuda=dir=clock,dlpp_rtcuda=dll=$DLPP_DLL:level=1,vsr_rtcuda=dll=$VSR_DLL:w=-2:h=1920,hwdownload,format=nv12"
+    fi
+else
+    echo "  portrait size cases skipped: $VSR_DLL not present"
+fi
+
 if [ $failed -ne 0 ]; then
-    echo "FAILED: the CUDA<->Vulkan bridge returned corrupted frames" >&2
+    echo "FAILED: the CUDA<->Vulkan bridge or the resize chain returned wrong frames" >&2
     exit 1
 fi
 if [ $broken_setup -ne 0 ]; then
