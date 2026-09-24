@@ -32,3 +32,7 @@ livetestbox.md
 # the conventional local drop location. Never fetched or committed by us:
 # see DLSS.md / RTXDLPP.md / roadmap/dlss-neural-rendering.md.
 /dll/
+
+# local clones of third-party repos for reading source during investigation -
+# never vendored/committed here.
+/researchRepos/
