@@ -187,6 +187,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
     {
         private const int HistoryLimit = 50;
 
+        // The long edge at which a portrait source is treated as already 4K+ and the upscale
+        // ladder is bypassed rather than offered - see Decide()'s portrait branch. 3840 is 4K
+        // UHD's long edge (3840x2160 landscape, or a 2160x3840 portrait recording); either the
+        // width or the height reaching it means the source is already at that resolution class.
+        private const int PortraitUltraHdEdge = 3840;
+
         private static readonly List<SessionRecord> _history = new List<SessionRecord>();
         private static readonly object _historyLock = new object();
         private static readonly ConcurrentDictionary<string, SessionRecord> _bySession =
@@ -1094,23 +1100,24 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 {
                     upscaleReason = "no upscale requested";
                 }
-                else if (sw < sh)
+                else if (sw < sh && (sw >= PortraitUltraHdEdge || sh >= PortraitUltraHdEdge))
                 {
-                    // Portrait source (width < height, a phone recording). The whole ladder - its
-                    // cost table, its shader choices, MaxSourceHeight's own cutoff - is measured
-                    // and tuned against 16:9 landscape content (state.js's FPS/DENOISE_COST/
-                    // NEURAL_COST comments, RTXDLPP.md's benchmark baseline). None of it has been
-                    // validated the other way round, and MaxSourceHeight's own check does not
-                    // reliably catch this: it compares sh against a landscape-tuned cutoff, but
-                    // for a portrait source sh is already the LONG dimension, so a 1080x1920
-                    // source can sail past a cutoff meant to stop enlarging something already
-                    // tall enough. Bypassed outright rather than run the landscape math on
-                    // sideways content and hope it holds - reported 2026-09-24 against a real
-                    // 1080x1920 source.
-                    upscaleReason = "portrait source, upscale bypassed";
+                    // Portrait source (width < height, a phone recording) that is already 4K or
+                    // taller on its long edge. MaxSourceHeight's own check does not reliably catch
+                    // this for portrait content: it compares sh against a landscape-tuned cutoff,
+                    // and for a source this tall to begin with, running it up further is not the
+                    // problem the ladder exists to solve. Below this edge, portrait content is
+                    // offered the ladder exactly like landscape content is - the proportional
+                    // target math a few lines down (tw = sw * (target/sh)) preserves aspect ratio
+                    // regardless of which dimension is longer, so nothing else here needs to
+                    // change for portrait, only this one bypass condition.
+                    upscaleReason = "portrait source already 4K+, upscale bypassed";
                 }
-                else if (sh > cfg.MaxSourceHeight)
+                else if (sh > cfg.MaxSourceHeight && sw >= sh)
                 {
+                    // Landscape only: MaxSourceHeight is tuned against a landscape source's height
+                    // being the short edge, so it must not also catch a portrait source under the
+                    // 4K bypass above - that case is handled entirely by the branch before this one.
                     upscaleReason = "source taller than MaxSourceHeight";
                 }
                 else
