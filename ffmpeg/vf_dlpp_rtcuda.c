@@ -1,8 +1,8 @@
 /*
  * dlpp_rtcuda: RTX DLPP super-resolution (nvdlppx.dll) hosted live via our own PE loader, on
  * FFmpeg's own CUDA context and stream:
- *   NV12 CUDA frame -> nv12_to_rgba (PTX) -> RGBA8 surface -> DLPP Process
- *   -> RGBA8 surface -> rgba_to_nv12 (PTX) -> NV12 CUDA frame.
+ *   CUDA frame (any NVDEC sw_format) -> semiplanar_to_rgba/planar444_to_rgba -> RGBA8 surface
+ *   -> DLPP Process -> RGBA8 surface -> rgba_to_nv12 -> NV12 CUDA frame.
  * No host copies per frame (GPU-resident, verified at 10,790 real frames -- see TASK.md
  * "Track B: DLPP").
  *
@@ -65,10 +65,12 @@
 #include "gu_dlpp_embed.h"
 #include "gu_dlpp_nv12_rgba_ptx.h"   /* generated at build time from gu_dlpp_nv12_rgba.cu (real
                                       * CUDA C, compiled to PTX with clang's NVPTX backend -- not
-                                      * NVIDIA material, not extracted from any SDK); the nv12/p010
-                                      * conversion kernels are feature-agnostic and shared with the
-                                      * AIVP-era spike. p010_to_rgba handles p010le input (NVDEC's
-                                      * 10-bit decode format) alongside the original nv12_to_rgba. */
+                                      * NVIDIA material, not extracted from any SDK). semiplanar_to_rgba
+                                      * covers every NVDEC sw_format except yuv444p*
+                                      * (nv12/nv16/p010le/p012le/p016le/p210le/p212le/p216le, all
+                                      * Y-plane-plus-interleaved-chroma, parametrized by sample
+                                      * width and chroma vertical subsampling); planar444_to_rgba
+                                      * handles the yuv444p family's three separate planes. */
 
 typedef struct DLPPRtCudaContext {
     const AVClass *class;
@@ -78,14 +80,50 @@ typedef struct DLPPRtCudaContext {
     AVCUDADeviceContext *hwctx;
     AVBufferRef *out_frames;
     CUmodule mod;
-    CUfunction k_in, k_in_p010, k_out;
+    CUfunction k_in_semi, k_in_planar444, k_out;
     uint64_t in_surf, out_surf;
     int64_t nframes;
     uint64_t cb0[19];
-    int is_p010;   /* input sw_format was p010le, not nv12 */
+    /* Input format classification (see classify_nvdec_format below). */
+    int is_planar444;
+    int word_bytes;
+    int chroma_vshift;
 } DLPPRtCudaContext;
 
 #define CHECK_CU(x) FF_CUDA_CHECK_DL(ctx, s->hwctx->internal->cuda_dl, x)
+
+/* Classifies an AV_PIX_FMT_CUDA frame's sw_format for the generalized semiplanar_to_rgba /
+ * planar444_to_rgba kernels. FFmpeg's own libavcodec/nvdec.c (ff_nvdec_get_format) fixes the
+ * complete, exhaustive set of formats -hwaccel_output_format cuda can ever produce: a switch
+ * on decoded bit depth (8/10/12/16) x chroma layout (4:2:0/4:2:2/4:4:4). Every format below is
+ * accepted; anything else (e.g. a future NVDEC output format, or a filter fed something that
+ * never went through NVDEC at all) is rejected here with ENOSYS rather than misread. */
+static int classify_nvdec_format(enum AVPixelFormat fmt, int *is_planar444,
+                                  int *word_bytes, int *chroma_vshift)
+{
+    switch (fmt) {
+    case AV_PIX_FMT_NV12:
+        *is_planar444 = 0; *word_bytes = 1; *chroma_vshift = 1; return 0;
+    case AV_PIX_FMT_NV16:
+        *is_planar444 = 0; *word_bytes = 1; *chroma_vshift = 0; return 0;
+    case AV_PIX_FMT_P010LE:
+    case AV_PIX_FMT_P012LE:
+    case AV_PIX_FMT_P016LE:
+        *is_planar444 = 0; *word_bytes = 2; *chroma_vshift = 1; return 0;
+    case AV_PIX_FMT_P210LE:
+    case AV_PIX_FMT_P212LE:
+    case AV_PIX_FMT_P216LE:
+        *is_planar444 = 0; *word_bytes = 2; *chroma_vshift = 0; return 0;
+    case AV_PIX_FMT_YUV444P:
+        *is_planar444 = 1; *word_bytes = 1; *chroma_vshift = 0; return 0;
+    case AV_PIX_FMT_YUV444P10MSBLE:
+    case AV_PIX_FMT_YUV444P12MSBLE:
+    case AV_PIX_FMT_YUV444P16LE:
+        *is_planar444 = 1; *word_bytes = 2; *chroma_vshift = 0; return 0;
+    default:
+        return AVERROR(ENOSYS);
+    }
+}
 
 static int config_props(AVFilterLink *outlink)
 {
@@ -105,13 +143,12 @@ static int config_props(AVFilterLink *outlink)
         return AVERROR(EINVAL);
     }
     in_fc = (AVHWFramesContext *)inl->hw_frames_ctx->data;
-    if ((in_fc->sw_format != AV_PIX_FMT_NV12 && in_fc->sw_format != AV_PIX_FMT_P010LE) ||
+    if (classify_nvdec_format(in_fc->sw_format, &s->is_planar444, &s->word_bytes, &s->chroma_vshift) < 0 ||
         (inlink->w | inlink->h) & 1) {
-        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12 or P010LE, got %s\n",
+        av_log(ctx, AV_LOG_ERROR, "needs an even-sized NVDEC CUDA format, got %s\n",
                av_get_pix_fmt_name(in_fc->sw_format));
         return AVERROR(ENOSYS);
     }
-    s->is_p010 = in_fc->sw_format == AV_PIX_FMT_P010LE;
     s->hwctx = in_fc->device_ctx->hwctx;
     if (!s->ow) s->ow = inlink->w * 2;
     if (!s->oh) s->oh = inlink->h * 2;
@@ -150,8 +187,8 @@ static int config_props(AVFilterLink *outlink)
     ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuCtxPushCurrent(s->hwctx->cuda_ctx));
     if (ret < 0) { av_free(inj); return ret; }
     ret = gu_dlpp_embed_load_ptx(gu_dlpp_nv12_rgba_ptx, (void **)&s->mod) ? AVERROR_EXTERNAL : 0;
-    if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in, s->mod, "nv12_to_rgba"));
-    if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in_p010, s->mod, "p010_to_rgba"));
+    if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in_semi, s->mod, "semiplanar_to_rgba"));
+    if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in_planar444, s->mod, "planar444_to_rgba"));
     if (!ret) ret = CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_out, s->mod, "rgba_to_nv12"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuCtxPopCurrent(&dummy));
     if (ret < 0) { av_free(inj); return ret; }
@@ -214,12 +251,22 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
     if ((ret = CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx))) < 0) goto fail;
     if (!s->inject) {
-        CUdeviceptr y = (CUdeviceptr)in->data[0], uv = (CUdeviceptr)in->data[1];
-        unsigned yp = in->linesize[0], uvp = in->linesize[1], w = inlink->w, h = inlink->h;
-        void *args[] = { &y, &yp, &uv, &uvp, &s->in_surf, &w, &h };
-        CUfunction k_in = s->is_p010 ? s->k_in_p010 : s->k_in;
-        ret = CHECK_CU(cu->cuLaunchKernel(k_in, (w + 15) / 16, (h + 15) / 16, 1,
-                                          16, 16, 1, 0, st, args, NULL));
+        unsigned w = inlink->w, h = inlink->h;
+        if (s->is_planar444) {
+            CUdeviceptr y = (CUdeviceptr)in->data[0], u = (CUdeviceptr)in->data[1], v = (CUdeviceptr)in->data[2];
+            unsigned yp = in->linesize[0], up = in->linesize[1], vp = in->linesize[2];
+            int word_bytes = s->word_bytes;
+            void *args[] = { &y, &yp, &u, &up, &v, &vp, &s->in_surf, &w, &h, &word_bytes };
+            ret = CHECK_CU(cu->cuLaunchKernel(s->k_in_planar444, (w + 15) / 16, (h + 15) / 16, 1,
+                                              16, 16, 1, 0, st, args, NULL));
+        } else {
+            CUdeviceptr y = (CUdeviceptr)in->data[0], uv = (CUdeviceptr)in->data[1];
+            unsigned yp = in->linesize[0], uvp = in->linesize[1];
+            int word_bytes = s->word_bytes, chroma_vshift = s->chroma_vshift;
+            void *args[] = { &y, &yp, &uv, &uvp, &s->in_surf, &w, &h, &word_bytes, &chroma_vshift };
+            ret = CHECK_CU(cu->cuLaunchKernel(s->k_in_semi, (w + 15) / 16, (h + 15) / 16, 1,
+                                              16, 16, 1, 0, st, args, NULL));
+        }
     }
     if (!ret && (rc = gu_dlpp_embed_process())) {
         av_log(ctx, AV_LOG_ERROR, "Process rc=%#x\n", rc);

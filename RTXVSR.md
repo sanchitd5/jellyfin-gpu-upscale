@@ -31,14 +31,28 @@ plain bicubic in quality (43.93 dB vs 41.66 dB in an earlier test). There is no 
 variable, or code path anywhere in `vf_vsr_rtcuda.c` or `gu_vsr_embed.c` that re-enables the
 network path — bypass is hardcoded in `gu_vsr_embed.c`'s `build_params()`.
 
-**p010le (10-bit) input, fixed 2026-09-24.** `config_props` accepts both `nv12` and `p010le`
-`sw_format`, and `filter_frame` picks `p010_to_rgba` instead of `nv12_to_rgba` when the input is
-p010le. NVDEC decodes 10-bit sources straight to p010le (10-bit samples packed into 16-bit
-little-endian words, not `nv12`'s 8-bit bytes); the original nv12-only kernel misread that layout
-until the "needs even-sized NV12" check caught it and killed the transcode. Same class of bug as
-`RTXDLPP.md`'s and `vf_optix.c`'s; `p010_to_rgba` reduces each 16-bit word to the 8-bit domain
-(`word >> 8`) before the same BT.709 matrix `nv12_to_rgba` uses, since AIVP bypass mode and
-`rgba_to_nv12`'s output are 8-bit regardless of input.
+**p010le (10-bit) input, fixed 2026-09-24, then generalized to every NVDEC sw_format.**
+`config_props` originally accepted `nv12` and `p010le` only. NVDEC decodes 10-bit sources
+straight to p010le (10-bit samples packed into 16-bit little-endian words, not `nv12`'s 8-bit
+bytes); the original nv12-only kernel misread that layout until the "needs even-sized NV12"
+check caught it and killed the transcode. Same class of bug as `RTXDLPP.md`'s and `vf_optix.c`'s.
+
+That fix was then generalized to `classify_nvdec_format`'s complete, exhaustive list —
+`libavcodec/nvdec.c`'s `ff_nvdec_get_format` fixes every sw_format `-hwaccel_output_format cuda`
+can ever produce: nv12/nv16 (8-bit), p010le/p012le/p016le (4:2:0, >8-bit), p210le/p212le/p216le
+(4:2:2, >8-bit), and the yuv444p family (4:4:4, three separate planes). `semiplanar_to_rgba`
+covers every format except yuv444p*, parametrized by sample width and chroma vertical-
+subsampling instead of one hard-coded format (every 16-bit-word format reduces via `word >> 8`
+before the same BT.709 matrix, since NVDEC always MSB-justifies regardless of real bit depth);
+`planar444_to_rgba` is a structurally distinct kernel for yuv444p*. `rgba_to_nv12`'s output stays
+8-bit NV12 regardless of input either way (AIVP bypass mode is 8-bit domain internally too), so
+it needed no format-specific variant.
+
+This library's real content only ever produces nv12/p010le — the rest are real per NVDEC's own
+logic but untestable against a real bitstream here, so they were verified via a standalone CUDA
+driver-API harness launching the actual compiled kernel against synthetic device buffers and
+checking the real GPU output against a host-computed BT.709 reference (all six format-shape
+combinations passed, zero mismatches) rather than left unimplemented.
 
 ## What you must fetch yourself
 

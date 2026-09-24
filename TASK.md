@@ -2875,6 +2875,92 @@ recorded in the production-deploy section above and in `INTEGRATION_DESIGN.md`/
 optix/dlpp_rtcuda/vsr_rtcuda is no longer a known gap on this box, verified against the real
 production binary, not just a scratch build.
 
+### Generalized the p010le fix to the full NVDEC sw_format list (2026-09-24, same task, follow-up)
+
+Coordinator asked, after the nv12/p010le fix above was already committed and deployed: don't stop
+at p010le, cover every sw_format NVDEC's own decoder logic can actually produce, and use synthetic
+test content for the formats this library has no real source file for rather than treating "no
+library file" as a reason to skip implementation.
+
+**Full list, straight from `libavcodec/nvdec.c`'s `ff_nvdec_get_format`** (a fixed switch on
+decoded bit depth 8/10/12/16 x chroma layout 4:2:0/4:2:2/4:4:4, nothing content-dependent): `nv12`
+(8-bit 420), `nv16` (8-bit 422), `p010le`/`p012le`/`p016le` (420, >8-bit), `p210le`/`p212le`/
+`p216le` (422, >8-bit), `yuv444p` (8-bit 444, three separate planes) and `yuv444p10msble`/
+`yuv444p12msble`/`yuv444p16le` (444, >8-bit).
+
+**Refactor, all three filters:** `classify_nvdec_format(fmt, &is_planar444, &word_bytes,
+&chroma_vshift)` replaces the nv12-or-p010le check with a switch covering every format above;
+anything else still gets the same clean `ENOSYS` rejection, now impossible to hit for any format
+NVDEC can genuinely produce. Two generalized kernels replace the per-format `nv12_to_rgba`/
+`p010_to_rgba` pair: `semiplanar_to_rgba`/`semiplanar_to_rgbf32` (every format except yuv444p*,
+parametrized by `word_bytes` -- 1 for nv12/nv16, 2 for the p0xx/p2xx families -- and
+`chroma_vshift` -- 1 for 4:2:0, 0 for 4:2:2) and `planar444_to_rgba`/`planar444_to_rgbf32` (the
+yuv444p family's three separate full-resolution planes, structurally different from every other
+format, not a variant of the semiplanar kernel). `vf_optix.c`'s `smooth_luma_dev` also takes
+`word_bytes` (chroma is irrelevant to a luma-only box filter, and yuv444p's Y plane is layout-
+identical to a semiplanar format's Y plane, so it needs no `planar444` variant). Every 16-bit-word
+format reduces to the 8-bit domain via `word >> 8` before the same BT.709 matrix -- verified
+against `libavutil/pixfmt.h`'s own comments ("data in the high bits, zeros in the low bits" for
+P010LE/P012LE, "lowest bits zero" for YUV444P10/12MSBLE) that NVDEC always MSB-justifies a
+sub-16-bit sample regardless of real bit depth, so one shift works for every format, not a
+per-bit-depth amount. `rgba_to_nv12`/`rgbf32_to_nv12`/`expand_flow_dev` are unchanged: output
+stays 8-bit NV12 regardless of input either way, and NVOFA's flow grid is independent of the
+decoded frame's pixel format.
+
+**Verification split, exactly as instructed -- synthetic where real content doesn't exist, real
+content where it does:**
+- Real content (nv12, p010le): re-ran the full real-decode test suite from the fix above against
+  this refactored code (`optix=mode=ldr`/`mode=temporal`, `vsr_rtcuda`, `dlpp_rtcuda`, both 8-bit
+  and 10-bit real sources) -- all still exit 0, zero errors. Pixel check: the same p010le frame
+  dumped through `optix=mode=ldr` before and after this refactor has the **identical** mean byte
+  value (132.00226867926955, to the last decimal) -- the generalized kernel is byte-for-byte
+  equivalent to the old dedicated `p010_to_rgbf32` kernel for the one format both can run.
+- Synthetic content (nv16, p012le/p016le-shape, p210le/p212le/p216le-shape, yuv444p, yuv444p10/
+  12msble/yuv444p16le-shape): this library's real content is 100% 4:2:0 (confirmed via
+  `libavcodec/nvdec.c` as the authority on what NVDEC can produce, not by scanning media files for
+  it -- the coordinator corrected an earlier, slower approach of grepping the library for exotic
+  pix_fmts, which is neither necessary nor sufficient since NVDEC's output set is fixed in its own
+  source, independent of what any file happens to contain), so no real bitstream exercises these
+  paths, and 4:2:2/4:4:4 hardware decode is not reliably available on consumer NVDEC either even
+  if a bitstream existed. Built a standalone CUDA driver-API test harness
+  (`kernel_format_test.c`, not committed -- a one-off verification tool, not project source) that
+  loads the actual `gu_optix_nv12_rgbf32.ptx` module compiled from the real `.cu` source, launches
+  `semiplanar_to_rgbf32`/`planar444_to_rgbf32` directly against synthetic device buffers (a
+  column-gradient Y plane plus a top/bottom-half chroma split, so the test exercises horizontal
+  luma indexing, horizontal chroma-pair indexing, AND the vertical chroma_vshift math all at once,
+  not just "does it crash"), and checks the real GPU output against a host-computed BT.709
+  reference. All six format-shape combinations (the two axes -- word_bytes x chroma_vshift -- span
+  every semiplanar format; word_bytes alone spans both yuv444p variants) passed with zero
+  mismatches at 130 sample points each. One dead end on the way: the harness's own hand-declared
+  CUDA driver API bindings (no `cuda.h` on this box) initially used the unversioned symbol names
+  (`cuMemAlloc`, `cuCtxCreate`, etc.), which are legacy 32-bit-`CUdeviceptr`-ABI compatibility
+  symbols still present in `libcuda.so` -- silently corrupting the upper 32 bits of every
+  "returned" device pointer and producing `CUDA_ERROR_ILLEGAL_ADDRESS` on the very first kernel
+  that touched one. Root-caused by bisecting down to a trivial single-thread kernel launch before
+  finding it; fixed by calling the real `_v2` symbols directly (`cuMemAlloc_v2` etc., what
+  `cuda.h`'s own macros redirect to). This is specific to the test harness's own missing header,
+  not a bug in the actual filters, which go through FFmpeg's own `hwcontext_cuda_internal.h`
+  plumbing and were never affected.
+- **NOT verified, and explicitly not claimed as verified:** whether NVDEC hardware/driver on this
+  GPU can actually hardware-decode a 4:2:2 or 4:4:4 bitstream at all through
+  `-hwaccel cuda -hwaccel_output_format cuda` end-to-end (as opposed to the kernel-level synthetic
+  test above, which bypasses NVDEC entirely). Consumer NVDEC 4:2:2/4:4:4 hardware decode support is
+  known to be limited/absent for most codecs even where `nvdec.c`'s own code has a branch for it;
+  this was not tested against a real encoded bitstream in either direction, so "the kernel logic is
+  correct for this format" and "NVDEC on this box can actually hand it to the kernel" are two
+  separate claims -- only the first is verified here.
+
+**Left untouched:** production binary. The nv12/p010le fix was already deployed and verified on
+production by the deploy agent before this generalization pass started (see the section above);
+none of the newly-covered formats are reachable by this library's real content, so there is no
+production urgency to deploy this generalization, and it was kept to scratch builds throughout.
+
+Files: `ffmpeg/gu_dlpp_nv12_rgba.cu`, `ffmpeg/gu_vsr_nv12_rgba.cu`, `ffmpeg/gu_optix_nv12_rgbf32.cu`
+(`nv12_to_rgba`/`p010_to_rgba` -> `semiplanar_to_rgba`+`planar444_to_rgba`, ditto the rgbf32
+variants), `ffmpeg/vf_optix.c`, `ffmpeg/vf_dlpp_rtcuda.c`, `ffmpeg/vf_vsr_rtcuda.c`
+(`classify_nvdec_format` + generalized kernel selection). `RTXDLPP.md`, `RTXVSR.md`,
+`roadmap/gpu-only-filters.md` updated with the same generalization summary.
+
 ## Runtime filter control (zmq/sendcmd) as an A/B-swap alternative (2026-09-24, `.agent-briefs/runtime-filter-control.md`)
 
 Design-only pass, no CT114 restart/deploy/config change (a concurrent build was found running on

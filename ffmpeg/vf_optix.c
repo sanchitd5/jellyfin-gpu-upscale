@@ -54,23 +54,34 @@
  * filter used to declare AV_PIX_FMT_GBRPF32LE and do its own cuMemcpyHtoD /
  * cuMemcpyDtoH round trip every frame, on top of whatever hwdownload /
  * hwupload ffmpeg had to insert around it.  It was pure CUDA already, so
- * instead it now takes AV_PIX_FMT_CUDA frames directly (both nv12 and p010le
- * sw_format): a small CUDA C module (gu_optix_nv12_rgbf32.cu, compiled to PTX
- * at build time with clang's NVPTX backend and embedded via
+ * instead it now takes AV_PIX_FMT_CUDA frames directly, any sw_format NVDEC
+ * can actually produce: a small CUDA C module (gu_optix_nv12_rgbf32.cu,
+ * compiled to PTX at build time with clang's NVPTX backend and embedded via
  * gu_optix_nv12_rgbf32_ptx.h -- CT114 has no nvcc, same convention as
- * gu_dlpp_nv12_rgba.cu / gu_vsr_nv12_rgba.cu) converts NV12 or P010LE <-> the
+ * gu_dlpp_nv12_rgba.cu / gu_vsr_nv12_rgba.cu) converts that sw_format <-> the
  * interleaved float3 RGB buffer OptiX wants, and two more small kernels in
- * the same module smooth the NVOFA luma input (nv12 and p010le variants) and
- * expand its S10.5 flow grid, both device-to-device.  Nothing above this
- * filter has to hwdownload/hwupload around it any more, and nothing inside
- * it touches host memory on the per-frame path.
+ * the same module smooth the NVOFA luma input and expand its S10.5 flow
+ * grid, both device-to-device.  Nothing above this filter has to
+ * hwdownload/hwupload around it any more, and nothing inside it touches host
+ * memory on the per-frame path.
  *
- * p010le support: NVDEC decodes 10-bit sources straight to p010le (10-bit
- * samples packed into 16-bit little-endian words, value = sample << 6), not
- * nv12.  config_props below accepts either sw_format and filter_frame /
- * compute_flow_dev pick the matching kernel; the p010 kernels reduce to the
- * 8-bit domain (word >> 8) before the same BT.709 matrix the nv12 kernels
- * use, since the denoiser's own output stays 8-bit NV12 regardless of input.
+ * sw_format support: FFmpeg's own libavcodec/nvdec.c (ff_nvdec_get_format)
+ * fixes the complete, exhaustive set of sw_format values
+ * -hwaccel_output_format cuda can ever produce -- a switch on decoded bit
+ * depth (8/10/12/16) x chroma layout (4:2:0/4:2:2/4:4:4).  Every format
+ * except the 4:4:4 row is Y-plane-plus-interleaved-chroma, same physical
+ * shape as nv12 (nv12/nv16/p010le/p012le/p016le/p210le/p212le/p216le),
+ * differing only in sample width (1 or 2 bytes) and whether the chroma plane
+ * is vertically subsampled; classify_nvdec_format below turns the AVPixelFormat
+ * into those two parameters instead of hard-coding one format, and
+ * config_props/filter_frame/compute_flow_dev pick the matching kernel and
+ * pass them through.  NVDEC always left/MSB-justifies a sub-16-bit sample
+ * within its 16-bit container (confirmed against libavutil/pixfmt.h's own
+ * comments), so a uniform word >> 8 reduces any of them to the 8-bit domain
+ * before the same BT.709 matrix runs, since the denoiser's own output stays
+ * 8-bit NV12 regardless of input.  yuv444p and its >8-bit siblings are the
+ * one sw_format that is NOT semiplanar (three separate full-resolution
+ * planes) and get their own kernel for exactly that reason.
  */
 
 #include <string.h>
@@ -132,9 +143,12 @@ typedef struct OptixContext {
     AVBufferRef *out_frames;
 
     CUmodule   mod;
-    CUfunction k_nv12_to_rgbf32, k_p010_to_rgbf32, k_rgbf32_to_nv12;
-    CUfunction k_smooth_luma, k_p010_smooth_luma, k_expand_flow;
-    int is_p010;   /* input sw_format was p010le, not nv12 */
+    CUfunction k_in_semi, k_in_planar444, k_rgbf32_to_nv12;
+    CUfunction k_smooth_luma, k_expand_flow;
+    /* Input format classification (see classify_nvdec_format below). */
+    int is_planar444;
+    int word_bytes;
+    int chroma_vshift;
 
     OptixDeviceContext optix_ctx;
     OptixDenoiser      denoiser;
@@ -289,6 +303,39 @@ static av_cold int nvof_init(AVFilterContext *ctx)
     return 0;
 }
 
+/* Classifies an AV_PIX_FMT_CUDA frame's sw_format for the generalized semiplanar_to_rgbf32 /
+ * planar444_to_rgbf32 / smooth_luma_dev kernels. FFmpeg's own libavcodec/nvdec.c
+ * (ff_nvdec_get_format) fixes the complete, exhaustive set of formats
+ * -hwaccel_output_format cuda can ever produce: a switch on decoded bit depth (8/10/12/16) x
+ * chroma layout (4:2:0/4:2:2/4:4:4). Every format below is accepted; anything else is
+ * rejected here with ENOSYS rather than misread. */
+static int classify_nvdec_format(enum AVPixelFormat fmt, int *is_planar444,
+                                  int *word_bytes, int *chroma_vshift)
+{
+    switch (fmt) {
+    case AV_PIX_FMT_NV12:
+        *is_planar444 = 0; *word_bytes = 1; *chroma_vshift = 1; return 0;
+    case AV_PIX_FMT_NV16:
+        *is_planar444 = 0; *word_bytes = 1; *chroma_vshift = 0; return 0;
+    case AV_PIX_FMT_P010LE:
+    case AV_PIX_FMT_P012LE:
+    case AV_PIX_FMT_P016LE:
+        *is_planar444 = 0; *word_bytes = 2; *chroma_vshift = 1; return 0;
+    case AV_PIX_FMT_P210LE:
+    case AV_PIX_FMT_P212LE:
+    case AV_PIX_FMT_P216LE:
+        *is_planar444 = 0; *word_bytes = 2; *chroma_vshift = 0; return 0;
+    case AV_PIX_FMT_YUV444P:
+        *is_planar444 = 1; *word_bytes = 1; *chroma_vshift = 0; return 0;
+    case AV_PIX_FMT_YUV444P10MSBLE:
+    case AV_PIX_FMT_YUV444P12MSBLE:
+    case AV_PIX_FMT_YUV444P16LE:
+        *is_planar444 = 1; *word_bytes = 2; *chroma_vshift = 0; return 0;
+    default:
+        return AVERROR(ENOSYS);
+    }
+}
+
 /* Everything below here needs the CUDA context current.  It is a separate
  * function so that the push and the pop in config_props are a matched pair:
  * CHECK_CU/CHECK_OPTIX return straight out of whatever function they sit in,
@@ -305,11 +352,10 @@ static int config_props_pushed(AVFilterContext *ctx)
     int ret;
 
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleLoadData(&s->mod, gu_optix_nv12_rgbf32_ptx));
-    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_nv12_to_rgbf32, s->mod, "nv12_to_rgbf32"));
-    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_p010_to_rgbf32, s->mod, "p010_to_rgbf32"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in_semi, s->mod, "semiplanar_to_rgbf32"));
+    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_in_planar444, s->mod, "planar444_to_rgbf32"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_rgbf32_to_nv12, s->mod, "rgbf32_to_nv12"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_smooth_luma, s->mod, "smooth_luma_dev"));
-    CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_p010_smooth_luma, s->mod, "p010_smooth_luma_dev"));
     CHECK_CU(s->hwctx->internal->cuda_dl->cuModuleGetFunction(&s->k_expand_flow, s->mod, "expand_flow_dev"));
 
     CHECK_OPTIX(optixInit());
@@ -385,13 +431,12 @@ static int config_props(AVFilterLink *outlink)
         return AVERROR(EINVAL);
     }
     in_fc = (AVHWFramesContext *)inl->hw_frames_ctx->data;
-    if ((in_fc->sw_format != AV_PIX_FMT_NV12 && in_fc->sw_format != AV_PIX_FMT_P010LE) ||
+    if (classify_nvdec_format(in_fc->sw_format, &s->is_planar444, &s->word_bytes, &s->chroma_vshift) < 0 ||
         (inlink->w | inlink->h) & 1) {
-        av_log(ctx, AV_LOG_ERROR, "needs even-sized NV12 or P010LE, got %s\n",
+        av_log(ctx, AV_LOG_ERROR, "needs an even-sized NVDEC CUDA format, got %s\n",
                av_get_pix_fmt_name(in_fc->sw_format));
         return AVERROR(ENOSYS);
     }
-    s->is_p010 = in_fc->sw_format == AV_PIX_FMT_P010LE;
     s->hwctx = in_fc->device_ctx->hwctx;
     s->w = inlink->w;
     s->h = inlink->h;
@@ -446,10 +491,13 @@ static int compute_flow_dev(AVFilterContext *ctx, AVFrame *in)
     CUdeviceptr dst = s->nvof.nvOFGPUBufferGetCUdeviceptr(s->nvof_frame[s->nvof_slot]);
     CUdeviceptr y = (CUdeviceptr)in->data[0];
     unsigned yp = in->linesize[0], dp = s->nvof_in_pitch, w = s->w, h = s->h;
-    void *smooth_args[] = { &y, &yp, &dst, &dp, &w, &h };
-    CUfunction k_smooth = s->is_p010 ? s->k_p010_smooth_luma : s->k_smooth_luma;
+    int word_bytes = s->word_bytes;
+    /* yuv444p's Y plane is byte-identical in layout to a semiplanar format's Y plane (444
+     * only changes the chroma planes), so smooth_luma_dev needs only word_bytes, never
+     * is_planar444, regardless of which sw_format this frame actually is. */
+    void *smooth_args[] = { &y, &yp, &dst, &dp, &w, &h, &word_bytes };
 
-    CHECK_CU(cu->cuLaunchKernel(k_smooth, (w + 15) / 16, (h + 15) / 16, 1,
+    CHECK_CU(cu->cuLaunchKernel(s->k_smooth_luma, (w + 15) / 16, (h + 15) / 16, 1,
                                 16, 16, 1, 0, st_, smooth_args, NULL));
 
     if (!s->have_previous) {
@@ -511,14 +559,24 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         goto fail;
 
     {
-        CUdeviceptr y = (CUdeviceptr)in->data[0], uv = (CUdeviceptr)in->data[1];
-        unsigned yp = in->linesize[0], uvp = in->linesize[1];
         unsigned dp = s->w * 3 * sizeof(float), w = s->w, h = s->h;
-        void *args[] = { &y, &yp, &uv, &uvp, &s->d_in, &dp, &w, &h };
-        CUfunction k_in = s->is_p010 ? s->k_p010_to_rgbf32 : s->k_nv12_to_rgbf32;
-        if ((ret = CHECK_CU_EXPR(cu->cuLaunchKernel(k_in, (w + 15) / 16, (h + 15) / 16, 1,
-                                                     16, 16, 1, 0, st_, args, NULL))) < 0)
-            goto fail_ctx;
+        if (s->is_planar444) {
+            CUdeviceptr y = (CUdeviceptr)in->data[0], u = (CUdeviceptr)in->data[1], v = (CUdeviceptr)in->data[2];
+            unsigned yp = in->linesize[0], up = in->linesize[1], vp = in->linesize[2];
+            int word_bytes = s->word_bytes;
+            void *args[] = { &y, &yp, &u, &up, &v, &vp, &s->d_in, &dp, &w, &h, &word_bytes };
+            if ((ret = CHECK_CU_EXPR(cu->cuLaunchKernel(s->k_in_planar444, (w + 15) / 16, (h + 15) / 16, 1,
+                                                         16, 16, 1, 0, st_, args, NULL))) < 0)
+                goto fail_ctx;
+        } else {
+            CUdeviceptr y = (CUdeviceptr)in->data[0], uv = (CUdeviceptr)in->data[1];
+            unsigned yp = in->linesize[0], uvp = in->linesize[1];
+            int word_bytes = s->word_bytes, chroma_vshift = s->chroma_vshift;
+            void *args[] = { &y, &yp, &uv, &uvp, &s->d_in, &dp, &w, &h, &word_bytes, &chroma_vshift };
+            if ((ret = CHECK_CU_EXPR(cu->cuLaunchKernel(s->k_in_semi, (w + 15) / 16, (h + 15) / 16, 1,
+                                                         16, 16, 1, 0, st_, args, NULL))) < 0)
+                goto fail_ctx;
+        }
     }
 
     if (temporal && s->nvof_ready)
