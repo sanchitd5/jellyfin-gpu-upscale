@@ -227,6 +227,17 @@ Objective metrics disagree with each other on this content, and each can be game
   it would have read as three unrelated confusions to anyone diagnosing "why does ARCHITECTURE.md
   disagree with what the code does." Re-read the doc, not a summary of it, before trusting a
   "not yet done" claim in this repo.
+- **A design doc's assumed class name was wrong, and nobody had checked.** `LIVE_APPLY_DESIGN.md`
+  named `TranscodingJobHelper` as the stock Jellyfin class owning transcode-job lifecycle, flagged
+  as unconfirmed. It does not exist under that name on this Jellyfin build (12.1) - decompiling the
+  actual assemblies this project builds against found the real one:
+  `MediaBrowser.MediaEncoding.Transcoding.TranscodeManager`. Same lesson as `window.playbackManager`
+  below: a class or global that "should" exist, named from memory or from an older Jellyfin's
+  source, needs confirming against the real assembly/bundle THIS build ships, not assumed correct
+  because it sounds right or matched an older version once. `ilspycmd` (a .NET decompiler, installed
+  via `dotnet tool install -g ilspycmd`) run against the DLLs copied off CT114's
+  `/usr/lib/jellyfin/bin/` is how this got confirmed - cheap, and should be the default move before
+  writing a Harmony patch target by name.
 
 ## Operational care
 

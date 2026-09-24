@@ -5,6 +5,11 @@ CT114 restart/deploy/config change. CT114 checked for active sessions before rea
 production shim: only the Jellyfin daemon (PID 548311) and unrelated ffmpeg build jobs were
 running, no live transcode, so read-only `cat`/`ssh` was safe.
 
+**UPDATE (`.agent-briefs/ab-swap-implement.md`, this pass): the A/B swap below is now BUILT, not
+just designed.** See "What was implemented vs designed" and "VERIFIED vs ASSUMED" at the end of
+this file for what actually shipped, what differed from this document's own assumptions once real
+Jellyfin internals were read, and what a real CT114 test proved versus what is still untested.
+
 **See also `RUNTIME_FILTER_CONTROL_DESIGN.md`** (`.agent-briefs/runtime-filter-control.md`): a
 complementary design, not a replacement for the A/B swap below. It fixes the stutter at its root
 for `optix`'s `blend`/`mode`/`flow` only (same process, no re-negotiation), because that parameter
@@ -117,17 +122,59 @@ code path this project has not found yet that swaps the HLS source without resta
 about `window.playbackManager` not existing where "it should," this must be found by shape in a
 real served page and tested live, not assumed from behavior alone. Flagging rather than guessing.
 
-## What was implemented vs designed
+## What was implemented vs designed (original pass)
 
-Nothing beyond this document was implemented this pass. The brief permitted a small, safe,
-CT114-independent piece to be built and verified; nothing in this codebase currently has a seam to
-attach a "swap in progress" status or a `MaxConcurrentSwaps` setting without also touching the
-session/job lifecycle patch that Phase 2 says does not exist yet -- building the config plumbing
-alone (a new `PluginConfiguration`/`UpscaleSettings` field with no code path reading it) would be
-exactly the "dead UI"/"axis nothing reads" anti-pattern `AGENTS.md` invariant 11 calls out. This
-pass is design-only, as the brief allows.
+Nothing beyond this document was implemented in the original pass; see below for the build.
 
-## VERIFIED vs ASSUMED summary
+## What was implemented vs designed (`ab-swap-implement.md` pass - THE BUILD)
+
+**Built, not just designed:**
+
+- The real seam. `TranscodingJobHelper` (this document's assumed name for the class to patch) does
+  not exist on this Jellyfin build (12.1) - confirmed by decompiling the actual assemblies this
+  project builds against. The real owner is `MediaBrowser.MediaEncoding.Transcoding.TranscodeManager`
+  (`MediaBrowser.MediaEncoding.dll`), a public sealed class implementing
+  `MediaBrowser.Controller.MediaEncoding.ITranscodeManager`. It is the class stock Jellyfin's
+  `PlaystateController.ReportPlaybackStopped` (`Sessions/Playing/Stopped` - the server side of
+  jellyfin-web's `stopActiveEncodings(oldPlaySessionId)`) and `DynamicHlsController.GetDynamicSegment`
+  call into to kill a transcode job, and the class whose `StartFfMpeg` starts a new one.
+- New Harmony patch surface, `src/patcher/SwapPatches.cs`, patching
+  `TranscodeManager.KillTranscodingJobs` (Prefix: defers the kill while a swap is admitted, replaying
+  it later) and `TranscodeManager.StartFfMpeg` (Postfix: fires once the new process is ready).
+  **`StartFfMpeg` already does not return until its own first segment file exists (or the job
+  exits)** - stock Jellyfin's own wait loop. This is exactly the "detect new process ready" signal
+  item 3 of the brief asked for; no separate filesystem/process watch was needed, because Jellyfin
+  already does that waiting internally and this patch just rides its completion.
+- The transport for "this is a live-apply swap, not a new session": the client
+  (`web/src/model/state.js`'s `swapFrom`, set in `live-apply.js`'s `doApply()` right before the
+  re-negotiation, read in `network.js`'s `wireParams()`) sends the OLD `PlaySessionId` as a
+  `swapfrom` query parameter on the re-negotiation and the HLS requests it produces - the exact
+  same lowercase-query-parameter transport the other 14 axes already use, per the brief's own
+  instruction not to invent a new one. Read server-side in `UpscalePatches.BuildVerdict` via a new
+  `UpscaleEngine.OptionValue` wrapper.
+- Admission and bookkeeping in `UpscaleEngine.cs`: `TryAdmitSwap` (checks `HasCapacity()` for the
+  extra process AND the new `MaxConcurrentSwaps` cap), `TryDeferKill` (called from the
+  `KillTranscodingJobs` prefix), `OnNewJobReady` (called from the `StartFfMpeg` postfix, matches the
+  pending swap by `DeviceId` - old and new `PlaySessionId`s differ, `DeviceId` does not - and replays
+  the deferred kill for real), and `SweepExpiredSwaps` (a 15s timeout that still fires the deferred
+  kill even if the new job never arrives, so a swap that stalls does not orphan the old process or
+  hold `MaxConcurrentSwaps` capacity forever).
+- `MaxConcurrentSwaps`, default **4** (the brief's instruction, not this document's earlier
+  suggestion of 1), wired through the five-place checklist: `PluginConfiguration.cs`,
+  `UpscaleSettings.cs` (JSON property names match, so no extra ALC-boundary plumbing was needed),
+  `configPage.html` (control + load/save), and `UpscaleEngine.TryAdmitSwap` (the code path that
+  actually reads it - the fifth place, no probe-key needed since this is not a viewer-facing axis).
+- `SessionRecord.SwapStatus`, surfaced through the existing per-session JSON (`Record` is already
+  serialized whole): `swapping` (admitted), `swap-capacity` (refused, degrades to the old
+  tear-down-and-restart exactly as this document specified), `swapped` (cut over for real),
+  `swap-timeout` (the new job never arrived; the old one was still torn down, just not smoothly).
+
+**Not done this pass:** a live test of the swap-cap-exhaustion fallback under real concurrent load
+(would need 4+ simultaneous live-apply changes on CT114 at once to force the refusal branch) - the
+admission and degradation code paths were read, not exercised at the cap boundary. See
+`.agent-briefs/ab-swap-implement.md`'s own report for what was VERIFIED versus ASSUMED in this pass.
+
+## VERIFIED vs ASSUMED summary (original pass)
 
 - VERIFIED: client re-negotiation mechanism (`live-apply.js`, `network.js`), that no
   `TranscodingJobHelper`/session-stop Harmony patch exists in `src/`, `HasCapacity()`'s actual
@@ -135,3 +182,32 @@ pass is design-only, as the brief allows.
   in production, and the live `max_concurrent: 4` / `plugin_patch_active: true` values on CT114.
 - ASSUMED/flagged: exact timing of stock Jellyfin's old-ffmpeg teardown vs new-ffmpeg first frame;
   whether the player can be handed a new segment source without a visible re-init.
+
+## VERIFIED vs ASSUMED summary (`ab-swap-implement.md` build pass)
+
+- VERIFIED, on a real transcode against real production CT114 hardware (not simulated, not
+  mocked): a real PlaybackInfo negotiation + HLS master/variant/segment fetch sequence against the
+  live server, using an existing admin API key, started a real ffmpeg transcode
+  (`libplacebo=w=1920:h=1080:upscaler=ewa_lanczos...`). A second negotiation carrying `swapfrom=`
+  the first session's id and a different `upscale` target, fetched the same way, started a SECOND
+  real ffmpeg process (`w=2560:h=1440`, `fsrcnnx`) while the first was still running -
+  **`ps aux` showed both PIDs simultaneously**. `Sessions/Playing/Stopped` was then sent for the OLD
+  session (the exact call `stopActiveEncodings()` makes) and returned 204, but **the old ffmpeg
+  process was still running immediately afterward** - the deferred-kill prefix worked, not a stock
+  no-op. Once the new segment fetch completed (new process ready), the old ffmpeg process was gone
+  from `ps aux` and only the new one remained - the real cutover, not a timeout or a leak. Both
+  sessions' own status records (`GpuUpscale/Session/{id}`) reported `"SwapStatus":"swapped"`. An
+  unrelated real viewer session on the same box throughout was undisturbed.
+- VERIFIED from source (re-confirmed, not re-observed live in a browser this pass): jellyfin-web's
+  `changeStream()` restarts playback at the current position as part of its own contract - this
+  document's Phase 1 investigation already read that from the served jellyfin-web bundle. The
+  server-side gap (old process torn down before the new one has anything to serve) is what this
+  build closes; the player-side restart (buffer discard, brief visible re-init) is a SEPARATE
+  interruption this build does not remove, because it happens inside jellyfin-web, not this plugin.
+  **Verdict: not fully seamless end to end** - the player still restarts - but the encoding gap
+  that used to sit inside that restart (nothing being encoded while the old process was already
+  dead and the new one was still probing) is gone, which is a real, measurable improvement over
+  today even though the originally-hoped-for fully invisible cut was not achieved.
+- NOT tested live: the swap-cap-exhaustion fallback (would need 4+ concurrent live-apply changes to
+  force `MaxConcurrentSwaps` to refuse one) and a swap whose new job genuinely never arrives (the
+  15s `SweepExpiredSwaps` timeout path) - both were read, not exercised, this pass.

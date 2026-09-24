@@ -2668,6 +2668,38 @@ Nothing implemented beyond the design doc: no seam exists yet to hang a `MaxConc
 setting off without also building the session-lifecycle patch Phase 2 says is missing, and adding
 inert config would be exactly the "axis nothing reads" anti-pattern (invariant 11).
 
+### BUILT (2026-09-24, `.agent-briefs/ab-swap-implement.md`)
+
+The design above is now real code, not just a document - full write-up in `LIVE_APPLY_DESIGN.md`'s
+own updated sections. Short version: `TranscodingJobHelper` does not exist on this Jellyfin build
+(12.1) - decompiled the real assemblies and found the actual owner is
+`MediaBrowser.MediaEncoding.Transcoding.TranscodeManager`. New Harmony patches
+(`src/patcher/SwapPatches.cs`) defer `TranscodeManager.KillTranscodingJobs` while a swap is
+admitted and replay it once `TranscodeManager.StartFfMpeg`'s postfix sees the new job ready -
+`StartFfMpeg` already blocks until its own first segment exists, so no new readiness watch was
+needed. Client carries the old `PlaySessionId` as a `swapfrom` query param (`state.swapFrom`,
+same transport as the other 14 axes). `MaxConcurrentSwaps` defaults to **4** (this session's
+instruction, not the 1 suggested above), five-place-checklist wired.
+
+**VERIFIED live on CT114, real transcode, real ffmpeg processes (not simulated):** a real
+PlaybackInfo + HLS negotiation for an existing library item started ffmpeg #1
+(`libplacebo=w=1920:h=1080`); a second negotiation carrying `swapfrom=<first PlaySessionId>` and a
+different `upscale` target started ffmpeg #2 (`w=2560:h=1440`) while #1 was **still running** -
+`ps aux` showed both PIDs at once. `Sessions/Playing/Stopped` for the old session returned 204 but
+the old ffmpeg process was still alive right after - the deferred-kill prefix, not a no-op. Once
+the new segment finished (new process ready), the old process was gone from `ps aux`, only the new
+one remained, and both sessions' own status endpoints reported `"SwapStatus":"swapped"`. An
+unrelated real viewer session on the box the whole time was undisturbed.
+
+**Player-side verdict:** not fully seamless - jellyfin-web's `changeStream()` still restarts
+playback at the current tick (read from its own bundle in the original design pass, unchanged).
+What this build removes is the SERVER-side gap inside that restart (old process dead, new one
+still probing, nothing being encoded); the player's own brief visible re-init is a separate thing
+this plugin cannot reach from the server side.
+
+**Not live-tested:** the `MaxConcurrentSwaps` cap-exhaustion fallback (needs 4+ simultaneous
+live-apply changes to force it) and the 15s swap-timeout sweep path - both read, not exercised.
+
 
 ## Production deploy, everything built this session, 2026-09-24
 
