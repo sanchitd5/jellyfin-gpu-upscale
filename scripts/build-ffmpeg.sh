@@ -421,6 +421,15 @@ say "applying filter patches"
 cp "$HERE/ffmpeg/vf_oidn.c" libavfilter/
 patch -p1 < "$HERE/ffmpeg/0001-add-oidn-filter-to-build.patch"
 
+# Core libavutil fix, independent of any WITH_* filter and always applied: adds an
+# AV_PIX_FMT_CUDA case to vulkan_map_from() so `hwmap=derive_device=cuda` can resolve a Vulkan
+# source frame (a GPU-to-GPU cuMemcpy2DAsync via the existing vulkan_transfer_data_to_cuda(),
+# not a host round trip, and not a true zero-copy map -- NVENC's CUDA input needs linear
+# memory, the Vulkan image imports into CUDA as a texture array). Without this,
+# `hwmap=derive_device=cuda` from any Vulkan-backed filter (oidn/optix/ort/fsr2/dlss) fails
+# with ENOSYS/-38; see livetestbox.md's "GpuResidentEncode" entry for how that was root-caused.
+patch -p1 < "$HERE/ffmpeg/0006-vulkan-to-cuda-hwmap.patch"
+
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/

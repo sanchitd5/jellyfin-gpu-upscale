@@ -1,0 +1,45 @@
+--- a/libavutil/hwcontext_vulkan.c	2026-09-24 16:22:56
++++ b/libavutil/hwcontext_vulkan.c	2026-09-24 16:22:56
+@@ -70,6 +70,11 @@
+ #include "hwcontext_cuda_internal.h"
+ #include "cuda_check.h"
+ #define CHECK_CU(x) FF_CUDA_CHECK_DL(cuda_cu, cu, x)
++
++/* Forward decl: defined later in this file, needed by vulkan_map_from() so that
++ * hwmap=derive_device=cuda can resolve a Vulkan source frame without a host round trip. */
++static int vulkan_transfer_data_to_cuda(AVHWFramesContext *hwfc, AVFrame *dst,
++                                        const AVFrame *src);
+ #endif
+
+ typedef struct VulkanDeviceFeatures {
+@@ -4293,6 +4298,30 @@
+             return AVERROR(ENOSYS);
+ #endif
+ #endif
++#if CONFIG_CUDA
++    case AV_PIX_FMT_CUDA: {
++        /* NVIDIA imports the Vulkan image into CUDA as an external-memory texture array,
++         * not a linear device pointer, and NVENC's CUDA input wants linear/pitched memory --
++         * so this can never be a true zero-copy alias. It is still GPU-resident: the transfer
++         * below is a device-to-device cuMemcpy2DAsync, with no system-RAM round trip, which is
++         * the bar this project's own GPU-resident preset uses (see gpu-only-filters.md). */
++        int err;
++
++        if (!dst->hw_frames_ctx)
++            return AVERROR(EINVAL);
++
++        err = av_hwframe_get_buffer(dst->hw_frames_ctx, dst, 0);
++        if (err < 0)
++            return err;
++
++        err = vulkan_transfer_data_to_cuda(hwfc, dst, src);
++        if (err < 0) {
++            av_frame_unref(dst);
++            return err;
++        }
++        return 0;
++    }
++#endif
+     default:
+         break;
+     }
