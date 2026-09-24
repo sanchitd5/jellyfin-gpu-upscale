@@ -1,6 +1,6 @@
 --- a/libavutil/hwcontext_vulkan.c	2026-09-24 19:00:00
 +++ b/libavutil/hwcontext_vulkan.c	2026-09-24 19:05:20
-@@ -4084,6 +4084,37 @@
+@@ -4084,6 +4084,59 @@
          else
              return AVERROR(ENOSYS);
  #endif
@@ -21,6 +21,29 @@
 +        int err;
 +
 +        if (!hwfc->pool && !hwfci->pool_internal) {
++            /* Force one VkImage per plane instead of a combined multi-planar
++             * image. AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE's own doc comment
++             * already says this is "required to export/import images from
++             * CUDA" -- confirmed the hard way: with a combined nv12 image,
++             * vulkan_export_to_cuda()'s multi-plane fallback (offsets via
++             * VK_IMAGE_ASPECT_MEMORY_PLANE_x_BIT_EXT) hands
++             * cuExternalMemoryGetMappedMipmappedArray a layout it can't
++             * actually use: CUDA_ERROR_INVALID_VALUE on a plain
++             * hwupload+hwmap chain, a segfault a few frames later on this
++             * bridged one. The device-level `disable_multiplane=1` device
++             * option fixes the same bug for a real -init_hw_device vulkan=
++             * instance (verified directly), but this pool is auto-derived
++             * with no such device string to attach an option to, so the
++             * frames-level flag has to be forced here instead. yuv420p
++             * (3 single-plane images already) was never affected -- Vulkan
++             * only packs a combined image for formats it CAN represent as
++             * one, i.e. semiplanar ones like nv12/p010le, which is also
++             * exactly the NVDEC-native format family this bridge exists to
++             * carry. Not yet build-verified against this exact code path
++             * (unlike the CLI-flag case) -- see livetestbox.md. */
++            AVVulkanFramesContext *vkfc = hwfc->hwctx;
++            vkfc->flags |= AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
++
 +            err = hwfci->hw_type->frames_init(hwfc);
 +            if (err < 0)
 +                return err;
