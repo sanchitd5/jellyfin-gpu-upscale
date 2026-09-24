@@ -1,3 +1,6 @@
+// GENERATED FILE. Do not edit directly.
+// Source lives in web/src/*.js; rebuild with scripts/build-web-panel.sh.
+// See CLAUDE.md, "Before you change the client", for the module layout.
 /*
  * GPU Upscale - jellyfin-web client hook.
  *
@@ -160,8 +163,19 @@
             // RtxDlppOffered) and their exact display wording, the same mechanism the `game`
             // control below already uses. Picking either turns off Detail/Refine/Chroma/Debanding
             // for that session - see `CudaNeuralBypass` in the session-record row wiring.
-            key: 'neural', label: 'Neural super-resolution', fallback: 'off', group: 'Detail',
+            //
+            // WEB_PANEL_DESIGN.md section 1.3: renamed from 'Neural super-resolution' now that
+            // vsr-rtcuda (a fast resample, not a network) shares this control with the trained
+            // networks - a JUDGMENT CALL, not the user's: the design doc's own alternatives were
+            // "GPU detail engine" and "Detail (RTX / neural)"; this picked the latter. Flag for
+            // revisit if it reads wrong in practice. `familiesKey`/`familyLabelsKey`/`notesKey`
+            // are the section 1.3(b)/2.3 probe keys (NeuralFamilies/NeuralFamilyLabels/
+            // NeuralNotes): optional, server-supplied grouping and per-level caveats for this
+            // picker. A server that does not send them yields today's flat list with no notes,
+            // same degrade-safe rule as every other probe-driven field here.
+            key: 'neural', label: 'Detail engine (RTX / neural)', fallback: 'off', group: 'Detail',
             probeKey: 'Neural', labelsKey: 'NeuralLabels', fromProbe: true, costKey: 'neural',
+            familiesKey: 'NeuralFamilies', familyLabelsKey: 'NeuralFamilyLabels', notesKey: 'NeuralNotes',
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },
@@ -1024,7 +1038,14 @@
                     group: c.group || 'Detail',
                     basic: c.basic || 0, expert: c.expert || null, expertHead: !!c.expertHead,
                     grade: c.grade || null, chips: !!c.chips, costKey: c.costKey || null,
-                    showWhen: c.showWhen || null, options: options
+                    showWhen: c.showWhen || null, options: options,
+                    // WEB_PANEL_DESIGN.md 1.3(b)/2.3: optional server-supplied grouping and
+                    // per-level notes for a picker. Null when the control declares no such key,
+                    // or when this server's probe did not send one - controlRow() renders the
+                    // plain flat list in either case, same as before this design pass.
+                    families: (c.familiesKey && caps.levels && caps.levels[c.familiesKey]) || null,
+                    familyLabels: (c.familyLabelsKey && caps.levels && caps.levels[c.familyLabelsKey]) || null,
+                    notes: (c.notesKey && caps.levels && caps.levels[c.notesKey]) || null
                 };
             });
     }
@@ -1452,7 +1473,9 @@
         { label: 'Unblur', level: 'DeblurLevel', applied: 'DeblurApplied' },
         { label: 'Denoise', level: 'DenoiseLevel', applied: 'DenoiseApplied' },
         { label: 'Compression cleanup', level: 'DeblockLevel', applied: 'DeblockApplied', requested: 'DeblockRequested' },
-        { label: 'Neural SR', level: 'NeuralLevel', applied: 'NeuralApplied', requested: 'NeuralRequested' },
+        // 'Neural SR' renamed to 'Detail engine' to match the CONTROLS label rename in
+        // WEB_PANEL_DESIGN.md section 1.3(a) - same axis, same fields, wording only.
+        { label: 'Detail engine', level: 'NeuralLevel', applied: 'NeuralApplied', requested: 'NeuralRequested' },
         { label: 'Game upscaler', level: 'GameLevel', applied: 'GameApplied' },
         // What the server actually ran those three with - read from the record, never from what
         // this panel asked for. Null when no game upscaler ran, and a null row prints nothing.
@@ -1465,6 +1488,15 @@
         // The only row reading Upscaler now that 'Upscaled' prints sizes, so a chosen kernel is
         // confirmed against what the server picked rather than sharing a field with a size claim.
         { label: 'Scaling kernel', level: 'Upscaler' },
+        // WEB_PANEL_DESIGN.md section 3.5: two data-only rows, both already read straight off the
+        // session record and both null (so silent) on an ordinary Vulkan session. 'Pipeline' is
+        // the branch UpscaleEngine actually took ('CUDA (RTX)' or 'Vulkan') - the explanation for
+        // five rows going inert at once when a CUDA-native neural level runs. Backend support for
+        // these two fields is a server-side change outside this pass's scope (this brief is the
+        // client restructuring); until a server sends them, both print nothing, same as any other
+        // null row here.
+        { label: 'Pipeline', level: 'Pipeline' },
+        { label: 'Denoise dropped', level: 'DenoiseDroppedForPatchedBinary' },
         { label: 'Encoder', level: 'Encoder', note: 'EncoderReason' }
     ];
 
@@ -1730,68 +1762,73 @@
         return isOff(p.upscale) || !t || !t.length;
     }
 
-    // PROVISIONAL, literal-id list rather than a probe key (see WEB_PANEL_DESIGN.md section 3.2
-    // for the proposed NeuralCudaLevels probe key that should replace this): dlpp-1..4 and
-    // vsr-rtcuda run on UpscaleEngine's separate CUDA-native hwaccel branch (decode cuda ->
-    // [optix] -> the neural filter(s) -> NVENC), which never reaches libplacebo, so the server
-    // forces sr/refine/chroma/deblur/game/deband/kernel off for that session (UpscaleEngine.cs
-    // Decide, the plan.UsesCudaNeural branch). Exact match only, never a prefix test: the
-    // pre-existing Maxine placeholder id is the bare 'vsr', and a prefix match on 'vsr' would
-    // wrongly catch it too.
-    function neuralIsCudaNative(p) {
-        return ['vsr-rtcuda', 'dlpp-1', 'dlpp-2', 'dlpp-3', 'dlpp-4'].indexOf(p.neural) >= 0;
+    // WEB_PANEL_DESIGN.md section 3.2: the server's own probe is the source of truth for both
+    // which neural levels run on the CUDA-native branch (`NeuralCudaLevels`) and which axes that
+    // branch forces off (`NeuralCudaDisables`). An older server that does not send these keys
+    // falls back to the literal lists the CUDA-native levels shipped with, so this degrades to
+    // "no new UI" rather than to wrong UI on a mixed-version deployment - the same rule every
+    // other probe-driven list in this file already follows.
+    //
+    // Exact match only, never a prefix test: the pre-existing Maxine placeholder id is the bare
+    // 'vsr', and a prefix match on 'vsr' would wrongly catch it too.
+    var NEURAL_CUDA_LEVELS_FALLBACK = ['vsr-rtcuda', 'dlpp-1', 'dlpp-2', 'dlpp-3', 'dlpp-4'];
+    var NEURAL_CUDA_DISABLES_FALLBACK = ['sr', 'refine', 'chroma', 'deblur', 'game', 'deband', 'kernel'];
+    var CUDA_DENOISE_LEVELS_FALLBACK = ['off', 'optix', 'optix-temporal'];
+
+    function probeList(key, fallback) {
+        var caps = state.serverCaps;
+        var listed = caps && caps.levels && caps.levels[key];
+        return (listed && listed.length) ? listed : fallback;
     }
 
-    var CONFLICTS = [
-        {
-            key: 'sr', when: neuralIsCudaNative,
-            why: function (p) {
-                return 'The ' + p.neural + ' level runs on the CUDA path, which has no Vulkan'
-                    + ' stage, so the server turns super-resolution off for the session.';
-            }
-        },
-        {
-            key: 'refine', when: neuralIsCudaNative,
-            why: function (p) {
-                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
-                    + ' post-scale refinement off for the session.';
-            }
-        },
-        {
-            key: 'chroma', when: neuralIsCudaNative,
-            why: function (p) {
-                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
-                    + ' chroma upscaling off for the session.';
-            }
-        },
-        {
-            key: 'deblur', when: neuralIsCudaNative,
-            why: function (p) {
-                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
-                    + ' unblur off for the session.';
-            }
-        },
-        {
-            key: 'game', when: neuralIsCudaNative,
-            why: function (p) {
-                return 'The ' + p.neural + ' level runs on the CUDA path, which has no Vulkan'
-                    + ' device, so the server turns the game upscaler off for the session.';
-            }
-        },
-        {
-            key: 'deband', when: neuralIsCudaNative,
-            why: function (p) {
-                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
-                    + ' debanding off for the session.';
-            }
-        },
-        {
-            key: 'kernel', when: neuralIsCudaNative,
-            why: function (p) {
-                return 'The ' + p.neural + ' level runs on the CUDA path, so the server never'
-                    + ' reaches the scaling kernel for the session.';
-            }
-        },
+    function neuralCudaLevels() {
+        return probeList('NeuralCudaLevels', NEURAL_CUDA_LEVELS_FALLBACK);
+    }
+
+    function neuralCudaDisables() {
+        return probeList('NeuralCudaDisables', NEURAL_CUDA_DISABLES_FALLBACK);
+    }
+
+    function cudaDenoiseLevels() {
+        return probeList('CudaDenoiseLevels', CUDA_DENOISE_LEVELS_FALLBACK);
+    }
+
+    function neuralIsCudaNative(p) {
+        return neuralCudaLevels().indexOf(p.neural) >= 0;
+    }
+
+    // Plain-English name for an axis this branch forces off, used only in CONFLICTS.why text
+    // below. A key the map does not carry (an axis a future server adds to NeuralCudaDisables)
+    // still gets a serviceable sentence rather than none, which is the point of driving this list
+    // from the probe rather than hardcoding one CONFLICTS entry per axis.
+    var NEURAL_CUDA_AXIS_NAME = {
+        sr: 'super-resolution', refine: 'post-scale refinement', chroma: 'chroma upscaling',
+        deblur: 'unblur', game: 'the game upscaler', deband: 'debanding',
+        kernel: 'the scaling kernel'
+    };
+
+    function neuralCudaWhy(key) {
+        return function (p) {
+            var what = NEURAL_CUDA_AXIS_NAME[key] || ('the ' + key + ' control');
+            return 'The ' + p.neural + ' level runs on the CUDA path, which has no Vulkan stage,'
+                + ' so the server turns ' + what + ' off for the session.';
+        };
+    }
+
+    /*
+     * One CONFLICTS entry per axis NeuralCudaDisables names, built once at load time from the
+     * fallback list above. If a later probe reports a different list, axisConflict() re-checks
+     * membership against the LIVE list on every call (neuralCudaDisables() is not cached), so an
+     * axis the server stopped disabling simply stops matching even though its rule stays in this
+     * array - the array only has to be a ceiling, not the exact live set, same as CONTROLS itself.
+     */
+    var CONFLICTS = NEURAL_CUDA_DISABLES_FALLBACK.map(function (key) {
+        return {
+            key: key,
+            when: function (p) { return neuralIsCudaNative(p) && neuralCudaDisables().indexOf(key) >= 0; },
+            why: neuralCudaWhy(key)
+        };
+    }).concat([
         {
             key: 'sr', when: function (p) { return gameOwnsOutputSize(p.game); },
             why: function (p) {
@@ -1826,7 +1863,7 @@
                 return 'Refine corrects an enlargement, and there is none here.';
             }
         }
-    ];
+    ]);
 
     /* The reason this axis is inert right now, or null. First rule that fires wins. */
     function axisConflict(key) {
@@ -1839,6 +1876,27 @@
             }
         } catch (err) {
             // A panel that cannot work out a conflict shows the control, which is the old behaviour.
+        }
+
+        return null;
+    }
+
+    /*
+     * WEB_PANEL_DESIGN.md section 3.3: on the CUDA-native branch, denoise is only PARTLY
+     * unavailable (optix/optix-temporal still run there), so it gets option-level inertness
+     * instead of the whole-row treatment axisConflict() gives every other affected axis. Returns
+     * the reason one option is inert, or null. Only the denoise axis has an option-level rule
+     * today; a future one is one more `if` here, not a new rendering path (controlRow already
+     * consults this for every chip/select option it draws).
+     */
+    function optionInert(c, id) {
+        try {
+            var p = shownPrefs();
+            if (c.key === 'denoise' && neuralIsCudaNative(p) && cudaDenoiseLevels().indexOf(id) < 0) {
+                return 'Not available on the CUDA path; only OptiX denoise runs beside RTX levels.';
+            }
+        } catch (err) {
+            // Same fail-open rule as axisConflict: an error here shows the option, not a broken panel.
         }
 
         return null;
@@ -1958,15 +2016,19 @@
 
         chipIds.forEach(function (id) {
             var o = c.options.filter(function (x) { return x.id === id; })[0];
+            // WEB_PANEL_DESIGN.md section 3.3: an option can be inert on its own (today only
+            // denoise, on the CUDA-native branch) even while the row as a whole is not - unlike
+            // `conflict`, which greys every option in the row.
+            var optInert = optionInert(c, id);
             var b = el('button', 'gpuup-chip' + (id === cur ? ' on' : ''), shortName(o.name));
             b.title = o.name;
             b.type = 'button';
             b.setAttribute('role', 'radio');
             b.setAttribute('aria-checked', id === cur ? 'true' : 'false');
-            if (conflict) {
+            if (conflict || optInert) {
                 b.disabled = true;
                 b.setAttribute('aria-disabled', 'true');
-                b.title = o.name + ' - ' + conflict;
+                b.title = o.name + ' - ' + (conflict || optInert);
             } else {
                 b.onclick = function () { onPick(id); };
             }
@@ -1983,12 +2045,54 @@
                 sel.appendChild(ph);
             }
 
-            rest.forEach(function (o) {
+            var makeOption = function (o) {
                 var opt = el('option', null, o.name + costSuffix(c, o.id));
                 opt.value = o.id;
                 if (o.id === cur) { opt.selected = true; }
-                sel.appendChild(opt);
-            });
+                var optInert = optionInert(c, o.id);
+                if (optInert) {
+                    opt.disabled = true;
+                    opt.title = optInert;
+                }
+                return opt;
+            };
+
+            if (c.families) {
+                // WEB_PANEL_DESIGN.md section 1.3(b): 'off' and any id the probe assigned no
+                // family render flat (Off first, ungrouped ids last); everything else groups under
+                // an <optgroup>, in the order its family was first seen in `rest` - which is the
+                // order the probe listed the levels in, since `rest` inherits CONTROLS/probe order.
+                var headOptions = [];
+                var tailOptions = [];
+                var groupOrder = [];
+                var groups = {};
+                rest.forEach(function (o) {
+                    var fam = o.id !== 'off' ? c.families[o.id] : null;
+                    if (!fam) {
+                        (o.id === 'off' ? headOptions : tailOptions).push(o);
+                        return;
+                    }
+
+                    if (!groups[fam]) {
+                        groups[fam] = [];
+                        groupOrder.push(fam);
+                    }
+
+                    groups[fam].push(o);
+                });
+
+                headOptions.forEach(function (o) { sel.appendChild(makeOption(o)); });
+                groupOrder.forEach(function (fam) {
+                    var og = el('optgroup');
+                    og.label = (c.familyLabels && c.familyLabels[fam]) || fam;
+                    groups[fam].forEach(function (o) { og.appendChild(makeOption(o)); });
+                    sel.appendChild(og);
+                });
+                tailOptions.forEach(function (o) { sel.appendChild(makeOption(o)); });
+            } else {
+                rest.forEach(function (o) { sel.appendChild(makeOption(o)); });
+            }
+
             if (conflict) {
                 sel.disabled = true;
                 sel.setAttribute('aria-disabled', 'true');
@@ -2007,12 +2111,54 @@
             row.appendChild(el('div', 'gpuup-note', conflict));
         }
 
+        // WEB_PANEL_DESIGN.md section 3.4: the consequence of the current pick, stated once, right
+        // under the control that caused it - not discovered row by row while Advanced stays closed.
+        // Only ever non-empty on the axis that OWNS the CUDA-native branch (`neural`), and only
+        // when something the branch forces off is actually set to a non-default value. Section
+        // 4.3 orders this ahead of the level note below when both fire: this one is about loss.
+        if (c.key === 'neural' && neuralIsCudaNative(shownPrefs())) {
+            var suppressed = cudaSuppressedLabels();
+            if (suppressed.length) {
+                var levelName = shortName((c.options.filter(function (o) { return o.id === cur; })[0] || {}).name || cur);
+                row.appendChild(el('div', 'gpuup-note',
+                    levelName + ' runs on the CUDA path. For this session the server will turn off: '
+                    + suppressed.join(', ') + '. Your picks are kept and come back when you choose'
+                    + ' Off or a level that is not CUDA-native.'));
+            }
+        }
+
+        // WEB_PANEL_DESIGN.md section 2.2/2.3: a one-line, server-worded caveat for the CURRENT
+        // level, when the probe sent one (today only the RTX DLPP/VSR levels have one). Shown
+        // whether or not the row is also inert for an unrelated reason.
+        if (c.notes && c.notes[cur]) {
+            row.appendChild(el('div', 'gpuup-note', c.notes[cur]));
+        }
+
         var note = controlNote(c.key);
         if (note) {
             row.appendChild(el('div', 'gpuup-note', note));
         }
 
         return row;
+    }
+
+    /*
+     * The CONTROLS[].label strings for every axis NeuralCudaDisables names that the viewer has
+     * actually set away from its own fallback - WEB_PANEL_DESIGN.md section 3.4's "state it once,
+     * up front" note. Reads state.caps directly rather than the rendered `controls` list, so it
+     * works out the same whether or not this render's Advanced disclosure happens to be open.
+     */
+    function cudaSuppressedLabels() {
+        var p = shownPrefs();
+        return neuralCudaDisables()
+            .filter(function (key) {
+                var def = DEFAULT_PREFS[key];
+                return p[key] != null && p[key] !== def;
+            })
+            .map(function (key) {
+                var c = CONTROLS.filter(function (x) { return x.key === key; })[0];
+                return c ? c.label : key;
+            });
     }
 
     /*

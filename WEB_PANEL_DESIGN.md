@@ -588,6 +588,80 @@ daemon confirmed active, no build/deploy/restart done - see report)
     `requestRestream()` is called by every control with no axis-specific logic, and
     `doApply()`/`directPlaying()`/`replayHere()` are axis-agnostic: a neural-only pick on a
     direct-play session takes the identical re-play-at-position path as any other axis.
-8. **Optgroup rendering in a TV webview** - COULD NOT VERIFY, no real TV hardware available this
-   session, and optgroups are not implemented in the shipped script yet (that is 1.3(b)'s
-   proposal, not yet built) - so there is nothing to render-test today. Left open.
+8. **Optgroup rendering in a TV webview** - STILL COULD NOT VERIFY on real TV hardware (none
+   available this session either), but 1.3(b) is now BUILT (see section 9) rather than only
+   proposed, so there is something to render-test on real hardware next time this ships.
+
+---
+
+## 9. Client restructuring and the open items this pass implemented (2026-09-24,
+   `.agent-briefs/modularize-web-panel.md`)
+
+`web/gpu-upscale.js` is no longer hand-edited. It is now a generated, committed build output:
+source lives in `web/src/*.js`, one file per real seam (numeric prefix fixes the concatenation
+order), and `scripts/build-web-panel.sh` concatenates them with a three-line generated-file banner
+on top. The split was done as literal line-range slices of the working file at the time, so the
+first build was diffed byte-for-byte against the pre-split file (identical past the banner) before
+any of the changes below were made - see `CLAUDE.md`'s "Before you change the client" section for
+the file-by-file layout. `scripts/jellyfin-gpuupscale-webinject` is unmodified: it still copies one
+file, `web/gpu-upscale.js`, and nothing about its behaviour changed.
+
+Client-side items from sections 1-4 implemented this pass, all tolerant of an older server that
+does not send the new probe keys (same "degrades to no new UI, not wrong UI" rule as every other
+probe-driven field in this file):
+
+- **1.3(a)** - the `neural` control's label is now `Detail engine (RTX / neural)` (`web/src/10-
+  controls.js`); the matching live-block row (`web/src/60-live-block.js`) is now `Detail engine`.
+  **JUDGMENT CALL, not the user's**: the doc's own two alternatives were "GPU detail engine" and
+  "Detail (RTX / neural)" - this pass picked the latter. Flag for revisit.
+- **1.3(b)** - `<optgroup>` rendering in the neural picker (`controlRow()`, `web/src/90-panel-
+  dom.js`), driven by two new optional probe keys the control now declares (`familiesKey:
+  'NeuralFamilies'`, `familyLabelsKey: 'NeuralFamilyLabels'`, `web/src/10-controls.js`) and threaded
+  through by `axisControls()` (`web/src/40-probe.js`). Off and any ungrouped id render flat (Off
+  first, ungrouped ids last); everything else groups in first-seen order. A server that sends
+  neither key gets today's flat list, unchanged.
+- **2.2/2.3** - a one-line, server-worded note for the CURRENT level (`notesKey: 'NeuralNotes'`),
+  rendered under the picker when the probe supplies one for the selected id. No number, no ranking
+  language - the note is whatever the probe sends, verbatim.
+- **3.2** - `neuralIsCudaNative()`/`CONFLICTS` (`web/src/80-conflicts.js`) now read `NeuralCudaLevels`
+  and `NeuralCudaDisables` from the probe when present, falling back to the exact literal lists
+  `ef083b9` shipped (still an exact-match test, never a prefix test, per that commit's own warning
+  about the `vsr` placeholder). The seven CUDA-native `CONFLICTS` entries are generated from the
+  disables list rather than hand-written per axis, and their `why` text was generalised to name any
+  axis the list carries (a small wording simplification from `ef083b9`'s per-axis sentences).
+- **3.3** - denoise gets OPTION-level inertness rather than row-level: a new `optionInert(c, id)`
+  hook (`web/src/80-conflicts.js`), consulted per chip and per `<select>` option in `controlRow()`,
+  reads `CudaDenoiseLevels` (probe key, fallback `['off','optix','optix-temporal']`) and disables
+  only the denoise levels not on it, leaving `optix`/`optix-temporal` live exactly as the server
+  does on that branch.
+- **3.4** - the consequence note: when a CUDA-native `neural` level is picked and at least one
+  disabled axis is set away from its own default, one note renders directly under the `neural` row
+  naming which axes will be turned off, in `CONTROLS[].label` wording (`cudaSuppressedLabels()`,
+  `web/src/90-panel-dom.js`). Silent when nothing would be lost, per the design's own rule.
+- **3.5** - `Pipeline` and `Denoise dropped` rows added to `LIVE_ROWS` (`web/src/60-live-block.js`).
+  Both are read straight off the session record like every other row here and print nothing until a
+  server actually sends `Pipeline`/`DenoiseDroppedForPatchedBinary` - the server-side half of 3.5
+  (deciding what `Pipeline` should say, confirming `DenoiseDroppedForPatchedBinary`'s shape) is a
+  backend change and stayed out of scope for a client-restructuring brief.
+- **4.3 ordering** - when both the section 3.4 consequence note and a section 2.2 level note fire
+  on the same row, the consequence note renders first, per the design's own stated order.
+
+Not implemented, and not silently dropped either - each is a design item this pass left alone on
+purpose:
+- **1.4/1.5, 2.4** - considered-and-rejected alternatives; nothing to build.
+- **5.1's actual probe keys** (`NeuralFamilies`, `NeuralFamilyLabels`, `NeuralNotes`,
+  `NeuralCudaLevels`, `NeuralCudaDisables`, `CudaDenoiseLevels`) - a server-side (`PatcherHost.cs`/
+  `ShaderLibrary.cs`) change. The client is now written to consume every one of them the day they
+  exist; none of them exist on the server yet.
+- **5.2's `Pipeline` value and confirming `DenoiseDroppedForPatchedBinary`** - same reason: backend.
+- **6.4** - moving `COSTS` to the probe. Noted as still open in section 8's own list; untouched.
+- Section 8, item 4 (inline "(off on CUDA path)" text for TV clients without tooltips) - the design
+  doc itself says "cheap to add; not in this pass unless wanted." Still not wanted this pass either.
+
+**VERIFIED**: `node --check` on the built `web/gpu-upscale.js` (valid syntax); the pre-improvement
+build is byte-identical to the prior single file past the added three-line generated banner (`diff`
+against a saved copy). **ASSUMED, not verified**: the new rendering paths (optgroup construction,
+option-level inertness, the two new notes) were reviewed by reading, not by driving a browser -
+this environment has no jsdom or browser available, and the task's own hard limits keep this pass
+off any live server. Whoever opens the Advanced disclosure on `dlpp-3`/`vsr-rtcuda` next, on a real
+server that sends the new probe keys, is the actual test.
