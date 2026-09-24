@@ -27,7 +27,7 @@ Each of these is reusable by every feature below:
 | 3 | RTX Video HDR (TrueHDR, SDR to HDR) | `truehdr_drv_cuda` in the patch series | Not started | SDR library shown as HDR10 on HDR TVs. Stock ffmpeg has nothing like it |
 | 4 | RTX Dynamic Vibrance (DeepDVC) | `deepdvc_drv_cuda` in the patch series | Not started | Neural colour and vibrance enhancement. Small and low risk |
 | 5 | DLPP (`dlpp_drv_cuda`) | `nvdlppx.dll` | **In progress.** Now the active alternate route to real neural VSR, explored in parallel with #1, not a fallback held in reserve. Same host-callback/CUDA-launch pattern as AIVP; whether it hits the same kind of network-output blocker is not yet known | A second path to the same goal as #1: neural upscaling, in case AIVP's L17 blocker doesn't resolve |
-| 6 | NGX DLISR | `nvngx_dlisr.dll` | Init works, stuck at the `CreateFeature` trap | Image SR on fixed 256x256 tiles. Mainly de-risking |
+| 6 | NGX DLISR | `nvngx_dlisr.dll` | Init works, stuck at the `CreateFeature` trap. Decided: user-supplied DLL, same convention as `nvdlppx.dll`/`nvaivpx.dll` and the DLSS runtime - never fetched or vendored by us, no forwarder/spoof needed since this is a documented feature (`nvsdk_ngx_helpers_cuda.h` wraps `NVSDK_NGX_Feature_ImageSignalProcessing` legitimately) | Image SR on fixed 256x256 tiles. Mainly de-risking |
 | 7 | Frame interpolation (NVOFFRUC / SmoothMotion) | patches 0010-0023 | Patches exist, never built | 24 to 48/60 fps motion smoothing on the GPU |
 
 **RTX VSR (#1) status, 2026-09-23:** 13 host-side agent rounds (TASK.md Track B "L17 agent 1-13",
