@@ -9,7 +9,7 @@ import { shownPrefs, effective, displayPrefs, summaryText, advancedText } from '
 import { ladder, recommendedStage, currentStage, sameStage, stageText } from '../model/ladder.js';
 import { costHint, selectionCost, eligibleTargets, serverConfig } from '../model/costing.js';
 import { savePrefs } from '../model/prefs-store.js';
-import { requestRestream, activeState, APPLY_LABEL, APPLY_FAILED_TEXT } from '../controller/live-apply.js';
+import { requestRestream, applyNow, activeState, APPLY_LABEL, APPLY_FAILED_TEXT } from '../controller/live-apply.js';
 import { liveLines } from '../controller/live-block.js';
 import { axisControls, controlNote } from '../controller/probe.js';
 
@@ -35,7 +35,7 @@ export var FOCUSABLE = 'button,select,input,summary';
 export var PANEL_ID = 'gpuUpscalePanel';
 var STYLE_ID = 'gpuUpscalePanelStyle';
 var CSS = [
-    '#' + PANEL_ID + '{position:fixed;right:1.2em;bottom:5.5em;z-index:99999;width:24em;',
+    '#' + PANEL_ID + '{position:fixed;right:1.2em;bottom:5.5em;z-index:99999;width:44em;',
     'max-width:calc(100vw - 2.4em);max-height:72vh;overflow-y:auto;background:rgba(16,16,18,.94);',
     'color:#eee;border:1px solid rgba(255,255,255,.14);border-radius:.6em;padding:.7em .85em 1em;',
     'box-shadow:0 .6em 2em rgba(0,0,0,.6);font-size:.85em;line-height:1.35;', '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);}',
@@ -62,7 +62,15 @@ var CSS = [
     '.gpuup-title{font-size:1.15em;font-weight:600;flex:0 0 auto;}',
     '.gpuup-sum{flex:1 1 auto;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
     '.gpuup-x{flex:0 0 auto;background:none;border:0;color:inherit;font-size:1.2em;cursor:pointer;opacity:.7;}',
-    '.gpuup-row{margin:.35em 0;}',
+    '.gpuup-apply{flex:0 0 auto;background:transparent;color:#00a4dc;border:1px solid #00a4dc;',
+    'border-radius:1em;padding:.15em .7em;font-size:.85em;cursor:pointer;font-family:inherit;}',
+    '.gpuup-apply:hover{background:rgba(0,164,220,.15);}',
+    '.gpuup-row{margin:.35em 0;min-width:0;}',
+    // Two columns once the panel is wide enough to carry them without crushing a chip row;
+    // one column below that (a phone, or the panel's own max-width clamp on a narrow window)
+    // rather than fighting the available space.
+    '.gpuup-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:1em;}',
+    '@media (max-width:640px){.gpuup-grid{grid-template-columns:1fr;}}',
     '.gpuup-label{opacity:.8;margin-bottom:.1em;}',
     '.gpuup-chips{display:flex;flex-wrap:wrap;align-items:center;gap:.25em;}',
     '.gpuup-chip{background:transparent;color:inherit;border:1px solid rgba(255,255,255,.22);',
@@ -149,6 +157,14 @@ function disclosure(id, title, changed) {
     d.appendChild(sum);
     d.addEventListener('toggle', function () { setOpen(id, d.open); });
     return d;
+}
+
+/* Lays a list of rows out two-per-line (one per line under .gpuup-grid's own media query on a
+ * narrow panel) rather than the single stacked column every row used before. */
+function grid(rows) {
+    var g = el('div', 'gpuup-grid');
+    rows.forEach(function (row) { g.appendChild(row); });
+    return g;
 }
 
 /* How many of these controls are away from their own neutral value. */
@@ -736,6 +752,16 @@ export function renderPanel(panel, caps) {
         head.appendChild(el('div', 'gpuup-applying', state.applying));
     }
 
+    // A GUARANTEED fallback beside the automatic one: the same thing backing out and reopening
+    // the item already does (reload the current item at its position, forcing a fresh
+    // negotiation), just without leaving the page. See applyNow()'s own comment for why this
+    // exists alongside the automatic live-apply rather than replacing it - the automatic path can
+    // silently do nothing for reasons a viewer has no way to diagnose; this one cannot.
+    var apply = el('button', 'gpuup-apply', 'Apply now');
+    apply.title = 'Reload the current video at this position with the settings above';
+    apply.onclick = applyNow;
+    head.appendChild(apply);
+
     var x = el('button', 'gpuup-x', '×');
     x.title = 'Close';
     x.onclick = closePanel;
@@ -821,7 +847,7 @@ export function renderPanel(panel, caps) {
         .sort(function (a, b) { return tier(a) - tier(b); });
     var rest = controls.filter(function (c) { return !tier(c); });
 
-    basics.forEach(function (c) { body.appendChild(pick(c)); });
+    body.appendChild(grid(basics.map(pick)));
 
     // A chain that cannot keep up does not fail, it buffers, and nothing in the panel said so
     // until now: a viewer stacking compression cleanup, OptiX and DLSS got 0.22x realtime and
@@ -853,7 +879,7 @@ export function renderPanel(panel, caps) {
             }
 
             adv.appendChild(el('h3', null, g));
-            inGroup.forEach(function (c) { adv.appendChild(pick(c)); });
+            adv.appendChild(grid(inGroup.map(pick)));
         });
 
         // The expert clusters last, each one row until it is opened. The head control's own

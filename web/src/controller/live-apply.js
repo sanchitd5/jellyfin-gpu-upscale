@@ -344,6 +344,55 @@ export function requestRestream() {
     }
 }
 
+/*
+ * THE GUARANTEED PATH, for the viewer who does not trust (or has been burned by) the automatic
+ * one above. requestRestream()'s whole mechanism depends on three things that can each go wrong
+ * in ways this project has already hit once: finding playbackManager at all (webpack-chunk timing,
+ * the require() shim), jellyfin-web's setMaxStreamingBitrate() actually re-negotiating rather than
+ * no-op'ing, and the server correctly reading the swapfrom marker. Each has its own fix now, but a
+ * viewer who changed a setting mid-play and saw nothing happen has no way to tell "it silently
+ * failed" from "it takes a few seconds" - the reported shape of the bug this session keeps
+ * surfacing is exactly that ambiguity, not any one of the underlying causes.
+ *
+ * This button skips all three: it is the same thing backing out of the player and reopening the
+ * item already does (proven to work - that is how a viewer's changed preference has always shown
+ * up on the NEXT play), just without leaving the page. replayHere() calls pm.play() with the
+ * current item and position, which forces a full fresh PlaybackInfo negotiation - no bitrate
+ * comparison, no shape-detection dependency beyond what replayHere() itself already checks.
+ */
+export function applyNow() {
+    try {
+        if (!playerPresent()) {
+            log('nothing is playing; the change applies on the next playback');
+            return;
+        }
+
+        if (state.applyTimer) {
+            clearTimeout(state.applyTimer);
+            state.applyTimer = null;
+        }
+
+        state.applyFailed = false;
+        state.replayTried = true; // this IS the replay; watchApplied must not attempt a second one
+        state.applying = APPLY_LABEL;
+        repaintPanel();
+
+        var previousId = state.playSessionId;
+        if (replayHere()) {
+            watchApplied(previousId);
+        } else {
+            state.applying = null;
+            state.applyFailed = true;
+            repaintPanel();
+        }
+    } catch (err) {
+        log('apply-now failed', err);
+        state.applying = null;
+        state.applyFailed = true;
+        repaintPanel();
+    }
+}
+
 /* ------------------------------------------------------------------ what the server DID */
 
 /*
