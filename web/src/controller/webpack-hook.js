@@ -55,8 +55,10 @@ function wrapChunkModules(chunk) {
 var GLOBALS = ['webpackChunk', 'webpackChunkjellyfin_web'];
 
 function hookChunkGlobal(key) {
+    log('hookChunkGlobal: start, key=' + key);
     var chunks = window[key] = window[key] || [];
     if (chunks.__gpuUpscaleHooked) {
+        log('hookChunkGlobal: end, ' + key + ' already hooked');
         return;
     }
 
@@ -88,9 +90,16 @@ function hookChunkGlobal(key) {
     chunks.__gpuUpscaleHooked = true;
     chunks.forEach(wrapChunkModules);
     state.globals.push(key);
+    log('hookChunkGlobal: end, hooked ' + key + ', ' + chunks.length + ' pre-existing chunks wrapped');
 }
 
+// wrapChunkModules() itself is NOT logged at entry/exit: it runs once per chunk pushed, and each
+// chunk wraps every one of its module factories - thousands of calls during a normal page boot
+// (state.chunks/state.modulesWrapped already count them). A log line per call would drown out
+// everything else; the meaningful events (a match found) are already logged inside
+// notePlaybackManager()/wrapActionSheet() themselves.
 export function hookWebpack() {
+    log('hookWebpack: start');
     GLOBALS.forEach(function (key) {
         try {
             hookChunkGlobal(key);
@@ -98,4 +107,5 @@ export function hookWebpack() {
             log('webpack hook failed for ' + key, err);
         }
     });
+    log('hookWebpack: end, globals=' + state.globals.join(','));
 }

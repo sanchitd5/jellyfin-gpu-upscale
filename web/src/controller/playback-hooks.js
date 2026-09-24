@@ -11,9 +11,11 @@ import {
 } from '../view/panel-dom.js';
 
 export function hookPlaybackEvents() {
+    log('hookPlaybackEvents: start, alreadyHooked=' + state.playbackHooked);
     try {
         var pm = player();
         if (!pm || state.playbackHooked) {
+            log('hookPlaybackEvents: end, ' + (!pm ? 'no player yet' : 'already hooked'));
             return;
         }
 
@@ -29,8 +31,9 @@ export function hookPlaybackEvents() {
         });
 
         state.playbackHooked = true;
+        log('hookPlaybackEvents: end, hooked playbackstop/playbackerror callbacks');
     } catch (err) {
-        log('could not hook the playback events', err);
+        log('hookPlaybackEvents: end, could not hook the playback events', err);
     }
 }
 
@@ -82,6 +85,7 @@ export function resetUpscaleForNewSource(info) {
  * playback instead of freezing at the moment it was opened.
  */
 export function openEnhancePanel() {
+    log('openEnhancePanel: start, menuShown=' + (state.menuShown + 1));
     state.menuShown++;
     hookPlaybackEvents();
     return probeServer().then(function (caps) {
@@ -169,10 +173,11 @@ export function openEnhancePanel() {
                     }, function () { /* keep the last answer */ });
                 } catch (e) { /* ignore */ }
             }, 3000);
+            log('openEnhancePanel: end, panel mounted and 3s live-poll timer started');
             return null;
         } catch (err) {
             // The panel is never allowed to take playback or the stock menus with it.
-            log('panel failed to open', err);
+            log('openEnhancePanel: end, panel failed to open', err);
             closePanel();
             return null;
         }

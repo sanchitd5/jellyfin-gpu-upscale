@@ -11,8 +11,10 @@ import { log } from '../lib/log.js';
  * what is actually sent.
  */
 export function wireParams() {
+    log('wireParams: start');
     var e = effective();
     if (!e) {
+        log('wireParams: end, effective() gave nothing, returning null');
         return null;
     }
 
@@ -92,6 +94,7 @@ export function wireParams() {
         params.swapfrom = state.swapFrom;
     }
 
+    log('wireParams: end, ' + JSON.stringify(params));
     return params;
 }
 
@@ -106,8 +109,10 @@ export function paramSig(params) {
 }
 
 export function addParams(url) {
+    log('addParams: start, url=' + url);
     var params = wireParams();
     if (!url || !params) {
+        log('addParams: end, nothing to do (no url or no params), returning url unchanged');
         return url;
     }
 
@@ -115,16 +120,21 @@ export function addParams(url) {
     // per segment, and letting it write here would keep resetting the comparison the stale
     // note depends on, so a changed selection would stop announcing itself.
     state.sentSig = paramSig(params);
-    return applyParams(url, params);
+    var out = applyParams(url, params);
+    log('addParams: end, sentSig=' + state.sentSig + ', marked url=' + out);
+    return out;
 }
 
 /* The same append, without claiming a negotiation happened. */
 export function markHlsUrl(url) {
     var params = wireParams();
-    return (!url || !params) ? url : applyParams(url, params);
+    var out = (!url || !params) ? url : applyParams(url, params);
+    log('markHlsUrl: start/end, url=' + url + ' -> ' + out);
+    return out;
 }
 
 function applyParams(url, params) {
+    log('applyParams: start, url=' + url + ', params=' + JSON.stringify(params));
     var out = url;
 
     Object.keys(params).forEach(function (k) {
@@ -136,6 +146,7 @@ function applyParams(url, params) {
         }
     });
 
+    log('applyParams: end, ' + out);
     return out;
 }
 
@@ -146,9 +157,11 @@ function applyParams(url, params) {
  * instead of offering a downscale as an improvement.
  */
 function noteSourceHeight(info) {
+    log('noteSourceHeight: start');
     try {
         var sources = info && info.MediaSources;
         if (!sources || !sources.length) {
+            log('noteSourceHeight: end, no MediaSources on this response');
             return;
         }
 
@@ -166,27 +179,36 @@ function noteSourceHeight(info) {
                     }
 
                     state.sourceHeight = st.Height;
+                    log('noteSourceHeight: end, sourceHeight=' + st.Height);
                     return;
                 }
             }
         }
+
+        log('noteSourceHeight: end, no video stream with a height found');
     } catch (err) {
-        log('could not read the source height', err);
+        log('noteSourceHeight: end, could not read the source height', err);
     }
 }
 
 function rewriteBody(bodyText) {
+    log('rewriteBody: start');
     var info = JSON.parse(bodyText);
     if (!info) {
+        log('rewriteBody: end, empty response body, returning null');
         return null;
     }
 
     if (info.PlaySessionId) {
+        log('rewriteBody: response PlaySessionId=' + info.PlaySessionId
+            + ' (was ' + state.playSessionId + ')');
         // The swap marker has done its job once a session id actually comes back on this
         // negotiation - clearing it here (not right after sending) is what lets it also ride
         // the HLS master/variant requests this same negotiation produces, without leaking onto
         // a later, unrelated one.
         if (info.PlaySessionId !== state.playSessionId) {
+            log('rewriteBody: new PlaySessionId differs from the old one, clearing state.swapFrom ('
+                + state.swapFrom + ')');
             state.swapFrom = null;
         }
 
@@ -200,17 +222,23 @@ function rewriteBody(bodyText) {
     var e = effective();
     if (!info.MediaSources || !e) {
         // No opinion from this viewer, so nothing is marked and the server's defaults stand.
+        log('rewriteBody: end, no MediaSources or no effective() opinion, returning null unmarked');
         return null;
     }
 
     var enhancing = anyEnhancement();
+    log('rewriteBody: anyEnhancement()=' + enhancing + ', MediaSources.length='
+        + info.MediaSources.length);
     var touched = false;
-    info.MediaSources.forEach(function (source) {
+    info.MediaSources.forEach(function (source, idx) {
         if (!source.TranscodingUrl) {
+            log('rewriteBody: MediaSource[' + idx + '] has no TranscodingUrl (direct play), skipping');
             return;
         }
 
+        var before = source.TranscodingUrl;
         source.TranscodingUrl = addParams(source.TranscodingUrl);
+        log('rewriteBody: MediaSource[' + idx + '] TranscodingUrl ' + before + ' -> ' + source.TranscodingUrl);
         if (enhancing) {
             // Make sure the client actually uses the transcode we just marked.
             source.SupportsDirectPlay = false;
@@ -225,11 +253,14 @@ function rewriteBody(bodyText) {
     });
 
     if (!touched) {
-        log(enhancing ? 'no TranscodingUrl to mark; playing without enhancement' : 'off: nothing to mark, direct play stands');
+        log('rewriteBody: end, ' + (enhancing
+            ? 'no TranscodingUrl to mark; playing without enhancement'
+            : 'off: nothing to mark, direct play stands'));
         return null;
     }
 
     state.marked.push([e.upscale, e.deblur, e.denoise, e.sr, e.neural, e.game].join('/'));
+    log('rewriteBody: end, marked and rewriting the response body');
     return JSON.stringify(info);
 }
 
@@ -251,6 +282,7 @@ function rewriteBody(bodyText) {
  */
 function forceTranscodeUrl(url) {
     if (!url || !anyEnhancement()) {
+        log('forceTranscodeUrl: start/end, nothing to do (no url or nothing enhancing)');
         return url;
     }
 
@@ -264,6 +296,7 @@ function forceTranscodeUrl(url) {
             out += (out.indexOf('?') === -1 ? '?' : '&') + k + '=false';
         }
     });
+    log('forceTranscodeUrl: start/end, ' + url + ' -> ' + out);
     return out;
 }
 
@@ -274,24 +307,27 @@ function forceTranscodeBody(bodyText) {
 
     try {
         if (typeof bodyText !== 'string' || !bodyText) {
+            log('forceTranscodeBody: end, no body text to rewrite');
             return null;
         }
 
         var body = JSON.parse(bodyText);
         if (!body || typeof body !== 'object') {
+            log('forceTranscodeBody: end, body did not parse to an object');
             return null;
         }
 
         if (body.EnableDirectPlay === false && body.EnableDirectStream === false) {
+            log('forceTranscodeBody: end, already forced (EnableDirectPlay/Stream already false)');
             return null;
         }
 
         body.EnableDirectPlay = false;
         body.EnableDirectStream = false;
-        log('forcing a transcode for PlaybackInfo so there is something to enhance');
+        log('forceTranscodeBody: end, forcing a transcode for PlaybackInfo so there is something to enhance');
         return JSON.stringify(body);
     } catch (err) {
-        log('could not rewrite PlaybackInfo request body', err);
+        log('forceTranscodeBody: end, could not rewrite PlaybackInfo request body', err);
         return null;
     }
 }
@@ -316,7 +352,9 @@ var IS_PLAYBACK_INFO = /\/playbackinfo(\?|$|\/)/i;
 var IS_HLS_MEDIA = /\/videos\/[^?]*\/(main\.m3u8|master\.m3u8|hls1\/|live\.m3u8)/i;
 
 export function hookFetch() {
+    log('hookFetch: start');
     if (!window.fetch) {
+        log('hookFetch: end, window.fetch does not exist on this build');
         return;
     }
 
@@ -333,6 +371,7 @@ export function hookFetch() {
 
         // Any HLS request for this session, not only the one this script handed over.
         if (url && IS_HLS_MEDIA.test(url) && !IS_PLAYBACK_INFO.test(url)) {
+            log('hookFetch: matched HLS media url ' + url);
             try {
                 var marked = markHlsUrl(url);
                 if (marked !== url) {
@@ -350,6 +389,7 @@ export function hookFetch() {
         }
 
         if (url && IS_PLAYBACK_INFO.test(url) && anyEnhancement()) {
+            log('hookFetch: matched PlaybackInfo request, forcing a transcode - ' + url);
             try {
                 var newUrl = forceTranscodeUrl(url);
                 if (typeof input === 'string') {
@@ -392,39 +432,50 @@ export function hookFetch() {
             return promise;
         }
 
+        log('hookFetch: response for a PlaybackInfo request is coming, handing to handlePlaybackInfo()');
         return handlePlaybackInfo(promise);
     };
 
     function handlePlaybackInfo(promise) {
-
+        log('handlePlaybackInfo: start');
         return promise.then(function (response) {
             try {
                 return response.clone().text().then(function (text) {
                     try {
                         var rewritten = rewriteBody(text);
                         if (!rewritten) {
+                            log('handlePlaybackInfo: end, rewriteBody() gave nothing, passing the response through unmarked');
                             return response;
                         }
 
+                        log('handlePlaybackInfo: end, returning a marked Response body');
                         return new Response(rewritten, {
                             status: response.status,
                             statusText: response.statusText,
                             headers: new Headers(response.headers)
                         });
                     } catch (err) {
-                        log('rewrite failed', err);
+                        log('handlePlaybackInfo: end, rewrite failed', err);
                         return response;
                     }
-                }, function () { return response; });
+                }, function () {
+                    log('handlePlaybackInfo: end, response.clone().text() rejected');
+                    return response;
+                });
             } catch (err) {
+                log('handlePlaybackInfo: end, threw', err);
                 return response;
             }
         });
     };
+
+    log('hookFetch: end, window.fetch wrapped');
 }
 
 export function hookXhr() {
+    log('hookXhr: start');
     if (!window.XMLHttpRequest) {
+        log('hookXhr: end, window.XMLHttpRequest does not exist on this build');
         return;
     }
 
@@ -441,25 +492,31 @@ export function hookXhr() {
             // Same reason as the fetch hook: the variant playlist is where the command is
             // built, and it is fetched without the axes unless they are put back here.
             if (url && IS_HLS_MEDIA.test(url) && !IS_PLAYBACK_INFO.test(url)) {
+                log('hookXhr.open: matched HLS media url ' + url);
                 var markedUrl = markHlsUrl(url);
                 if (markedUrl !== url) {
                     this.__gpuUpscaleUrl = markedUrl;
                     var hlsArgs = Array.prototype.slice.call(arguments);
                     hlsArgs[1] = markedUrl;
+                    log('hookXhr.open: end, opening the marked url instead - ' + markedUrl);
                     return originalOpen.apply(this, hlsArgs);
                 }
             }
 
             if (url && IS_PLAYBACK_INFO.test(url) && anyEnhancement()) {
+                log('hookXhr.open: matched PlaybackInfo request - ' + url);
                 var forced = forceTranscodeUrl(url);
                 if (forced !== url) {
                     this.__gpuUpscaleUrl = forced;
                     var args = Array.prototype.slice.call(arguments);
                     args[1] = forced;
+                    log('hookXhr.open: end, opening the forced-transcode url instead - ' + forced);
                     return originalOpen.apply(this, args);
                 }
             }
-        } catch (e) { /* ignore */ }
+        } catch (e) {
+            log('hookXhr.open: threw, falling back to the original url', e);
+        }
         return originalOpen.apply(this, arguments);
     };
 
@@ -469,6 +526,7 @@ export function hookXhr() {
         try {
             var url = this.__gpuUpscaleUrl;
             if (url && IS_PLAYBACK_INFO.test(url)) {
+                log('hookXhr.send: start, PlaybackInfo request going out - ' + url);
                 // Request side: make sure a TranscodingUrl will exist to mark.
                 var rewrittenBody = forceTranscodeBody(body);
                 if (rewrittenBody) {
@@ -483,17 +541,22 @@ export function hookXhr() {
                         var raw = Object.getOwnPropertyDescriptor(
                             window.XMLHttpRequest.prototype, 'responseText').get.call(xhr);
                         try {
+                            log('hookXhr.send: responseText read, rewriting the PlaybackInfo body');
                             return rewriteBody(raw) || raw;
                         } catch (err) {
+                            log('hookXhr.send: rewriteBody() on responseText threw, returning raw', err);
                             return raw;
                         }
                     }
                 });
+                log('hookXhr.send: end, request body rewritten=' + !!rewrittenBody + ', responseText getter installed');
             }
         } catch (err) {
-            log('xhr hook failed', err);
+            log('hookXhr.send: xhr hook failed', err);
         }
 
         return originalSend.call(this, outgoing);
     };
+
+    log('hookXhr: end, XMLHttpRequest.prototype.open/send wrapped');
 }

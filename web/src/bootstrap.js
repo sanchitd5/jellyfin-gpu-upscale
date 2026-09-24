@@ -13,6 +13,7 @@ import { tryRequireShim } from './controller/live-apply.js';
  * the top level to actually install the hook, exactly as the old single IIFE's closing block did.
  */
 (function install() {
+    log('bootstrap install: start');
     try {
         hookWebpack();
         hookFetch();
@@ -21,8 +22,9 @@ import { tryRequireShim } from './controller/live-apply.js';
         watchPlaybackInfoDialog();
         probeServer();
         state.installed = true;
-        log('installed on', state.globals.join(', '));
+        log('bootstrap install: end, installed on', state.globals.join(', '));
     } catch (err) {
+        log('bootstrap install: end, threw', err);
         /* never break the web client */
     }
 })();

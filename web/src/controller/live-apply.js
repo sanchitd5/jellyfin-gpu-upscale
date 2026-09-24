@@ -5,10 +5,19 @@ import { renderPanel, panelEl } from '../view/panel-dom.js';
 import { LIVE_ROWS } from './live-block.js';
 
 export function repaintPanel() {
+    log('repaintPanel: start');
     try {
         var p = panelEl();
-        if (p) { renderPanel(p, state.caps || { full: false, failed: true }); }
-    } catch (err) { /* the panel is never worth breaking playback for */ }
+        if (p) {
+            renderPanel(p, state.caps || { full: false, failed: true });
+            log('repaintPanel: end, re-rendered');
+        } else {
+            log('repaintPanel: end, no panel element mounted');
+        }
+    } catch (err) {
+        log('repaintPanel: end, threw', err);
+        /* the panel is never worth breaking playback for */
+    }
 }
 
 /*
@@ -22,6 +31,9 @@ export function repaintPanel() {
  * sheet is recognised by shape rather than by module id, and window is kept as a fallback for
  * any build that does export it.
  */
+// NOT logged: called on every module export while webpack boots (thousands of times), so a log
+// line here would flood the console. notePlaybackManager()/tryRequireShim() log the one call that
+// actually matches.
 export function isPlaybackManager(o) {
     return !!o
         && typeof o.setMaxStreamingBitrate === "function"
@@ -45,8 +57,13 @@ export function isPlaybackManager(o) {
  */
 function activePlayer(pm) {
     try {
-        return typeof pm.getCurrentPlayer === 'function' ? pm.getCurrentPlayer() : undefined;
+        var pl = typeof pm.getCurrentPlayer === 'function' ? pm.getCurrentPlayer() : undefined;
+        log('activePlayer: end, ' + (typeof pm.getCurrentPlayer === 'function'
+            ? 'getCurrentPlayer() -> ' + (pl ? 'a player object' : 'nothing')
+            : 'no getCurrentPlayer method, calling without one'));
+        return pl;
     } catch (err) {
+        log('activePlayer: end, getCurrentPlayer() threw', err);
         return undefined;
     }
 }
@@ -104,31 +121,39 @@ export function notePlaybackManager(exports) {
  */
 var requireShimTried = false;
 export function tryRequireShim() {
+    log('tryRequireShim: start, alreadyTried=' + requireShimTried + ', alreadyHaveRef=' + !!state.playbackManagerRef);
     if (requireShimTried || state.playbackManagerRef) {
+        log('tryRequireShim: end, skipped (nothing to do)');
         return;
     }
 
     requireShimTried = true;
     try {
         if (typeof window.require !== 'function') {
+            log('tryRequireShim: end, window.require is not a function on this build');
             return;
         }
 
+        log('tryRequireShim: calling window.require(["playbackManager"], ...)');
         window.require(['playbackManager'], function (pm) {
             try {
                 if (!state.playbackManagerRef && isPlaybackManager(pm)) {
                     state.playbackManagerRef = pm;
-                    log('found playbackManager via the require() module shim');
+                    log('tryRequireShim: require() callback fired, found playbackManager via the module shim');
+                } else {
+                    log('tryRequireShim: require() callback fired, candidate did not match isPlaybackManager or a ref already existed');
                 }
             } catch (err) { /* never worth breaking the shim callback for */ }
         });
+        log('tryRequireShim: end, require() call issued (callback is async)');
     } catch (err) {
-        log('require() shim probe failed', err);
+        log('tryRequireShim: end, require() shim probe threw', err);
     }
 }
 
 export function player() {
     if (isPlaybackManager(window.playbackManager)) {
+        log('player: end, using window.playbackManager');
         return window.playbackManager;
     }
 
@@ -136,18 +161,34 @@ export function player() {
         tryRequireShim();
     }
 
+    log('player: end, returning ' + (state.playbackManagerRef ? 'the captured playbackManagerRef' : 'null (no manager found by any path)'));
     return state.playbackManagerRef;
 }
 
 export function playerPresent() {
+    log('playerPresent: start');
     try {
         var pm = player();
-        return !!(pm
-            && typeof pm.setMaxStreamingBitrate === 'function'
+        if (!pm) {
+            log('playerPresent: end, false (player() returned nothing)');
+            return false;
+        }
+
+        var hasShape = typeof pm.setMaxStreamingBitrate === 'function'
             && typeof pm.getMaxStreamingBitrate === 'function'
-            && typeof pm.currentItem === 'function'
-            && pm.currentItem(activePlayer(pm)));
+            && typeof pm.currentItem === 'function';
+        if (!hasShape) {
+            log('playerPresent: end, false (captured object does not carry the expected shape)');
+            return false;
+        }
+
+        var pl = activePlayer(pm);
+        var item = pm.currentItem(pl);
+        log('playerPresent: end, currentItem(' + (pl ? 'activePlayer' : 'no arg') + ') -> '
+            + (item ? ('item ' + (item.Id || item.id || '?')) : 'nothing') + ', result ' + !!item);
+        return !!item;
     } catch (err) {
+        log('playerPresent: end, threw', err);
         return false;
     }
 }
@@ -158,6 +199,7 @@ export function playerPresent() {
  * The timeout exists so the label cannot stick on forever if the negotiation never lands.
  */
 export function watchApplied(previousId) {
+    log('watchApplied: start, watching for a PlaySessionId different from ' + previousId);
     var tries = 0;
     var timer = setInterval(function () {
         try {
@@ -169,22 +211,31 @@ export function watchApplied(previousId) {
                 // A timeout is a FAILURE, not a finish. Clearing the label without recording
                 // it left a change that never reached the server looking like one that did.
                 state.applyFailed = !landed;
+                log('watchApplied: poll settled after ' + tries + ' tries, landed=' + landed
+                    + ', currentPlaySessionId=' + state.playSessionId);
                 // One retry, by the route that works when re-negotiation does not: the stream
                 // that would not change is usually one the server is handing over untouched.
                 // Only once, because a re-play that also fails to land must not become a loop
                 // that restarts the viewer's film every twelve seconds.
                 if (!landed && !state.replayTried) {
                     state.replayTried = true;
+                    log('watchApplied: timed out without landing, trying one replayHere() as a fallback');
                     if (replayHere()) {
                         state.applyFailed = false;
                         state.applying = APPLY_LABEL;
+                        log('watchApplied: end, fallback replayHere() issued, starting a second watch');
                         watchApplied(state.playSessionId);
+                        return;
                     }
+
+                    log('watchApplied: fallback replayHere() also failed');
                 }
 
+                log('watchApplied: end');
                 repaintPanel();
             }
         } catch (err) {
+            log('watchApplied: end, threw', err);
             clearInterval(timer);
             state.applying = null;
             state.applyFailed = true;
@@ -205,12 +256,15 @@ export function watchApplied(previousId) {
  * these degrades to the honest message rather than throwing.
  */
 export function replayHere() {
+    log('replayHere: start');
     try {
         var pm = player();
         var pl = activePlayer(pm);
         var item = pm && typeof pm.currentItem === 'function' ? pm.currentItem(pl) : null;
         var id = item && (item.Id || item.id);
+        log('replayHere: currentItem -> ' + (item ? ('id ' + id) : 'nothing'));
         if (!id || typeof pm.play !== 'function') {
+            log('replayHere: end, false (' + (!id ? 'no current item id' : 'pm.play is not a function') + ')');
             return false;
         }
 
@@ -218,13 +272,17 @@ export function replayHere() {
         if (typeof pm.currentTime === 'function') {
             var ms = pm.currentTime(pl);
             if (ms > 0) { ticks = Math.floor(ms) * 10000; }
+            log('replayHere: currentTime -> ' + ms + 'ms, startPositionTicks ' + ticks);
+        } else {
+            log('replayHere: no currentTime method, starting from position 0');
         }
 
+        log('replayHere: calling pm.play({ ids: [' + id + '], startPositionTicks: ' + ticks + ' })');
         pm.play({ ids: [id], startPositionTicks: ticks });
-        log('re-played the item at its current position to apply the change');
+        log('replayHere: end, true - pm.play() call returned (does not itself mean the player switched)');
         return true;
     } catch (err) {
-        log('could not re-play to apply the change', err);
+        log('replayHere: end, false, threw', err);
         return false;
     }
 }
@@ -236,7 +294,9 @@ export function replayHere() {
  */
 export function directPlaying() {
     var s = state.lastServerState;
-    return !!(s && s.PatchActive !== false && s.Known === false);
+    var result = !!(s && s.PatchActive !== false && s.Known === false);
+    log('directPlaying: start/end, lastServerState=' + (s ? 'present' : 'null') + ', result ' + result);
+    return result;
 }
 
 /*
@@ -278,8 +338,10 @@ export var APPLY_FAILED_TEXT = 'That change did not land: the stream was not ren
     + ' It applies when playback next negotiates.';
 
 function doApply() {
+    log('doApply: start');
     state.applyTimer = null;
     if (!playerPresent()) {
+        log('doApply: end, playerPresent() false, giving up');
         state.applying = null;
         state.applyFailed = true;
         repaintPanel();
@@ -290,11 +352,14 @@ function doApply() {
     // Doing this first rather than after a 12 second timeout is the difference between a
     // change that lands and a viewer backing out of the video and opening it again.
     if (directPlaying()) {
+        log('doApply: direct-playing branch, going straight to replayHere()');
         state.applying = APPLY_LABEL;
         repaintPanel();
         if (replayHere()) {
+            log('doApply: end, replayHere() issued, handing off to watchApplied()');
             watchApplied(state.playSessionId);
         } else {
+            log('doApply: end, replayHere() failed on the direct-play branch');
             state.applying = null;
             state.applyFailed = true;
             repaintPanel();
@@ -303,14 +368,16 @@ function doApply() {
         return;
     }
 
+    log('doApply: transcoding branch, will try setMaxStreamingBitrate()');
     var previousId = state.playSessionId;
     try {
         var pm = player();
         var current = pm.getMaxStreamingBitrate();
+        log('doApply: getMaxStreamingBitrate() -> ' + current);
         if (!(current > 0)) {
             // Handing back a value that is not a bitrate would overwrite the viewer's own
             // saved setting with nothing. Not worth it: say so and leave playback alone.
-            log('no current bitrate to hand back; the change applies on the next playback');
+            log('doApply: end, no current bitrate to hand back; the change applies on the next playback');
             state.applying = null;
             state.applyFailed = true;
             repaintPanel();
@@ -332,11 +399,13 @@ function doApply() {
         // is what lets the server try the A/B swap instead of today's plain tear-down-and-
         // restart - see LIVE_APPLY_DESIGN.md. Cleared once the new PlaySessionId lands.
         state.swapFrom = previousId;
+        log('doApply: set state.swapFrom = ' + previousId + ' before renegotiating');
         pm.setMaxStreamingBitrate({ enableAutomaticBitrateDetection: false, maxBitrate: nudged });
-        log('asked the player to renegotiate at the current position (nudged bitrate ' + current + ' -> ' + nudged + ')');
+        log('doApply: end, asked the player to renegotiate at the current position (nudged bitrate '
+            + current + ' -> ' + nudged + '), handing off to watchApplied()');
         watchApplied(previousId);
     } catch (err) {
-        log('could not renegotiate; the change applies on the next playback', err);
+        log('doApply: end, could not renegotiate; the change applies on the next playback', err);
         state.applying = null;
         state.applyFailed = true;
         repaintPanel();
@@ -345,14 +414,16 @@ function doApply() {
 
 /* Called by every control. Debounced, and a no-op when nothing is playing. */
 export function requestRestream() {
+    log('requestRestream: start');
     try {
         if (state.applyTimer) {
+            log('requestRestream: clearing a pending debounce timer from an earlier call');
             clearTimeout(state.applyTimer);
             state.applyTimer = null;
         }
 
         if (!playerPresent()) {
-            log('nothing is playing; the change applies on the next playback');
+            log('requestRestream: end, nothing is playing; the change applies on the next playback');
             return;
         }
 
@@ -362,8 +433,9 @@ export function requestRestream() {
         state.replayTried = false;
         state.applying = APPLY_LABEL;
         state.applyTimer = setTimeout(doApply, APPLY_DEBOUNCE);
+        log('requestRestream: end, scheduled doApply() in ' + APPLY_DEBOUNCE + 'ms');
     } catch (err) {
-        log('could not schedule the change', err);
+        log('requestRestream: end, could not schedule the change', err);
     }
 }
 
@@ -384,13 +456,15 @@ export function requestRestream() {
  * comparison, no shape-detection dependency beyond what replayHere() itself already checks.
  */
 export function applyNow() {
+    log('applyNow: start, current playSessionId=' + state.playSessionId);
     try {
         if (!playerPresent()) {
-            log('nothing is playing; the change applies on the next playback');
+            log('applyNow: end, nothing is playing; the change applies on the next playback');
             return;
         }
 
         if (state.applyTimer) {
+            log('applyNow: clearing a pending debounced auto-apply so it does not fire on top of this');
             clearTimeout(state.applyTimer);
             state.applyTimer = null;
         }
@@ -401,15 +475,18 @@ export function applyNow() {
         repaintPanel();
 
         var previousId = state.playSessionId;
+        log('applyNow: calling replayHere(), previousId=' + previousId);
         if (replayHere()) {
+            log('applyNow: end, replayHere() returned true, handing off to watchApplied()');
             watchApplied(previousId);
         } else {
+            log('applyNow: end, replayHere() returned false');
             state.applying = null;
             state.applyFailed = true;
             repaintPanel();
         }
     } catch (err) {
-        log('apply-now failed', err);
+        log('applyNow: end, threw', err);
         state.applying = null;
         state.applyFailed = true;
         repaintPanel();
@@ -435,6 +512,10 @@ export function applyNow() {
  *   active       a chain was built and the record names at least one pass that ran
  */
 export function activeState() {
+    // Logged lightly (one line, no per-branch detail): this runs on every panel repaint,
+    // including the ~3s live poll, so a verbose trace here would drown out the one-shot apply
+    // chain above, which is what "start to end" instrumentation is actually for.
+    log('activeState: start/end, lastServerState=' + (state.lastServerState ? 'present' : 'null'));
     var s = state.lastServerState;
     if (!s) {
         return { key: 'waiting', label: 'Waiting for the server',
