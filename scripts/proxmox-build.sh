@@ -275,6 +275,15 @@ echo "==> activating"
 # ---- 8. client -------------------------------------------------------------------------------
 # Only now. A client published ahead of the server sends axes the running plugin does not read,
 # silently, which is this project's oldest failure and the hardest to see.
+#
+# web/gpu-upscale.js is a BUILD OUTPUT, not checked in (see web/src/ - real ES modules, bundled
+# by esbuild). It has to be built here, fresh, from whatever web/src/ this checkout just fetched -
+# there is no committed copy to fall back to.
+echo "==> building the client script"
+command -v npm >/dev/null || { echo "npm not on PATH: install Node.js on this machine to build web/gpu-upscale.js" >&2; exit 1; }
+[ -d web/node_modules/esbuild ] || (cd web && npm install --no-audit --no-fund)
+./scripts/build-web-panel.sh
+
 echo "==> publishing the client script"
 install -m 0644 web/gpu-upscale.js "$PATCH_DIR/gpu-upscale.js.tmp.$$"
 mv "$PATCH_DIR/gpu-upscale.js.tmp.$$" "$PATCH_DIR/gpu-upscale.js"

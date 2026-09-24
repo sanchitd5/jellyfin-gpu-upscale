@@ -86,8 +86,10 @@ Adding a setting means touching all of these together, or the page breaks:
 
 ## Before you change the client
 
-`web/gpu-upscale.js` is a **generated, committed build output**, not the source. As of the
-`real-es-modules` pass (2026-09-24), the real source is **real ES modules** with real
+`web/gpu-upscale.js` is a **generated build output, not checked into git** (gitignored as of the
+`real-es-modules` pass, 2026-09-24, same as `web/node_modules`) and not the source. Build it with
+`scripts/build-web-panel.sh` before publishing, deploying, or handing the repo to a fresh checkout
+- there is no committed copy to fall back to. The real source is **real ES modules** with real
 `import`/`export`, under `web/src/`, grouped MVC-style, plus one entry point:
 
 | directory | holds |
@@ -123,10 +125,12 @@ time while the source keeps it at edit time.
 The injector is unaffected in shape: `/usr/lib/jellyfin-gpuupscale/gpu-upscale.js` is still
 canonical on the server, copied from the one file the build script produces, and it still copies it
 into the web root and bumps a cache-buster. **What changed**: the cache-buster is no longer a
-hand-maintained integer (see below). **Editing the web copy directly gets silently reverted while
-the buster still advances**, so browsers cache the old script under a new URL. Keep the *built*
-`web/gpu-upscale.js` in this repo in sync - that is what gets published - and keep it built from
-`web/src/`, not hand-patched.
+hand-maintained integer (see below), and `web/gpu-upscale.js` is no longer a file to keep "in sync"
+by committing it - it does not exist until built. `scripts/proxmox-build.sh` and the manual steps in
+`INSTALL.md` both build it fresh (`npm install` in `web/`, then `scripts/build-web-panel.sh`) before
+publishing it, every time. **Editing the web copy directly gets silently reverted while the buster
+still advances**, so browsers cache the old script under a new URL - build from `web/src/`, never
+hand-patch the output.
 
 **Never reach for a global that "should" exist.** `window.playbackManager` does not exist in
 jellyfin-web 12.1; the only file in the whole web tree naming it was this script. Live apply silently

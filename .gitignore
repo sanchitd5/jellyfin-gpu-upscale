@@ -15,6 +15,10 @@ shaders/Anime4K_*.glsl
 # web build tooling (npm install; package-lock.json IS checked in)
 web/node_modules/
 
+# web/gpu-upscale.js is a BUILD OUTPUT (esbuild, from web/src/); rebuild with
+# scripts/build-web-panel.sh, never hand-edit or commit it
+web/gpu-upscale.js
+
 # local
 .DS_Store
 *.swp

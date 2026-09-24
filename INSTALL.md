@@ -117,7 +117,11 @@ sudo mkdir -p /usr/lib/jellyfin-gpuupscale
 sudo cp out-patcher/Jellyfin.Plugin.GpuUpscale.Patcher.dll out-patcher/0Harmony.dll \
         /usr/lib/jellyfin-gpuupscale/
 
-# the client script — this copy is CANONICAL
+# the client script — web/gpu-upscale.js is a BUILD OUTPUT, not checked in; build it first
+# (needs Node.js/npm — see web/package.json — installed once with `npm install` in web/)
+(cd web && npm install --no-audit --no-fund)
+./scripts/build-web-panel.sh
+# this copy is CANONICAL
 sudo cp web/gpu-upscale.js /usr/lib/jellyfin-gpuupscale/gpu-upscale.js
 
 sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/GpuUpscale_$V

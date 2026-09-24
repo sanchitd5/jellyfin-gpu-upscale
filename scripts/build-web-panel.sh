@@ -14,8 +14,10 @@
 # Usage: scripts/build-web-panel.sh
 #   Regenerates web/gpu-upscale.js from web/src/bootstrap.js and everything it imports. Does NOT
 #   touch VERSION/the cache-buster in scripts/jellyfin-gpuupscale-webinject and does NOT publish
-#   or copy the output anywhere - that stays a separate, explicit step. Commit the rebuilt
-#   web/gpu-upscale.js like any other generated-but-checked-in artifact.
+#   or copy the output anywhere - that stays a separate, explicit step. web/gpu-upscale.js is
+#   gitignored, NOT committed: run this script (after `npm install` in web/, once per build
+#   machine) wherever the output is actually needed - scripts/proxmox-build.sh and INSTALL.md's
+#   manual steps both do this before publishing.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

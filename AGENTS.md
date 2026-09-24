@@ -25,7 +25,9 @@ Layout:
 src/                    plugin assembly (loads into Jellyfin's collectible ALC)
 src/patcher/            patcher assembly (loads into the DEFAULT ALC, this is where Harmony lives)
 src/Configuration/      settings class + the dashboard page
-web/gpu-upscale.js      injected browser script: the Enhance panel + request marking
+web/src/                real ES modules (source); web/gpu-upscale.js is the BUILT, gitignored
+                        bundle of it (esbuild, scripts/build-web-panel.sh) - the injected browser
+                        script: the Enhance panel + request marking
 ffmpeg/vf_*.c           the five custom filters, plus their build patches and gen_perm.py
 shim/                   standalone ffmpeg wrapper, the no-Harmony fallback
 shaders/                CAS shaders (ours, superseded) + the RCAS derivation script
