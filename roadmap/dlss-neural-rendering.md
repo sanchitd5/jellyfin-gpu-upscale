@@ -150,6 +150,70 @@ pattern for getting *any* Windows-only NGX DLL running on Linux at all, decouple
 feature it hosts. That's real prior art regardless of feature 18's own licensing wall, and could
 matter for a future Windows-only NVIDIA DLL this project wants on Linux without a native `.so`.
 
+### The caller-identity mechanism, confirmed from source, and a real breakthrough on `0xBAD0000B`
+
+Read in full: `helper/main.cpp` (3013 lines) and `core/ngx_snippet.{h,cpp}`, which `main.cpp`'s own
+header comment says are "Ported from `standalone_runner/main.cpp` (verified Feature-18 Vulkan
+sequence)". This **does** use a caller-identity spoof - the earlier read of this session got that
+wrong. It's just not a forwarder DLL; it's an **IAT hook**:
+
+> `core/ngx_snippet.cpp:17-18`: "Caller-identity spoof: IAT hook of `KERNEL32!GetModuleFileNameW`
+> inside the snippet/core modules so they see `\"nvngx.dll\"` as the caller."
+
+`InstallCallerSpoof()` patches the Import Address Table of the just-`LoadLibraryExW`'d
+`nvngx_dlssnr.dll` (and, optionally, `nvngx.dll`, the driver core) so any call those modules make to
+`GetModuleFileNameW` on themselves returns the literal string `nvngx.dll`, regardless of the real
+caller - functionally the same defeat of NGX's `RtlPcToFileHeader`-based check as a forwarder DLL,
+implemented as a runtime patch instead of a separate binary. No forwarder file is shipped or needed.
+
+**This is a real, different path from `OptiScaler_DLSSNR`'s forwarder-free experiment, and it
+appears to get further.** `extracted_pipeline_notes.md` in the same repo documents the exact
+rejection codes both ways:
+
+```
+Core CreateFeature(18) -> 0xbad0000b (Core has no NR implementation).
+Direct Init_Ext without correct AppID/data dir/caller hook -> 0xbad00002.
+success is 0x1.
+```
+
+i.e. routing through the driver core (`OptiScaler_DLSSNR`'s approach) is independently confirmed
+here too to hit `0xbad0000b` - "Core has no NR implementation," a real, understood reason, not a
+mystery. But `DLSS5VKLayer` doesn't route through the core for the actual creation - it loads the
+**snippet DLL directly** (`LoadLibraryExW(...\\nvngx_dlssnr.dll...)`), spoofs its own caller check
+via the IAT hook, and calls `NVSDK_NGX_VULKAN_CreateFeature`/`EvaluateFeature` straight on the
+snippet. `NgxCreatePass()` (`core/ngx_snippet.cpp:525-563`) calls this, logs the raw result code,
+and on success sets `s.ready = true` and logs `"[ngx] STATUS: Feature=18 created=true
+path=vulkan-snippet"` - a real, apparently-working creation, not a dead end. (Evaluate-time
+correctness, i.e. whether the produced frame is actually good, wasn't independently re-verified
+this pass; the repo's own use of "verified" for this exact sequence in `standalone_runner`, plus
+the specific, named rejection codes and a passing branch, is real code-level evidence beyond
+"claims to work," not proof of visual correctness.)
+
+**Build/link**: `windows/meson.build` links `dlssnr_helper.exe` against nothing but `-lstdc++
+-lwinpthread` (static) - no `libnvsdk_ngx.a`, no NVIDIA SDK headers at all. All NGX types/enums are
+self-declared in this project's own headers, and every entry point is resolved at runtime via
+`GetProcAddress` on the loaded DLL - consistent with the earlier finding this session that the
+`NVSDK_NGX_VULKAN_*`/`NVSDK_NGX_CUDA_*` families are ordinary public exports, callable without any
+proprietary header/lib dependency.
+
+**Licence, precisely scoped**: repo root `LICENSE` is AGPL-3.0 (full GNU AGPLv3 text, not a
+placeholder). That covers `helper/`, `core/`, `layer_linux/src/` (excluding the vendored
+`layer_linux/src/dlssnr/` and `third_party/optiscaler/`), `common/`, `gui/` - i.e. everything that
+implements the IAT-spoof, the Vulkan snippet-loading sequence, and the shared-memory transport is
+real, clean, AGPL-3.0 code, independently written by bmitch87, not RenoDX-derived. Only the
+composition shader/layout remains the RenoDX-attribution-only material flagged above.
+
+**Net effect on this project's own open question**: the "does the caller check apply outside
+D3D/Vulkan" framing from before is now answered more precisely - the check applies regardless of
+API family (it's about caller identity, not which NGX entry-point family is used), but a snippet-
+direct IAT-hook spoof (this repo's approach) is a demonstrated way past BOTH the caller check AND
+the `0xbad0000b` core-routing wall, on the **Vulkan** family specifically. If this project ever
+revisits feature 18, `DLSS5VKLayer`'s snippet-direct-plus-IAT-hook approach is the one concrete,
+real precedent of getting past `CreateFeature(18)` - still using the same RenoDX-derived shader for
+the actual output composition, so the licensing wall is unchanged, but the *technical* wall
+(`0xbad0000b`) that stopped `OptiScaler_DLSSNR`'s own maintainers is not a dead end in general, just
+a dead end for the specific core-routing approach they tried.
+
 ## Not started
 
 No filter file exists. Nothing committed. This is parked here rather than pursued further while
