@@ -20,6 +20,7 @@ Nothing here is a commitment. TASK.md stays the source of truth for the active w
 | [gpu-only-filters.md](gpu-only-filters.md) | Moving the five existing filters (optix, ort, oidn, fsr2, dlss) off system RAM so frames stay on the GPU from decode to encode |
 | [gpu-only-dlss.md](gpu-only-dlss.md) | The detailed plan for the largest of those, the `vf_dlss` Vulkan rewrite |
 | [dlss-neural-rendering.md](dlss-neural-rendering.md) | NGX feature 18 ("DLSS5"/DLSSNR) - investigated, real CUDA-export finding, blocked on a caller-identity spoof and unclear third-party licensing |
+| [optiscaler-research.md](optiscaler-research.md) | Background on upstream OptiScaler itself (GPL-3.0, DLL-proxying, `IFeature`/`NVSDK_NGX_Parameter` architecture) - prior art only, nothing planned |
 | [plex.md](plex.md) | Serving the same filters to Plex, which has no plugin system |
 
 ## Overall order

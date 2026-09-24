@@ -26,17 +26,63 @@ newer/transformer-model tag exists there.
    `dlss-neural-rendering`, `OptiScaler/dlssnr/`). Every known working integration (`DLSS5-Autopilot`,
    `renodx-dlss5`, `OptiScaler_DLSSNR`) ships a forwarder DLL (`nvngx.dll_dlssnr.dll`, ~13KB, no
    NVIDIA code in it) whose only job is satisfying that path check.
-2. **The forwarder's own colour-composition code is unclearly licensed.** `OptiScaler_DLSSNR`'s own
-   docs credit it as "taken from RenoDX's DLSS 5 addon by clshortfuse" - closed-source, no published
-   licence, sourced from a community mirror. Not something to vendor here under this project's own
-   "NOTHING FROM NVIDIA IS IN THIS REPOSITORY... always properly licensed" rule
-   ([DLSS.md](../DLSS.md), [RTXDLPP.md](../RTXDLPP.md)).
+2. **The colour-composition shader (not the forwarder itself) is unclearly licensed.** The forwarder
+   DLL is `OptiScaler_DLSSNR`'s own original ~12KB shim, "contains no NVIDIA code," committed
+   prebuilt because it rebuilds almost never. The actual licensing problem is one layer up: the pass
+   that composes the model's output (`shaders/dlssnr/precompile/dlssnr.hlsl` - two-branch luminance
+   ratio, OkLab hue correction, AP1 clamp) is explicitly "taken from RenoDX's DLSS 5 addon by
+   clshortfuse... their design, reimplemented here with different names; that does not make it ours,"
+   with a mandatory `RenoDX_ATTRIBUTION.txt` before any build is distributed - attribution-only, not
+   a real license grant, still closed-source at the true source. (Not theirs, and fine: the OkLab
+   matrices are Bjorn Ottosson's published constants, and the AP1/sRGB/PQ transforms are standard
+   colour science - it's specifically the composition algorithm that's borrowed.) Not something to
+   vendor here under this project's own "NOTHING FROM NVIDIA IS IN THIS REPOSITORY... always properly
+   licensed" rule ([DLSS.md](../DLSS.md), [RTXDLPP.md](../RTXDLPP.md)).
 
 The forwarder itself (`nvngx.dll_dlssnr.dll`) was inspected read-only (export table only, nothing
 built against it): exports a small custom C API (`dlssnr_call_*`, `dlssnr_d3d11_*`, `dlssnr_vk_*`,
 `dlssnr_last_ratio_*`, `dlssnr_query_scaling_ratio`) wrapping the underlying NGX calls - notably it
 does carry a `dlssnr_vk_*` family, so the forwarder itself isn't D3D-only even though the wider
 OptiScaler host application (`IFeature_VkwDx12.cpp` etc.) is Windows/D3D12-centric.
+
+### What the caller check actually resolves against, and a real forwarder-free experiment
+
+Read directly from `OptiScaler_DLSSNR`'s own source/docs (`forwarder/README.md`,
+`FORWARDER_INVESTIGATION.md`), not inferred: the snippet calls `RtlPcToFileHeader` on its caller's
+return address and rejects anything whose path does not contain `nvngx.dll` - the driver core itself
+is `_nvngx.dll`, so it always passes its own check. A subtlety worth keeping if this is ever
+revisited: the forwarder function must not tail-call the snippet (`return snippetFn(...)` becomes a
+`jmp`, the forwarder's own stack frame disappears, and the snippet resolves the *forwarder's* caller
+instead) - the result has to go into a `volatile` local first to keep the frame alive.
+
+**There is a real forwarder-free path, already tried, that gets further than expected then hits a
+different wall.** Instead of calling the snippet directly, call the *driver core's*
+`NVSDK_NGX_D3D12_CreateFeature(18)` and let the core call the snippet - the snippet then sees the
+core (`_nvngx.dll`) as its caller and the identity check passes for free, no forwarder needed. This
+is reportedly how RenoDX itself avoids shipping a forwarder (it detours the core's own
+Create/Evaluate). `OptiScaler_DLSSNR`'s own `DlssNr_Proxy.cpp`/`.h` is exactly this experiment
+(`[DlssNr] UseProxy=true`, off by default).
+
+Result, per `FORWARDER_INVESTIGATION.md`'s evidence log: **the proxy path is confirmed past the
+caller check** (the core routes feature 18 at all, ruling out "unknown feature"), but fails later, at
+feature creation, with `0xBAD0000B FAIL_UnableToInitializeFeature` - a real, different, downstream
+failure, not the identity check. Disproven so far: a warm-up/retry race (20 attempts over ~1.3s, all
+`0xBAD0000B`, stable not transient) and an app-id/SDK-version mismatch (`Init_Ext` reinit is
+idempotent, returns the app's original ids unchanged). Untried, as of that log: whether the driver
+core's snippet *search path* (set once at the game's own `Init`, not addable after) actually contains
+wherever `nvngx_dlssnr.dll` sits; whether a discovery call
+(`GetFeatureRequirements`/`UpdateFeature`) has to precede `CreateFeature` for this feature
+specifically; whether `GetScratchBufferSize(18)` has to be satisfied first.
+
+**Why this matters here**: it means "does the caller check apply outside D3D/Vulkan" is the wrong
+question to keep asking in the abstract - the check is about *who the core thinks called it*, not
+which API family. A CUDA-only integration calling the CUDA entry points directly (not through any
+driver core acting on a game's behalf) would almost certainly hit the exact same
+`RtlPcToFileHeader`-based rejection the D3D/Vulkan snippet calls hit, unspoofed, for the same reason
+- there is no "CUDA is exempt" evidence anywhere in this investigation, only "routing through the
+core instead of the snippet skips it, then something else stops you." That downstream blocker
+(`0xBAD0000B`) is real, general, and still open even in OptiScaler's own maintained fork - not a
+licensing problem, a genuine unsolved integration bug three plausible causes deep.
 
 ## What's actually promising, not yet tested
 
@@ -56,22 +102,27 @@ Same shape already proven callable via plain `dlopen`/`dlsym` for the older SR r
 (`libnvidia-ngx-dlss.so.310.9.1`, feature 1) - see [gpu-only-dlss.md](gpu-only-dlss.md)'s caveat,
 now with real counter-evidence that the CUDA family is public API, not D3D/Vulkan-only.
 
-Two open questions, genuinely untested:
+Two open questions, genuinely untested - read against the forwarder-free-experiment finding above,
+the more useful framing is no longer "is CUDA exempt from the check" (nothing suggests it would be)
+but "does routing through the driver core (which passes its own check for free) reach a CUDA feature
+without a forwarder, and does that hit the same `0xBAD0000B`-class wall or a different one":
 
-1. **Does the caller-identity spoof even apply to the CUDA entry points**, or only to how the
-   D3D/Vulkan paths get authorized for game engines? Nobody has tried calling
-   `NVSDK_NGX_CUDA_CreateFeature` for feature 18 directly, unspoofed, and checked whether it's
-   refused.
+1. Has anyone tried calling `NVSDK_NGX_CUDA_CreateFeature` for feature 18 - either directly (almost
+   certainly rejected, same `RtlPcToFileHeader` check, no evidence CUDA is special-cased) or via
+   whatever the CUDA family's equivalent of "route through the core" would be, if one exists?
+   Untested either way.
 2. `~/dev/rtx-video-re`'s `loader_ngx` already runs a *different* NGX snippet DLL
    (`nvngx_dlisr.dll`, feature `ImageSignalProcessing`) live on Linux - maps it, runs `DllMain` to
    completion, gets a real value back from `NVSDK_NGX_GetSnippetVersion`. Same harness, untested
    against `nvngx_dlssnr.dll`'s CUDA path.
 
-If the CUDA path doesn't need the spoof, this becomes a real, cleanly-licensed filter (the DLL
-itself is a legitimate NVIDIA driver artifact this project is licensed to use, same basis as
-`nvdlppx.dll`) built the same way `oidn`/`optix`/`ort`/`fsr2` are - no forwarder, no third-party
-RenoDX code, no spoofing. If it does need the spoof, this stays blocked on the same licensing
-problem as every third-party DLSSNR integration found so far.
+If a forwarder-free route into the CUDA path exists and clears whatever `0xBAD0000B`'s real cause
+turns out to be, this becomes a real, cleanly-licensed filter (the DLL itself is a legitimate
+NVIDIA driver artifact this project is licensed to use, same basis as `nvdlppx.dll`) built the same
+way `oidn`/`optix`/`ort`/`fsr2` are - no forwarder, no third-party RenoDX shader. Realistically,
+though, this project would still need to solve the exact same unsolved initialization failure
+`OptiScaler_DLSSNR`'s own maintainers have not yet solved in their more mature, more-tested
+codebase - not a smaller problem than theirs, the same one from a different entry point.
 
 ## Not started
 
