@@ -1,0 +1,36 @@
+--- a/libavfilter/vf_hwmap.c
++++ b/libavfilter/vf_hwmap.c
+@@ -323,13 +323,32 @@
+         goto fail;
+     }
+ 
+-    map->format = outlink->format;
+     map->hw_frames_ctx = av_buffer_ref(ctx->hwframes_ref);
+     if (!map->hw_frames_ctx) {
+         err = AVERROR(ENOMEM);
+         goto fail;
+     }
+ 
++    /* Use ctx->hwframes_ref's own format, not outlink->format, for this frame.
++     * For a plain single hwmap these already agree. For a *chained*
++     * hwmap=derive_device=X feeding a second hwmap=derive_device=Y, they can
++     * permanently disagree: outlink->format is set once by format negotiation
++     * before any real hw_frames_ctx exists for this link and never revisited,
++     * while ctx->hwframes_ref (this filter's own derived frames context, built
++     * fresh in hwmap_config_output above) is later corrected to the frames it
++     * actually holds by hwcontext_vulkan.c's vulkan_get_buffer() the first time
++     * a real buffer is allocated. Using outlink->format here reconstructs a
++     * frame whose ->format field goes stale again on every subsequent call,
++     * so it agrees with the derived context's corrected format for exactly one
++     * frame and then permanently disagrees with it -- av_hwframe_map()'s own
++     * format-agreement check (libavutil/hwcontext.c) then rejects every frame
++     * after the first with ENOSYS. Reading the format directly from this
++     * frame's own hw_frames_ctx keeps the two fields tied to the same source
++     * of truth on every call, for both this filter's own map_to/map_from and
++     * whatever the next hwmap in a chain reads on this frame's format field
++     * (see livetestbox.md). */
++    map->format = ((AVHWFramesContext *)ctx->hwframes_ref->data)->format;
++
+     if (ctx->reverse && !input->hw_frames_ctx) {
+         // If we mapped backwards from hardware to software, we need
+         // to attach the hardware frame context to the input frame to

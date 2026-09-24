@@ -1,6 +1,36 @@
---- a/libavutil/hwcontext_vulkan.c	2026-09-24 19:00:00
-+++ b/libavutil/hwcontext_vulkan.c	2026-09-24 19:05:20
-@@ -4084,6 +4084,37 @@
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -3206,6 +3206,20 @@
+ 
+ static int vulkan_get_buffer(AVHWFramesContext *hwfc, AVFrame *frame)
+ {
++    /* A frames context this project derives INTO Vulkan (hwmap=derive_device=vulkan)
++     * can have hwfc->format baked in wrong at construction: av_hwframe_ctx_create_derived()
++     * sets it from the calling outlink's format field (libavfilter/vf_hwmap.c's
++     * config_output), and for a chained hwmap=derive_device=vulkan feeding a second
++     * hwmap=derive_device=cuda, that field still reads the upstream (CUDA) format at the
++     * one-time static-config moment config_output runs at -- forcing it there was tried
++     * and breaks that same config_output's own inlink/hwfc format-agreement check for the
++     * *next* hwmap in the chain, which reads this field at that same early moment and
++     * legitimately expects it to still match. This frame, unlike hwfc->format, is always
++     * really AV_PIX_FMT_VULKAN (set two lines up) -- correcting hwfc->format here, on every
++     * real buffer allocation rather than at construction, lands strictly after all static
++     * config has already run and strictly before any frame is actually mapped, so it fixes
++     * av_hwframe_map()'s later format-agreement check (which needs the true, current value)
++     * without disturbing the construction-time one (see livetestbox.md). */
+     frame->buf[0] = av_buffer_pool_get(hwfc->pool);
+     if (!frame->buf[0])
+         return AVERROR(ENOMEM);
+@@ -3215,6 +3229,8 @@
+     frame->width   = hwfc->width;
+     frame->height  = hwfc->height;
+ 
++    hwfc->format = AV_PIX_FMT_VULKAN;
++
+     return 0;
+ }
+ 
+@@ -4089,6 +4105,37 @@
          else
              return AVERROR(ENOSYS);
  #endif
@@ -38,7 +68,7 @@
      default:
          return AVERROR(ENOSYS);
      }
-@@ -4896,6 +4927,25 @@
+@@ -4911,6 +4958,48 @@
  static int vulkan_frames_derive_to(AVHWFramesContext *dst_fc,
                                     AVHWFramesContext *src_fc, int flags)
  {
@@ -60,7 +90,30 @@
 +    if (src_fc->device_ctx->type == AV_HWDEVICE_TYPE_CUDA) {
 +        AVVulkanFramesContext *vkfc = dst_fc->hwctx;
 +        vkfc->flags |= AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
++
++        /* This pool's frames are real, independent device-to-device copies
++         * (vulkan_transfer_data_from_cuda), never true zero-copy views/aliases of
++         * the source CUDA frame -- unlike DRM_PRIME/VAAPI derivations, which this
++         * same hook also serves and where source_frames legitimately backs a real
++         * unmap-to-original-frame shortcut. av_hwframe_ctx_create_derived()
++         * unconditionally sets dsti->source_frames = ref(source_frame_ctx) right
++         * before calling this hook, on that view/alias assumption -- true for
++         * DRM/VAAPI, false here. Confirmed by a real gdb backtrace: chaining a
++         * second hwmap=derive_device=cuda after this one segfaults in
++         * av_buffer_ref() on a garbage pointer, because av_hwframe_ctx_create_derived()'s
++         * own "this is actually an unmapping" fast path (hwcontext.c) sees this
++         * pool's source_frames chain back to a frames context whose device_ctx
++         * identity-matches the second hwmap's freshly-derived CUDA device (both are
++         * the same physical GPU via primary-context retain), hands back a bare ref to
++         * that original CUDA frames context, and then av_hwframe_map()'s matching
++         * "is this an unmap" check (hwcontext.c) reads src->buf[0]->data as an
++         * HWMapDescriptor* -- but our frames were never wrapped via
++         * ff_hwframe_map_create(), so buf[0] is a real Vulkan-backed AVBufferRef, and
++         * the misread crashes. Clearing source_frames here removes the false premise
++         * at its root: without it, neither shortcut can match, and a later hwmap back
++         * to CUDA correctly takes vulkan_map_from()'s real CUDA case (0006) instead. */
++        av_buffer_unref(&ffhwframesctx(dst_fc)->source_frames);
 +    }
      return vulkan_frames_init(dst_fc);
  }
-
+ 

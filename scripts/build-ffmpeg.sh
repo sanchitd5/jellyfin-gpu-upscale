@@ -439,6 +439,7 @@ patch -p1 < "$HERE/ffmpeg/0006-vulkan-to-cuda-hwmap.patch"
 # Vulkan's own .map_to, which only had VAAPI/DRM_PRIME cases before this patch. Same GPU-to-GPU
 # cuMemcpy2DAsync reasoning as 0006, not a true zero-copy map, no host round trip.
 patch -p1 < "$HERE/ffmpeg/0007-cuda-to-vulkan-hwmap.patch"
+patch -p1 < "$HERE/ffmpeg/0008-hwmap-chain-format.patch"
 
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
@@ -562,9 +563,26 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
     EXTRA_LIBS="$EXTRA_LIBS -ldl -lpthread"
 fi
 
+# ccache, if present, is opt-out via NO_CCACHE=1 rather than opt-in: this script always
+# re-downloads and re-extracts a fresh ffmpeg-8.1.2.tar.xz per run (see below), so the source
+# tree is never actually "the same files" from one run to the next by mtime or path -- but
+# ccache keys on preprocessed content + flags, not on file identity, so an unchanged upstream
+# file (the overwhelming majority of this tree; only the project's own patched files and
+# whatever you're actively iterating on actually differ run to run) is still a cache hit even
+# from a brand new extraction. This is what actually shortens the debug loop for this project:
+# a full rebuild here is otherwise ~15-20 minutes dominated by libavcodec/libavfilter's
+# thousands of unrelated .c files recompiling from scratch every single time. `apt install
+# ccache` once per build machine; nothing else to configure.
+CC=gcc
+if [[ "${NO_CCACHE:-0}" != "1" ]] && command -v ccache >/dev/null 2>&1; then
+    CC="ccache gcc"
+    say "ccache found -- compiler invocations will be cached (NO_CCACHE=1 to disable)"
+fi
+
 say "configure"
 PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}" ./configure \
     --prefix="$PREFIX" \
+    --cc="$CC" \
     --disable-doc --disable-htmlpages --disable-manpages \
     --enable-gpl --enable-version3 \
     --enable-vulkan --enable-libplacebo --enable-libshaderc --enable-libx264 \
