@@ -386,6 +386,39 @@ dashboard setting with no client surface, as today.
 - **Live re-render**: the consequence note is derived from `shownPrefs()` and the probe, not from
   the record, so it renders synchronously with the pick and does not flicker on the 3 s refresh.
 
+### 4.5 Stop rules
+
+Named explicitly, consolidating rules scattered across sections 3-4 above, because "when does the
+panel refuse to proceed" is exactly the kind of thing that erodes silently across small edits if
+it only exists as scattered prose. Every future change to the panel should be checked against this
+list before shipping.
+
+1. **Never show an impossible combination as available.** Picking a CUDA-native `neural` level
+   (`vsr-rtcuda`, `dlpp-1..4`) must mark every axis it forces off (section 3.1's list) as
+   `gpuup-inert` immediately, via `CONFLICTS`, exact-id match only, never a prefix match (a loose
+   match on `vsr` would also catch the retired Maxine placeholder -- see section 3.6/the removed
+   entry). The reverse direction holds too: picking any of those axes while a CUDA-native level is
+   active must mark the neural row itself as the thing that's about to change, not leave the user
+   guessing which side gave way.
+2. **Never send a change the server didn't actually honor.** `wireParams()` reflects only real,
+   server-confirmed state. The record (section 3.5) is the source of truth for what applied; the
+   client's own optimistic state is never substituted for it in what gets displayed as "current."
+3. **Never live-apply when there's nothing to renegotiate.** Direct play has no live stream to
+   update. A neural-only change takes the same `applyLive` -> re-negotiate -> replay-at-position
+   path as every other axis (section 4.4); this must hold for the CUDA-native levels specifically,
+   not just be assumed to inherit it, per the **VERIFY** note in 4.4.
+4. **Never let a new element create a new scroll surface.** Anything added to the panel stays
+   inside `#gpuup-panel`, whose wheel/touch listeners already stop propagation to the player's
+   volume control (section 4.4). This is a regression risk on every future addition, not a
+   one-time fix.
+5. **Never hardcode a name, a level's behavior, or DEGRADED wording client-side.** All of it comes
+   from the probe (section 5), every time, including for levels added after this document. If the
+   probe hasn't supplied a string for something, show nothing rather than inventing text.
+6. **Never bump `VERSION` in the injector ahead of the matching server change going live**, and
+   never publish `gpu-upscale.js` to the live web root before the server-side change it depends on
+   is actually deployed -- a stale script serves the OLD behavior under a NEW cache-busted URL,
+   which reads as nothing changed rather than as a rollback, and is worse than either.
+
 ---
 
 ## 5. Server-side versus client-side wording
