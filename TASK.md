@@ -2827,6 +2827,54 @@ pre-generated `gu_optix_nv12_rgbf32_ptx.h`), `ffmpeg/vf_optix.c`, `ffmpeg/vf_dlp
 (`compile_cuda_to_header`, clang-18 prereq checks). `RTXDLPP.md`, `RTXVSR.md`,
 `roadmap/gpu-only-filters.md` updated with the same fix summary.
 
+### Rebuilt and verified on the PRODUCTION binary, 2026-09-24 (deploy agent, resolves the item above)
+
+The scratch-verified fix above is now built into the held production binary and live. Sequence:
+checked out CT114's `/opt/jellyfin-gpu-upscale` to this commit (`634c384`), backed up the running
+`/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg` to a fresh `.prev` (again, overwriting the earlier `.prev`
+from the pre-fix deploy), rebuilt with the same flags as the earlier production deploy
+(`WITH_OIDN=1 WITH_OPTIX=1 WITH_ORT=1 WITH_FSR2=1 WITH_DLSS=1 WITH_RTXDLPP=1 WITH_RTXVSR=1`).
+`clang-18` was already present on CT114 (installed by the earlier agent's fix work); no new
+prerequisite needed. `-filters` confirmed all 7 present in the fresh binary.
+
+A real, independent live session (an automated/admin transcode of `BushyBarb_Stripchat...mkv`,
+genuinely 8-bit `yuv420p`) happened to be active while `make install` ran. Not caused by this
+build and not disturbed by it: GNU `install` unlinks the destination before writing rather than
+truncating in place, so the already-running process (holding the old binary's inode open via its
+own exec/mmap) kept running unaffected and exited cleanly on its own; only new invocations after
+the swap picked up the new binary. Caught after the fact by a live-session check that should have
+run immediately before kicking off this second build round and didn't -- noting the gap rather
+than glossing over it, since the check existed for exactly this. That same real traffic
+incidentally exercised the full `optix=mode=temporal,dlpp_rtcuda=level=4,vsr_rtcuda` combination
+against genuinely 8-bit content on the fresh binary and completed cleanly (218 frames muxed,
+clean stop). A couple of `FFmpeg exited with code 234` events appeared during rapid re-seeks
+around the same window, both before and after the swap, but the identical filter combination
+succeeded on the very next retry with the same parameters -- read as a transient GPU-context
+handoff race between rapidly cycling ffmpeg processes during fast seeking, not a deterministic
+defect in the chain, though this was not root-caused further.
+
+Own verification, real library content, read-only extraction, GPU idle at the time:
+- 8-bit regression: `-hwaccel cuda -hwaccel_output_format cuda` direct decode of the same 8-bit
+  `BushyBarb` clip through `optix=mode=ldr,dlpp_rtcuda=level=1,vsr_rtcuda=w=3840:h=2160` ->
+  `hevc_nvenc`: exit 0, `ffprobe` confirms 3840x2160 hevc, 90 frames.
+- p010le, the actual new case, **no software downconversion this time** (unlike the pre-fix
+  deploy's smoke test, which sidestepped the bug by force-converting to nv12 before these filters
+  ever saw it): `-hwaccel cuda -hwaccel_output_format cuda` direct decode of `Rick and Morty S08E06`
+  (`yuv420p10le` -> real `p010le` hw frames) through the same three-filter chain: exit 0, 3840x2160
+  hevc, 72 frames.
+- p010le + `optix=mode=temporal` (the NVOFA/`p010_smooth_luma_dev` path, not exercised by the ldr
+  test above): same source, `optix=mode=temporal,dlpp_rtcuda=level=4,vsr_rtcuda=w=3840:h=2160`:
+  exit 0, 3840x2160 hevc, 72 frames.
+
+No plugin/patcher/client changes were needed for this fix (ffmpeg source + build script only), so
+no restart was required or performed -- the shim re-probes the binary per invocation and a binary
+swap goes live immediately (AGENTS.md). Confirmed live and idle afterward: `systemctl is-active
+jellyfin` -> `active`, no stray ffmpeg processes, GPU 0%. The "known, accepted, live limitation"
+recorded in the production-deploy section above and in `INTEGRATION_DESIGN.md`/
+`WEB_PANEL_DESIGN.md` is superseded by this entry -- p010le/10-bit content through
+optix/dlpp_rtcuda/vsr_rtcuda is no longer a known gap on this box, verified against the real
+production binary, not just a scratch build.
+
 ## Runtime filter control (zmq/sendcmd) as an A/B-swap alternative (2026-09-24, `.agent-briefs/runtime-filter-control.md`)
 
 Design-only pass, no CT114 restart/deploy/config change (a concurrent build was found running on
