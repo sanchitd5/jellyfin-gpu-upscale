@@ -124,6 +124,32 @@ though, this project would still need to solve the exact same unsolved initializ
 `OptiScaler_DLSSNR`'s own maintainers have not yet solved in their more mature, more-tested
 codebase - not a smaller problem than theirs, the same one from a different entry point.
 
+## `DLSS5VKLayer` (`bmitch87/DLSS5VKLayer`) - a real Linux transport, same licensed core underneath
+
+A Linux Vulkan implicit layer plus a helper process (`dlssnr_helper.exe`, cross-built with
+clang/mingw64, no Windows machine needed) that runs the real `nvngx_dlssnr.dll` under Wine/Proton,
+bridging frames across the process boundary via shared memory and `VK_EXT_external_memory_dma_buf`
+zero-copy where available. AGPL-3.0, experimental ("for local testing and research"), 32 commits,
+113 stars at the time of this check. Does not redistribute NVIDIA files - same "user must supply"
+convention this project already follows.
+
+**Checked directly against the real source (`layer_linux/src/dlssnr/`), not trusted from a
+summary**: this is not independent, cleanly-licensed code. It vendors `OptiScaler_DLSSNR` as
+`third_party/optiscaler/` - same `DlssNr_Menu.cpp`/`DlssNr_Common.h` naming, same "reversible
+proxy" concept as `OptiScaler_DLSSNR`'s own `FORWARDER_INVESTIGATION.md`, and a `dlssnr.hlsl`
+that's a near-identical superset of `OptiScaler_DLSSNR`'s own shader (a few added constants for
+HDR proxy/transfer), pointing at the same `third_party/optiscaler/RenoDX_ATTRIBUTION.txt`. The
+AGPL-3.0 licence covers bmitch87's own layer/helper/transport code, not this vendored shader -
+same RenoDX-derived, attribution-only situation as before, same likely caller-identity spoof and
+`0xBAD0000B`-class wall inherited from the code it wraps (not independently re-verified this
+session, but nothing in the source suggests it avoided that problem, only that it didn't need to
+solve the *separate* problem of running the DLL on Linux at all).
+
+**What's genuinely new and reusable here**: the Wine-hosted-helper-plus-zero-copy-transport
+pattern for getting *any* Windows-only NGX DLL running on Linux at all, decoupled from whichever
+feature it hosts. That's real prior art regardless of feature 18's own licensing wall, and could
+matter for a future Windows-only NVIDIA DLL this project wants on Linux without a native `.so`.
+
 ## Not started
 
 No filter file exists. Nothing committed. This is parked here rather than pursued further while
