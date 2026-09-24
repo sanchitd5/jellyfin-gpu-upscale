@@ -19,6 +19,7 @@ Nothing here is a commitment. TASK.md stays the source of truth for the active w
 | [driver-features.md](driver-features.md) | What the driver inspection has unlocked, the new features it enables (RTX VSR, the bypass resampler, TrueHDR, DeepDVC, DLPP, DLISR, frame interpolation), shared infrastructure, order |
 | [gpu-only-filters.md](gpu-only-filters.md) | Moving the five existing filters (optix, ort, oidn, fsr2, dlss) off system RAM so frames stay on the GPU from decode to encode |
 | [gpu-only-dlss.md](gpu-only-dlss.md) | The detailed plan for the largest of those, the `vf_dlss` Vulkan rewrite |
+| [dlss-neural-rendering.md](dlss-neural-rendering.md) | NGX feature 18 ("DLSS5"/DLSSNR) - investigated, real CUDA-export finding, blocked on a caller-identity spoof and unclear third-party licensing |
 | [plex.md](plex.md) | Serving the same filters to Plex, which has no plugin system |
 
 ## Overall order
