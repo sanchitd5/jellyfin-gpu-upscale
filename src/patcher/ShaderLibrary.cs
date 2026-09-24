@@ -1775,9 +1775,39 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             //     (1.5x 43.31/0.98578 vs 43.21/0.98574; 2.0x 40.74/0.98074 vs 40.38/0.97937), and
             //     its detail energy landed at 4.0065 against CAS-medium's 4.9302 for a ground
             //     truth of 3.5179. So the pairing is allowed for every SR family.
+            //
+            // ONE THING FILE ORDER DOES DECIDE: a shader ending in a "!TEXTURE" block (NVScaler's
+            // coef_scaler/coef_usm LUTs, raw hex with no directive after it) must be the LAST file
+            // in the concatenation. libplacebo's mpv-shader parser reads a TEXTURE body as
+            // consecutive non-directive lines; NVScaler.glsl's own hex tail is safe alone because
+            // nothing follows it, but appending another file straight after (as this used to do
+            // unconditionally) hands the parser that file's opening comment as more "hex" and it
+            // fails outright: "Error while parsing TEXTURE body: must be a valid hexadecimal
+            // sequence!" - reproduced 2026-09-24, nvscaler+ssimsuperres+krigbilateral, FFmpeg exit
+            // 234 on every attempt. Reordering is safe precisely because of the fact this comment
+            // already establishes: hook point decides running order, not position in the file.
+            var ordered = new List<string>(files.Count);
+            string textureFile = null;
+            foreach (string file in files)
+            {
+                if (textureFile == null && File.ReadAllText(file).Contains("!TEXTURE"))
+                {
+                    textureFile = file;
+                }
+                else
+                {
+                    ordered.Add(file);
+                }
+            }
+
+            if (textureFile != null)
+            {
+                ordered.Add(textureFile);
+            }
+
             string tmp = composed + "." + Guid.NewGuid().ToString("N") + ".tmp";
             var sb = new StringBuilder();
-            foreach (string file in files)
+            foreach (string file in ordered)
             {
                 if (sb.Length > 0)
                 {
