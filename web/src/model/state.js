@@ -115,6 +115,14 @@ export var state = {
     // 'unset' (no opinion - the server's own defaults stand), 'off' (an opinion: play it as
     // it is), 'custom' (the Advanced controls own it), or a stage recipe object.
     stage: 'unset',
+    // Alternates true/false on every live-apply attempt. setMaxStreamingBitrate is jellyfin-web's
+    // own bitrate-change path, and it is reasonable for it to no-op when handed the same value
+    // it already has in force - a filter-only change hands back that same value on purpose, since
+    // nothing about the bitrate is meant to change. So the value sent is nudged by 1 (up one
+    // attempt, back down the next) to guarantee it differs from what jellyfin-web already holds,
+    // which is what actually triggers changeStream() rather than a same-value call that a naive
+    // equality guard would drop silently. 1 bps either side of a real bitrate is imperceptible.
+    bitrateNudgeUp: true,
     prefs: Object.assign({}, DEFAULT_PREFS)
 };
 

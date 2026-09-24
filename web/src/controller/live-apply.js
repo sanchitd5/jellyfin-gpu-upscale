@@ -241,8 +241,16 @@ function doApply() {
 
         state.applying = APPLY_LABEL;
         repaintPanel();
-        pm.setMaxStreamingBitrate({ enableAutomaticBitrateDetection: false, maxBitrate: current });
-        log('asked the player to renegotiate at the current position');
+        // Handing back the exact value already in force risks jellyfin-web treating this as a
+        // no-op (a bitrate-change path with nothing to change is a reasonable place for an
+        // equality guard to live, and we do not control that code). Nudge by 1 bps, alternating
+        // direction each call, so the value always differs from what jellyfin-web already holds
+        // and changeStream() actually runs - imperceptible to playback, but guarantees the
+        // re-negotiation this whole mechanism depends on is not silently dropped.
+        var nudged = state.bitrateNudgeUp ? current + 1 : Math.max(1, current - 1);
+        state.bitrateNudgeUp = !state.bitrateNudgeUp;
+        pm.setMaxStreamingBitrate({ enableAutomaticBitrateDetection: false, maxBitrate: nudged });
+        log('asked the player to renegotiate at the current position (nudged bitrate ' + current + ' -> ' + nudged + ')');
         watchApplied(previousId);
     } catch (err) {
         log('could not renegotiate; the change applies on the next playback', err);
