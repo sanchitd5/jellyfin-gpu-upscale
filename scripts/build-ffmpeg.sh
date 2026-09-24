@@ -500,6 +500,12 @@ patch -p1 < "$HERE/ffmpeg/0010-add-transpose-cuda-filter.patch"
 # hops misread the memory the same way, which is why exit-code and frame-count checks all passed.
 patch -p1 < "$HERE/ffmpeg/0011-vulkan-cuda-import-dedicated.patch"
 
+# 0012: experiment. CUDA->Vulkan frames come out scrambled at 1280x720 and 1920x1080 but are exact
+# at 512x288, and the garbage differs from run to run - the signature of an ordering race, not a
+# layout mismatch. Make the CUDA copy complete before the semaphore is signalled, to see whether
+# the external semaphore is really ordering the two APIs.
+patch -p1 < "$HERE/ffmpeg/0012-vulkan-from-cuda-stream-sync.patch"
+
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/

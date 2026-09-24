@@ -1,0 +1,13 @@
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -4087,6 +4087,10 @@
+         if (err < 0)
+             goto fail;
+     }
++
++    err = CHECK_CU(cu->cuStreamSynchronize(cuda_dev->stream));
++    if (err < 0)
++        goto fail;
+ 
+     err = CHECK_CU(cu->cuSignalExternalSemaphoresAsync(dst_int->cu_sem, s_s_par,
+                                                        planes, cuda_dev->stream));
