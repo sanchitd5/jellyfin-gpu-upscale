@@ -277,8 +277,21 @@ export function replayHere() {
             log('replayHere: no currentTime method, starting from position 0');
         }
 
-        log('replayHere: calling pm.play({ ids: [' + id + '], startPositionTicks: ' + ticks + ' })');
-        pm.play({ ids: [id], startPositionTicks: ticks });
+        var serverId = item.ServerId || item.serverId;
+        log('replayHere: calling pm.play({ ids: [' + id + '], serverId: ' + serverId
+            + ', startPositionTicks: ' + ticks + ' })');
+        // serverId is required here: pm.play() only skips getItemsForPlayback() when `items`
+        // (not `ids`) is passed. Without it, jellyfin-web's async play() throws "serverId
+        // required!" before issuing any request - a rejected promise this call never awaits or
+        // catches, so it silently ate every replay on a direct-playing session: pm.play()
+        // rejected before getPlaybackInfo() ever ran, no new PlaybackInfo request was ever sent,
+        // and this function still reported success because it never looked at the promise.
+        var playResult = pm.play({ ids: [id], serverId: serverId, startPositionTicks: ticks });
+        if (playResult && typeof playResult.catch === 'function') {
+            playResult.catch(function (err) {
+                log('replayHere: pm.play() promise rejected', err);
+            });
+        }
         log('replayHere: end, true - pm.play() call returned (does not itself mean the player switched)');
         return true;
     } catch (err) {
