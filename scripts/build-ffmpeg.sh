@@ -506,6 +506,14 @@ patch -p1 < "$HERE/ffmpeg/0011-vulkan-cuda-import-dedicated.patch"
 # the external semaphore is really ordering the two APIs.
 patch -p1 < "$HERE/ffmpeg/0012-vulkan-from-cuda-stream-sync.patch"
 
+# 0013: the real cause of the scrambled CUDA->Vulkan frames. try_export_flags() probed export
+# support with the combined multi-planar format, which NVIDIA does not offer for external memory,
+# while disable_multiplane makes the images R8/R8G8. The probe failed, the pool was created without
+# export capability, and vulkan_export_to_cuda() exported the memory anyway (found with the Vulkan
+# validation layer: VUID-VkMemoryGetFdInfoKHR-handleType-00671 on both directions). Vulkan->CUDA
+# happened to read correctly; CUDA->Vulkan did not, at sizes and planes that varied run to run.
+patch -p1 < "$HERE/ffmpeg/0013-vulkan-export-probe-real-format.patch"
+
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/
@@ -757,6 +765,15 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
     "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bvsr_rtcuda\b" \
         && echo "  vsr_rtcuda: present (registered - see RTXVSR.md for what's verified vs assumed)" \
         || die "vsr_rtcuda filter missing from the build"
+fi
+
+# Filters being present says nothing about pixels. The CUDA<->Vulkan bridge (0006-0012) once
+# passed every exit-code and frame-count check while returning scrambled frames, so a build whose
+# bridge corrupts is a failed build. BRIDGE_TEST=0 skips it, for building a binary that is known
+# to be broken in order to debug it; never for anything that gets deployed.
+if [[ "${BRIDGE_TEST:-1}" == "1" ]]; then
+    "$HERE/scripts/test-hwmap-bridge.sh" "$PREFIX/ffmpeg" \
+        || die "the CUDA<->Vulkan bridge returns corrupted frames (scripts/test-hwmap-bridge.sh); BRIDGE_TEST=0 skips this"
 fi
 
 cat <<EOF

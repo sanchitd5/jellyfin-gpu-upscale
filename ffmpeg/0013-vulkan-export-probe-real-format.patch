@@ -1,0 +1,17 @@
+--- a/libavutil/hwcontext_vulkan.c
++++ b/libavutil/hwcontext_vulkan.c
+@@ -2855,7 +2855,13 @@
+     VkPhysicalDeviceImageFormatInfo2 pinfo = {
+         .sType  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+         .pNext  = !exp ? NULL : &enext,
+-        .format = vk_find_format_entry(hwfc->sw_format)->vkf,
++        /* Ask about the format the images will really be created with. With multiplane
++         * disabled that is the per-plane fallback (R8/R8G8), not the combined
++         * multi-planar format, which NVIDIA does not offer for external memory: the probe
++         * failed, the pool was created without export capability, and
++         * vulkan_export_to_cuda() then exported memory that was never exportable. */
++        .format = hwctx->format[0] != VK_FORMAT_UNDEFINED ? hwctx->format[0] :
++                  vk_find_format_entry(hwfc->sw_format)->vkf,
+         .type   = VK_IMAGE_TYPE_2D,
+         .tiling = hwctx->tiling,
+         .usage  = hwctx->usage,

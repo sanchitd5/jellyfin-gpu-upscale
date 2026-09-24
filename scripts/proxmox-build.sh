@@ -115,8 +115,8 @@ if [ "$WITH_FFMPEG" = "1" ]; then
     # where it expects, and each WITH_* and SDK path here can be overridden from the environment.
     # build-ffmpeg.sh's own verify step `die`s on a missing filter, which under this script's
     # `set -e` would abort straight past the restore logic below and leave the broken binary
-    # installed - happened twice on this exact VSR task before this guard existed. `|| true`
-    # keeps control here so the checks after this always run against whatever got installed.
+    # installed - happened twice on this exact VSR task before this guard existed. Capturing the
+    # exit status keeps control here, and the restore logic below acts on it.
     # WITH_RTXDLPP/WITH_RTXVSR default on here too: this project only ever builds for an
     # NVIDIA CUDA target (see AGENTS.md), and both filters' prerequisites (the nvdlppx.dll/
     # nvaivpx.dll PE blobs, clang-18 w/ NVPTX) are ordinary standing requirements on that
@@ -134,7 +134,21 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         WITH_RTXDLPP="${WITH_RTXDLPP:-1}" \
         WITH_RTXVSR="${WITH_RTXVSR:-1}" \
         OPTIX_SDK="${OPTIX_SDK:-/root/gameupscale/optix-dev-8.1.0}" \
-        ./scripts/build-ffmpeg.sh || true
+        ./scripts/build-ffmpeg.sh || build_rc=$?
+
+    # `|| true` used to swallow this, so a build that bailed out (12G free needed, a held dpkg
+    # lock) left the old binary in place, the filter check below passed against it, and the script
+    # printed "Deployed" having built nothing. It also fails when build-ffmpeg.sh's own bridge
+    # pixel test (scripts/test-hwmap-bridge.sh) rejects the new binary, which is already installed
+    # by then, so the previous one has to come back.
+    if [ "${build_rc:-0}" -ne 0 ]; then
+        echo "==> FAILED: build-ffmpeg.sh exited $build_rc" >&2
+        if [ -f "$PATCHED_FFMPEG.prev" ]; then
+            mv "$PATCHED_FFMPEG.prev" "$PATCHED_FFMPEG"
+            echo "    restored the previous binary; nothing was deployed" >&2
+        fi
+        exit 1
+    fi
 
     "$PATCHED_FFMPEG" -hide_banner -version >/dev/null 2>&1 || {
         echo "==> FAILED: $PATCHED_FFMPEG will not run at all (check its library paths)" >&2
