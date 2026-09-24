@@ -492,6 +492,12 @@ patch -p1 < "$HERE/ffmpeg/0009-hwmap-query-formats.patch"
 # *_cuda filters already use, not hand-written PTX).
 patch -p1 < "$HERE/ffmpeg/0010-add-transpose-cuda-filter.patch"
 
+# 0014: 0010's kernel calls saturate_rintf(), and the compat CUDA runtime it lands on has no
+# rintf(); both arrived upstream before that PR merged but after n8.1.2, so with 0010 alone the
+# kernel does not compile. Verbatim from upstream master (LGPL): a 23-line helper block appended
+# to libavfilter/cuda/vector_helpers.cuh and one rintf line in compat/cuda/cuda_runtime.h.
+patch -p1 < "$HERE/ffmpeg/0014-cuda-vector-helpers-saturate-rintf.patch"
+
 # 0011: hwcontext_vulkan.c's export_mem_to_cuda() imported Vulkan memory into CUDA without
 # CUDA_EXTERNAL_MEMORY_DEDICATED even though alloc_bind_mem() allocates it as a dedicated
 # allocation on NVIDIA. CUDA's array view then disagrees with Vulkan's tiling: a CUDA->Vulkan
@@ -652,6 +658,20 @@ if [[ "${NO_CCACHE:-0}" != "1" ]] && command -v ccache >/dev/null 2>&1; then
     say "ccache found -- compiler invocations will be cached (NO_CCACHE=1 to disable)"
 fi
 
+# Every CUDA-kernel filter in FFmpeg (scale_cuda, transpose_cuda, thumbnail_cuda, ...) is gated on
+# cuda_nvcc or cuda_llvm, and this build had neither: only --enable-cuda, which gives
+# hwupload_cuda and nothing else. Jellyfin's own CUDA hwaccel chains emit transpose_cuda for a
+# rotated source, so those sessions died with "No such filter". cuda_llvm is meant to autodetect
+# but only looks for a binary named plain "clang"; this box has clang-18, so it never turned on.
+# The same clang already compiles this project's own kernels (see CLANG_CUDA above), and FFmpeg's
+# compat/cuda/cuda_runtime.h stands in for the CUDA SDK, so no toolkit is needed.
+CUDA_LLVM_FLAGS=()
+if [[ -n "$CLANG_CUDA" ]]; then
+    CUDA_LLVM_FLAGS=(--enable-cuda-llvm --nvcc="$CLANG_CUDA")
+else
+    echo "!! no clang found: transpose_cuda and the other CUDA-kernel filters will be missing" >&2
+fi
+
 say "configure"
 PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}" ./configure \
     --prefix="$PREFIX" \
@@ -660,6 +680,7 @@ PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
     --enable-gpl --enable-version3 \
     --enable-vulkan --enable-libplacebo --enable-libshaderc --enable-libx264 \
     --enable-ffnvcodec --enable-cuda --enable-cuvid --enable-nvdec --enable-nvenc \
+    "${CUDA_LLVM_FLAGS[@]}" \
     "${OIDN_FLAGS[@]}" "${OPTIX_FLAGS[@]}" "${ORT_FLAGS[@]}" "${GAME_FLAGS[@]}" "${VSR_FLAGS[@]}" \
     --extra-libs="$EXTRA_LIBS"
 
@@ -765,6 +786,12 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
     "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bvsr_rtcuda\b" \
         && echo "  vsr_rtcuda: present (registered - see RTXVSR.md for what's verified vs assumed)" \
         || die "vsr_rtcuda filter missing from the build"
+fi
+
+if [[ -n "$CLANG_CUDA" ]]; then
+    "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\btranspose_cuda\b" \
+        && echo "  transpose_cuda: present" \
+        || die "transpose_cuda filter missing from the build (--enable-cuda-llvm did not take effect)"
 fi
 
 # Filters being present says nothing about pixels. The CUDA<->Vulkan bridge (0006-0012) once
