@@ -38,7 +38,7 @@
      default:
          return AVERROR(ENOSYS);
      }
-@@ -4896,6 +4927,27 @@
+@@ -4896,6 +4927,25 @@
  static int vulkan_frames_derive_to(AVHWFramesContext *dst_fc,
                                     AVHWFramesContext *src_fc, int flags)
  {
@@ -57,10 +57,8 @@
 +     * A pool this project derives FROM Vulkan TO somewhere else (unaffected --
 +     * this hook only runs for derivation INTO Vulkan) or from any non-CUDA
 +     * source keeps the driver's normal default. */
-+    av_log(NULL, AV_LOG_ERROR, "GU_DEBUG2: derive_to src_type=%d dst_fc=%p\n", src_fc->device_ctx->type, dst_fc);
 +    if (src_fc->device_ctx->type == AV_HWDEVICE_TYPE_CUDA) {
 +        AVVulkanFramesContext *vkfc = dst_fc->hwctx;
-+        av_log(NULL, AV_LOG_ERROR, "GU_DEBUG2: setting DISABLE_MULTIPLANE on vkfc=%p\n", vkfc);
 +        vkfc->flags |= AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
 +    }
      return vulkan_frames_init(dst_fc);
