@@ -264,11 +264,14 @@ the fix already in place is to re-play the item at its position (project CLAUDE.
 `dlpp-1` or `vsr-rtcuda` while a file is direct-playing is exactly this scenario, no differently
 than choosing any other existing level — **as long as** the same re-play-at-position live-apply
 code path is what runs for the `neural` control's `applyLive` handling, which it already is (it's
-one shared mechanism, not per-axis). This should already be covered. **UNVERIFIED**: I did not
-find anything in the read files suggesting these two levels take a different live-apply route, but
-I have not driven a real playback session to confirm it — that would need the panel open during
-actual playback, which this task's rules kept out of scope (read-only on CT114, no live testing).
-Flagging as something to check when this ships, not asserting it is fine.
+one shared mechanism, not per-axis). **UPDATE (2026-09-24, `.agent-briefs/fix-panel-bugs.md`):
+confirmed by static code read, still not a live playback test.** `requestRestream()` is called
+generically by every control; `doApply()`/`directPlaying()`/`replayHere()` read only server/player
+state, never the axis that changed; and `anyEnhancement()` already iterates every `wireParams()`
+key including `neural` (gpu-upscale.js:775-777 documents this was fixed generally, not per-axis).
+No special-casing anywhere would exclude a neural-only pick. A real playback session on CT114 to
+confirm end to end is still outstanding - this task's hard limits (no restart, no plugin
+activation) kept that out of scope again this pass, same as before.
 
 ## 8. Concrete CONTROLS/LIVE_ROWS spec
 

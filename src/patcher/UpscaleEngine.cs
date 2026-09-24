@@ -1253,6 +1253,17 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     plan.DenoiseLevel = "off";
                     plan.DenoiseWantsHwFrames = false;
 
+                    // Deblock is a CPU pre-filter (ShaderLibrary.DeblockFilter), never routed
+                    // into cudaNodes by BuildChain's CUDA-native branch below, which returns only
+                    // CudaDenoiseNode + NeuralFilter. Left un-reset here, plan.DeblockApplied and
+                    // plan.DeblockLevel would still say "applied" in the session record while
+                    // BuildChain silently dropped the node from the command actually built - the
+                    // exact "rendered, stored, never sent" bug this project keeps hitting.
+                    plan.DeblockFilter = null;
+                    plan.DeblockApplied = false;
+                    plan.DeblockLevel = "off";
+                    plan.DeblockWantsHwFrames = false;
+
                     // The Vulkan-only stages this branch cannot reach: forced off here rather than
                     // silently dropped downstream, so the session record and BuildChain agree with
                     // each other about what actually ran.
@@ -1402,6 +1413,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 plan.Upscaler = ShaderLibrary.CanonicalUpscaler(Option(state, "kernel"))
                     ?? ShaderLibrary.CanonicalUpscaler(cfg.Upscaler)
                     ?? "ewa_lanczos";
+
+                // The scaling kernel belongs to the same libplacebo instance as deband, which the
+                // CUDA-native branch never builds (BuildChain returns early with only
+                // CudaDenoiseNode + NeuralFilter). Left as the resolved string here, Describe()
+                // would report a kernel choice - e.g. "ewa_lanczos" - that never actually ran,
+                // the same stale-"on" failure mode deband/kernel were flagged for in review.
+                if (plan.UsesCudaNeural)
+                {
+                    plan.Upscaler = null;
+                }
 
                 plan.ShaderPath = ShaderLibrary.Resolve(
                     cfg,

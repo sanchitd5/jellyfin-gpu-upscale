@@ -144,12 +144,13 @@
             // x4 10 fps (0.24x). NONE of them reaches realtime for one session, so every entry
             // says so in its own name. Not a ladder rung and never chosen for anyone.
             //
-            // 'vsr' (NVIDIA Maxine Video Super Resolution) is listed here ready to go, but the
-            // server's probe never actually reports it (ShaderLibrary.VsrOffered is false), so
-            // serverLevels()'s intersection at axisControls() always filters this entry back out -
-            // it never reaches a real viewer. NvVFX_Load hangs indefinitely rather than returning;
-            // see VSR.md. Do not remove the server-side gate to make this entry "work" - that would
-            // let a real session hang forever instead of degrading.
+            // NVIDIA Maxine Video Super Resolution ('vsr') is RETIRED as of VSR.md's banner
+            // (2026-09-23): the build flag is now WITH_MAXINE_VSR, gated behind
+            // MAXINE_VSR_UNRETIRE=1, and ShaderLibrary.VsrOffered is hardcoded false. No ceiling
+            // entry for it lives here any more - do not re-add one without first flipping the
+            // server-side gate deliberately (NvVFX_Load hangs indefinitely rather than returning;
+            // see VSR.md), and do not confuse it with the two CUDA-native levels below, which are
+            // live and unrelated.
             // Two CUDA-native levels also live on this axis: 'vsr-rtcuda' (RTX VSR bypass
             // resampler - a fast GPU resample, explicitly NOT a neural network, see RTXVSR.md)
             // and 'dlpp-1'..'dlpp-4' (RTX DLPP, DEGRADED: content-dependent, not a ladder, see
@@ -158,15 +159,14 @@
             // (gated on nvaivpx.dll/nvdlppx.dll being installed - see ShaderLibrary.RtxVsrOffered/
             // RtxDlppOffered) and their exact display wording, the same mechanism the `game`
             // control below already uses. Picking either turns off Detail/Refine/Chroma/Debanding
-            // for that session - see `neuralCudaBypass` in the session-record row wiring.
+            // for that session - see `CudaNeuralBypass` in the session-record row wiring.
             key: 'neural', label: 'Neural super-resolution', fallback: 'off', group: 'Detail',
             probeKey: 'Neural', labelsKey: 'NeuralLabels', fromProbe: true, costKey: 'neural',
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },
                 { id: 'realesr-anime-x4', name: 'Real-ESRGAN x4 anime (0.34x realtime - very slow)' },
-                { id: 'realesr-general-x4', name: 'Real-ESRGAN x4 general (0.24x realtime - slowest)' },
-                { id: 'vsr', name: 'NVIDIA Maxine Video Super Resolution (not yet working - see VSR.md)' }
+                { id: 'realesr-general-x4', name: 'Real-ESRGAN x4 general (0.24x realtime - slowest)' }
             ]
         },
         {
@@ -371,8 +371,17 @@
     // scale, which is the honest answer - these are not a dear option, they are a different order
     // of cost - and like the OIDN and OptiX entries they exist only so that a Custom selection is
     // costed rather than silently treated as free. No generated stage ever sets one.
+    // vsr-rtcuda and dlpp-1..4 are PROVISIONAL, same caveat as GAME_COST below: not measured on
+    // the same 960x540->1080p baseline as the realesr entries above, so the numbers are a ratio
+    // argument, not a like-for-like reading. RTXDLPP.md reports 113 fps at 1080p->4K against a
+    // 265 fps off baseline at the same target (RTXDLPP.md's own measurement, not the FPS table's
+    // 960x540 one), i.e. roughly 2.3x - cheap next to the realesr entries because it runs CUDA-
+    // native with no Vulkan/libplacebo stage, not because it does less work. All four dlpp levels
+    // get the same weight: nothing here measures a per-level cost difference. vsr-rtcuda is a
+    // resample, not a network, and costs less again.
     var NEURAL_COST = {
-        off: 1, 'realesr-anime-x2': 11, 'realesr-anime-x4': 18, 'realesr-general-x4': 27
+        off: 1, 'realesr-anime-x2': 11, 'realesr-anime-x4': 18, 'realesr-general-x4': 27,
+        'vsr-rtcuda': 2, 'dlpp-1': 3, 'dlpp-2': 3, 'dlpp-3': 3, 'dlpp-4': 3
     };
 
     // Game temporal upscalers, on the same scale as DENOISE_COST and NEURAL_COST. Measured
@@ -1721,7 +1730,68 @@
         return isOff(p.upscale) || !t || !t.length;
     }
 
+    // PROVISIONAL, literal-id list rather than a probe key (see WEB_PANEL_DESIGN.md section 3.2
+    // for the proposed NeuralCudaLevels probe key that should replace this): dlpp-1..4 and
+    // vsr-rtcuda run on UpscaleEngine's separate CUDA-native hwaccel branch (decode cuda ->
+    // [optix] -> the neural filter(s) -> NVENC), which never reaches libplacebo, so the server
+    // forces sr/refine/chroma/deblur/game/deband/kernel off for that session (UpscaleEngine.cs
+    // Decide, the plan.UsesCudaNeural branch). Exact match only, never a prefix test: the
+    // pre-existing Maxine placeholder id is the bare 'vsr', and a prefix match on 'vsr' would
+    // wrongly catch it too.
+    function neuralIsCudaNative(p) {
+        return ['vsr-rtcuda', 'dlpp-1', 'dlpp-2', 'dlpp-3', 'dlpp-4'].indexOf(p.neural) >= 0;
+    }
+
     var CONFLICTS = [
+        {
+            key: 'sr', when: neuralIsCudaNative,
+            why: function (p) {
+                return 'The ' + p.neural + ' level runs on the CUDA path, which has no Vulkan'
+                    + ' stage, so the server turns super-resolution off for the session.';
+            }
+        },
+        {
+            key: 'refine', when: neuralIsCudaNative,
+            why: function (p) {
+                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
+                    + ' post-scale refinement off for the session.';
+            }
+        },
+        {
+            key: 'chroma', when: neuralIsCudaNative,
+            why: function (p) {
+                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
+                    + ' chroma upscaling off for the session.';
+            }
+        },
+        {
+            key: 'deblur', when: neuralIsCudaNative,
+            why: function (p) {
+                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
+                    + ' unblur off for the session.';
+            }
+        },
+        {
+            key: 'game', when: neuralIsCudaNative,
+            why: function (p) {
+                return 'The ' + p.neural + ' level runs on the CUDA path, which has no Vulkan'
+                    + ' device, so the server turns the game upscaler off for the session.';
+            }
+        },
+        {
+            key: 'deband', when: neuralIsCudaNative,
+            why: function (p) {
+                return 'The ' + p.neural + ' level runs on the CUDA path, so the server turns'
+                    + ' debanding off for the session.';
+            }
+        },
+        {
+            key: 'kernel', when: neuralIsCudaNative,
+            why: function (p) {
+                return 'The ' + p.neural + ' level runs on the CUDA path, so the server never'
+                    + ' reaches the scaling kernel for the session.';
+            }
+        },
         {
             key: 'sr', when: function (p) { return gameOwnsOutputSize(p.game); },
             why: function (p) {
@@ -3200,7 +3270,7 @@
             return null;
         }
 
-        state.marked.push([e.upscale, e.deblur, e.denoise, e.sr].join('/'));
+        state.marked.push([e.upscale, e.deblur, e.denoise, e.sr, e.neural, e.game].join('/'));
         return JSON.stringify(info);
     }
 

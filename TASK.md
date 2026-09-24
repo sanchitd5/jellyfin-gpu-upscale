@@ -2605,6 +2605,23 @@ finding by using it, not by reading the diff. That rebuild is a real prerequisit
 to work live, is slow (`--with-ffmpeg`), and was out of scope for this session (the brief's hard
 limits stop short of the restart that would be needed to prove it end to end anyway).
 
+## Panel/engine bugs from the design pass, fixed (2026-09-24, `.agent-briefs/fix-panel-bugs.md`)
+
+Source-level fixes plus verification only, no build/deploy/restart (same hard limits as above).
+Four fixes from `WEB_PANEL_DESIGN.md` section 5/6: the stale `neuralCudaBypass` comment corrected
+to `CudaNeuralBypass`; `rewriteBody`'s debug `marked` log now includes `neural`/`game`; `COSTS`
+given provisional entries for `vsr-rtcuda`/`dlpp-1..4`; the retired Maxine `vsr` ceiling entry
+removed from the `neural` control. Two more, found while verifying the VERIFY list: `Decide()`
+never forced `plan.DeblockApplied`/`DeblockLevel` off on the CUDA-native branch even though
+`BuildChain` silently drops the deblock node there - the record would have said `DeblockApplied:
+true` for a pass that never ran, and `plan.Upscaler` had the same problem for the same reason
+(kernel/deband are libplacebo-only, unreachable from that branch); both now reset to
+off/null on that branch. And the client's `CONFLICTS` table had no rule at all for the CUDA-
+native mutual exclusivity, so `sr`/`refine`/`chroma`/`deblur`/`game`/`deband`/`kernel` never
+showed as inert when a CUDA-native neural level was picked - fixed with a provisional literal-id
+predicate, pending the `NeuralCudaLevels` probe key `WEB_PANEL_DESIGN.md` section 3.2 proposes.
+See `WEB_PANEL_DESIGN.md` section 8 for the full VERIFY-list results.
+
 ## Definition of done
 
 A served Jellyfin segment comes back upscaled by a real NVIDIA network, with an fps number recorded
