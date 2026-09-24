@@ -2668,6 +2668,65 @@ Nothing implemented beyond the design doc: no seam exists yet to hang a `MaxConc
 setting off without also building the session-lifecycle patch Phase 2 says is missing, and adding
 inert config would be exactly the "axis nothing reads" anti-pattern (invariant 11).
 
+
+## Production deploy, everything built this session, 2026-09-24
+
+Full production deploy carried out on CT114 against commit `2b8a4adeb617d160e5e7bab688299b776ddf5a6b`
+(local commits pushed to `origin/main` by the user mid-deploy; CT114 checked out via a normal
+`git fetch origin && reset --hard origin/main`, not a hand-copy). `scripts/proxmox-build.sh` was
+NOT run unmodified (its step 1 would have reset against the public remote, which was fine by the
+time this ran since origin now matched, but the deploy itself was carried out by hand, step by
+step, matching that script's ordering rather than invoking it, to keep every check point separate
+and inspectable).
+
+**Built:** `/usr/lib/jellyfin-ffmpeg-oidn/ffmpeg` rebuilt with
+`WITH_OIDN=1 WITH_OPTIX=1 WITH_ORT=1 WITH_FSR2=1 WITH_DLSS=1 WITH_RTXDLPP=1 WITH_RTXVSR=1`.
+Pre-build binary preserved at `ffmpeg.prev`. `nvdlppx.dll`/`nvaivpx.dll` staged at the paths
+`RTXDLPP_DLL`/`RTXVSR_DLL` expect (found already fetched at `/root/rtxv-spike/dll/Display.Driver/`,
+md5-consistent with other copies already on the box, copied into place). `-filters` confirmed all
+seven: oidn, optix, ort, fsr2, dlss, dlpp_rtcuda, vsr_rtcuda.
+
+**Verified:** the combined `optix,dlpp_rtcuda,vsr_rtcuda` chain against this exact fresh binary, on
+real library content (`Rick and Morty S08E06`), read-only extraction to `/tmp` (never written back
+into the library), decode -> chain -> `hevc_nvenc` encode, exit 0, real 4K HEVC output confirmed via
+`ffprobe` (3840x2160, 72 frames). Re-ran the identical smoke test again after activation/restart
+against the now-live binary: same result, exit 0.
+
+**Activated:** plugin + patcher assemblies rebuilt (`dotnet publish`, both exit 0; two pre-existing
+`CS0162 unreachable code` warnings in `ShaderLibrary.cs:1277,1384`, not investigated for
+new-vs-longstanding this pass). Staged fresh into `/usr/lib/jellyfin-gpuupscale/staged`
+(the prior, several-commits-stale stage from an earlier session pass preserved at `staged.prev`
+before being replaced). Live-session/GPU check immediately before activation: clean (daemon only,
+0% GPU). Ran `jellyfin-gpuupscale-activate`: Jellyfin restarted, log confirms
+"active (5 EncodingHelper methods patched); optional: direct-play override".
+
+**Client published:** `web/gpu-upscale.js` rebuilt via `npm install` + `scripts/build-web-panel.sh`
+(node/npm newly installed via apt on CT114 for this -- reversible, non-disruptive; sha256
+`2f0b851d22ca960993c00609e55e1d6624b3649141045dd79d10e0044eaf07e3`). Found and fixed a real
+production bug in the process: the live `/usr/local/sbin/jellyfin-gpuupscale-webinject` still had
+the OLD hand-maintained `VERSION=32`, not the repo's current content-hash cache-buster -- meaning
+the earlier cache-buster fix (`bce470e` et al.) had been committed but never actually reinstalled
+onto this box. Backed the old script up (`.prev`), reinstalled the current one from the checkout,
+re-ran it: `index.html` now correctly tags `gpu-upscale.js?v=2f0b851d22`, matching the served
+file's real hash. Confirmed via `curl` against the running daemon, not assumed.
+
+**Known, accepted, live limitation as of this deploy:** `dlpp_rtcuda`/`vsr_rtcuda` are reachable
+from the panel for the first time as of this activation (they were already wired into
+`UpscaleEngine`'s `neural` axis per `INTEGRATION_DESIGN.md`, just never live before this deploy).
+The NV12<->RGBA/RGBF32 PTX colour-conversion kernels in `optix`, `dlpp_rtcuda` and `vsr_rtcuda`
+were only ever built/tested against 8-bit NV12 source. A real 10-bit/HDR source decodes to
+`p010le` and fails cleanly at `config_props` (`needs even-sized NV12, got p010le`,
+`AVERROR_EXTERNAL`) -- reproduced directly this session against `Rick and Morty S08E06` under
+`-hwaccel cuda -hwaccel_output_format cuda`. That is a clean filter-init rejection, not silent
+corruption, but the rejection currently aborts the whole ffmpeg process (`Error reinitializing
+filters!`, encoder never opens) rather than the plugin gracefully dropping the node -- so a real
+session landing on this combination today gets a dead transcode, not degraded-but-working
+playback. Whether `UpscaleEngine`'s own eligibility check already screens 10-bit sources out
+before ever emitting these filters was NOT confirmed this pass -- open question, left for the
+separate follow-up fix (in progress elsewhere, targeting the PTX kernels themselves) to also
+verify before its own deploy. Accepted for this deploy on this personal test box; not a blocking
+condition here.
+
 ## Runtime filter control (zmq/sendcmd) as an A/B-swap alternative (2026-09-24, `.agent-briefs/runtime-filter-control.md`)
 
 Design-only pass, no CT114 restart/deploy/config change (a concurrent build was found running on

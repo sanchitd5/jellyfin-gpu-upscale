@@ -1,5 +1,7 @@
 # Web panel design: `dlpp_rtcuda` and `vsr_rtcuda` in the Enhance panel
 
+**Status update, 2026-09-24 (production deploy): LIVE, not just designed.** The panel wiring this doc reviews is deployed: activated plugin, restarted Jellyfin, client script published and correctly cache-busted (fixed a stale on-box webinject script in the process -- see TASK.md). vsr-rtcuda and dlpp-1..4 are reachable from a real panel for the first time as of this deploy. Known, accepted, live gap: no 10-bit/HDR source has a working path through optix/dlpp_rtcuda/vsr_rtcuda yet (PTX colour-conversion kernels are 8-bit-NV12-only, a 10-bit source aborts the transcode rather than degrading) -- see TASK.md for the reproduction and INTEGRATION_DESIGN.md for the full note. A separate fix for that is in progress.
+
 First design pass, for review. Written against the working tree as of this session, which
 includes the uncommitted backend wiring in `UpscaleEngine.cs`, `ShaderLibrary.cs`,
 `UpscaleSettings.cs`, `PatcherHost.cs` and a comment-only change in `web/gpu-upscale.js`. Nothing
