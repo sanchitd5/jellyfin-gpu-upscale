@@ -638,6 +638,27 @@
                     </div>
                 </div>
 
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="RtxDlppDllPath" label="RTX DLPP DLL path" />
+                    <div class="fieldDescription">
+                        Where <code>nvdlppx.dll</code> lives, for the <code>dlpp-1</code>..<code>dlpp-4</code>
+                        neural levels. Default:
+                        <code>/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll</code>. Proprietary and
+                        nothing from NVIDIA ships with this plugin, so until you put it here by hand these
+                        levels are not offered. See <code>RTXDLPP.md</code>.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="RtxVsrDllPath" label="RTX VSR DLL path" />
+                    <div class="fieldDescription">
+                        Where <code>nvaivpx.dll</code> lives, for the <code>vsr-rtcuda</code> neural level - a
+                        fast GPU resample, not a network. Default:
+                        <code>/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll</code>. Same rule as above:
+                        not shipped, so not offered until installed. See <code>RTXVSR.md</code>.
+                    </div>
+                </div>
+
                 <div>
                     <button is="emby-button" type="submit" class="raised button-submit block emby-button">
                         <span>Save</span>
@@ -847,6 +868,10 @@
                         config.DlssRuntimeDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/dlss';
                     page.querySelector('#DepthModelPath').value =
                         config.DepthModelPath || '/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx';
+                    page.querySelector('#RtxDlppDllPath').value =
+                        config.RtxDlppDllPath || '/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll';
+                    page.querySelector('#RtxVsrDllPath').value =
+                        config.RtxVsrDllPath || '/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll';
                     updateThresholdExample(page);
                     Dashboard.hideLoadingMsg();
                 });
@@ -914,6 +939,8 @@
                     config.NeuralModelDirectory = page.querySelector('#NeuralModelDirectory').value;
                     config.DlssRuntimeDirectory = page.querySelector('#DlssRuntimeDirectory').value;
                     config.DepthModelPath = page.querySelector('#DepthModelPath').value;
+                    config.RtxDlppDllPath = page.querySelector('#RtxDlppDllPath').value;
+                    config.RtxVsrDllPath = page.querySelector('#RtxVsrDllPath').value;
                     ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
                         Dashboard.processPluginConfigurationUpdateResult(result);
                         loadStatus(page);

@@ -606,6 +606,92 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         private const string VsrLevel = "vsr";
 
         /// <summary>
+        /// RTX VSR bypass resampler (nvaivpx.dll via a runtime PE loader, filter "vsr_rtcuda").
+        /// NOT the NvVFX Maxine path VsrLevel/VsrOffered above gate - a different binary, a
+        /// different loader, and it already runs (see RTXVSR.md). "Its own role here is fixed: a
+        /// fast, better-than-bicubic GPU resampler, NOT a neural upscaler" - the filter's own
+        /// header comment, and the reason this ID says "rtcuda" rather than reusing "vsr" (see
+        /// INTEGRATION_DESIGN.md section 1, the naming-collision note).
+        /// </summary>
+        private const string VsrRtcudaLevel = "vsr-rtcuda";
+
+        /// <summary>
+        /// RTX DLPP super-resolution levels (nvdlppx.dll via a runtime PE loader, filter
+        /// "dlpp_rtcuda"). Four flat, non-ladder options - not a "grade" shape, see
+        /// INTEGRATION_DESIGN.md section 6 - because level ranking is content-dependent, per the
+        /// filter's own DEGRADED AVOption text.
+        /// </summary>
+        private static readonly string[] _dlppLevels = { "dlpp-1", "dlpp-2", "dlpp-3", "dlpp-4" };
+
+        public static bool IsDlppLevel(string level) =>
+            level != null && Array.IndexOf(_dlppLevels, level.Trim().ToLowerInvariant()) >= 0;
+
+        public static bool IsVsrRtcudaLevel(string level) =>
+            level != null && level.Trim().Equals(VsrRtcudaLevel, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// True for either of the two CUDA-native neural levels this axis also carries. Both need
+        /// AV_PIX_FMT_CUDA hw frames straight from decode, not the CPU-side gbrpf32le path every
+        /// other neural level uses, so UpscaleEngine routes a session naming one of these through
+        /// its own CUDA hwaccel branch (see INTEGRATION_DESIGN.md section 2) rather than inserting
+        /// them into the normal Vulkan cpuNodes list.
+        /// </summary>
+        public static bool IsCudaNeuralLevel(string level) => IsDlppLevel(level) || IsVsrRtcudaLevel(level);
+
+        private static int DlppLevelNumber(string level) =>
+            int.TryParse(
+                level.Trim().Substring("dlpp-".Length),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out int n)
+                ? n
+                : 1;
+
+        /// <summary>
+        /// Where nvdlppx.dll has to be installed for dlpp-1..dlpp-4 to be offered. Not shipped;
+        /// see RTXDLPP.md. Same shape as DlssRuntimeDirectory[For] just below.
+        /// </summary>
+        public const string RtxDlppDllPath = "/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll";
+
+        private static string RtxDlppDllPathFor(UpscaleSettings cfg) =>
+            string.IsNullOrWhiteSpace(cfg?.RtxDlppDllPath) ? RtxDlppDllPath : cfg.RtxDlppDllPath.Trim();
+
+        /// <summary>Is nvdlppx.dll actually on disk? Light-weight check, file existence only - the
+        /// full map+CreateInstance+Process self-test only runs once, inside ffmpeg's own
+        /// config_props at chain build time (see vf_dlpp_rtcuda.c). Same rigor level this
+        /// codebase already applies to DlssRuntimePresent just below.</summary>
+        public static bool RtxDlppOffered(UpscaleSettings cfg = null)
+        {
+            try
+            {
+                return File.Exists(RtxDlppDllPathFor(cfg));
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Where nvaivpx.dll has to be installed for vsr-rtcuda to be offered. See RTXVSR.md.</summary>
+        public const string RtxVsrDllPath = "/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll";
+
+        private static string RtxVsrDllPathFor(UpscaleSettings cfg) =>
+            string.IsNullOrWhiteSpace(cfg?.RtxVsrDllPath) ? RtxVsrDllPath : cfg.RtxVsrDllPath.Trim();
+
+        /// <summary>Is nvaivpx.dll actually on disk? Same light-weight check as RtxDlppOffered.</summary>
+        public static bool RtxVsrOffered(UpscaleSettings cfg = null)
+        {
+            try
+            {
+                return File.Exists(RtxVsrDllPathFor(cfg));
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
         /// The factor each weight was trained at. libplacebo scales whatever the network produces
         /// to the size the session asked for, so a x4 weight at a 2x target computes four times the
         /// pixels and half of them are thrown away. At 15 and 10 fps that discarded half is most of
@@ -864,7 +950,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public static bool IsNeuralLevel(string level) =>
             level != null
             && (_neuralModels.ContainsKey(level.Trim())
-                || level.Trim().Equals(VsrLevel, StringComparison.OrdinalIgnoreCase));
+                || level.Trim().Equals(VsrLevel, StringComparison.OrdinalIgnoreCase)
+                || IsCudaNeuralLevel(level));
 
         public static bool IsGameLevel(string level) =>
             level != null && _gameFilters.ContainsKey(level.Trim());
@@ -998,6 +1085,30 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 default:
                     return "off";
             }
+        }
+
+        /// <summary>
+        /// The wording the panel must render for a neural level, for the two CUDA-native levels
+        /// this axis also carries (dlpp-1..4, vsr-rtcuda). Served rather than baked into the
+        /// client script for the same reason GameLabel is - see INTEGRATION_DESIGN.md section 4/6.
+        /// Every other neural level keeps its plain name; the client falls back to that.
+        /// </summary>
+        public static string NeuralLabel(string level)
+        {
+            if (IsVsrRtcudaLevel(level))
+            {
+                return "VSR resample (RTX, fast - not a neural network, measured better than "
+                    + "bilinear, no detail added)";
+            }
+
+            if (IsDlppLevel(level))
+            {
+                return "RTX DLPP level " + DlppLevelNumber(level).ToString(CultureInfo.InvariantCulture)
+                    + " (DEGRADED: content-dependent gain, never negative but never large either - "
+                    + "not a ladder, higher is not simply better)";
+            }
+
+            return level ?? "off";
         }
 
         /// <summary>
@@ -1166,6 +1277,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 list.Add(VsrLevel);
             }
 
+            // Two CUDA-native levels, gated on their own DLL being present rather than on a
+            // model-weight file (see RtxVsrOffered/RtxDlppOffered) - structurally closer to
+            // VsrOffered above than to the File.Exists check earlier in this loop.
+            if (RtxVsrOffered(cfg))
+            {
+                list.Add(VsrRtcudaLevel);
+            }
+
+            if (RtxDlppOffered(cfg))
+            {
+                list.AddRange(_dlppLevels);
+            }
+
             return list;
         }
 
@@ -1289,6 +1413,110 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         }
 
         /// <summary>
+        /// The ffmpeg filter node(s) for a CUDA-native neural level (dlpp-1..4, vsr-rtcuda), or
+        /// null for none. Unlike NeuralFilter above, this is never wrapped in format=gbrpf32le
+        /// and never goes through hwupload: it runs directly on the AV_PIX_FMT_CUDA frames decode
+        /// already produced, which is why UpscaleEngine only calls this from its own CUDA hwaccel
+        /// branch (see INTEGRATION_DESIGN.md section 2) rather than from the normal cpuNodes list.
+        ///
+        /// LEVEL 3/4 NATIVE-SCALE, VERIFIED 2026-09-24. RTXDLPP.md already documented "levels 3/4
+        /// native-scale path verified only at exact integer ratios so far" as an open risk; this
+        /// session made it concrete: dlpp_rtcuda level=3 handed a non-integer output ratio
+        /// (1920x1080 -> 2880x1620, 1.5x) segfaults, standalone, with no vsr_rtcuda or optix in
+        /// the chain at all - reproduced twice. The SAME level at an exact integer ratio (2x
+        /// default, and a separately-tested exact 3x, 1920x1080 -> 5760x3240) both ran clean, and
+        /// chaining vsr_rtcuda after either to conform-resize to a DIFFERENT final target
+        /// (3840x2160) also ran clean, GPU-resident, zero host round trips, in the SAME process as
+        /// dlpp_rtcuda - the specific thing RTXDLPP.md/RTXVSR.md/ARCHITECTURE.md flagged as never
+        /// tested. So levels 3/4 here always run at a fixed, safe 2x and hand off the actual
+        /// requested size to vsr_rtcuda, rather than ever being asked for an arbitrary ratio
+        /// directly. Levels 1/2 have no native-scale complication (RTXDLPP.md) and take the
+        /// session's requested size directly - also verified at a non-integer ratio (1.5x) this
+        /// session, ran clean.
+        /// </summary>
+        public static string CudaNeuralFilter(
+            string level, int outputWidth, int outputHeight, out string levelUsed, UpscaleSettings cfg = null)
+        {
+            levelUsed = "off";
+
+            if (IsVsrRtcudaLevel(level))
+            {
+                if (!RtxVsrOffered(cfg))
+                {
+                    return null;
+                }
+
+                levelUsed = VsrRtcudaLevel;
+                return VsrRtcudaNode(outputWidth, outputHeight, cfg);
+            }
+
+            if (IsDlppLevel(level))
+            {
+                if (!RtxDlppOffered(cfg))
+                {
+                    return null;
+                }
+
+                int n = DlppLevelNumber(level);
+                levelUsed = level.Trim().ToLowerInvariant();
+
+                if (n <= 2)
+                {
+                    return string.Format(
+                        CultureInfo.InvariantCulture,
+                        "dlpp_rtcuda=dll={0}:level={1}:w={2}:h={3}",
+                        RtxDlppDllPathFor(cfg), n, outputWidth, outputHeight);
+                }
+
+                // Levels 3/4: fixed safe 2x internally, vsr_rtcuda conforms to the real target.
+                // No CUDA-native way to reach the requested size without vsr_rtcuda, so without it
+                // this level is not offered here either - fail closed, not "run at the risky ratio
+                // anyway" (AvailableNeuralLevels already withholds it from the probe on the same
+                // condition; this is the same rule applied again at this call site, reached by any
+                // hand-crafted request that bypasses the probe).
+                if (!RtxVsrOffered(cfg))
+                {
+                    return null;
+                }
+
+                string dlppNode = string.Format(
+                    CultureInfo.InvariantCulture, "dlpp_rtcuda=dll={0}:level={1}", RtxDlppDllPathFor(cfg), n);
+                return dlppNode + "," + VsrRtcudaNode(outputWidth, outputHeight, cfg);
+            }
+
+            return null;
+        }
+
+        private static string VsrRtcudaNode(int w, int h, UpscaleSettings cfg) =>
+            string.Format(CultureInfo.InvariantCulture, "vsr_rtcuda=dll={0}:w={1}:h={2}", RtxVsrDllPathFor(cfg), w, h);
+
+        /// <summary>
+        /// The bare "optix" node for the CUDA-native branch - no format=gbrpf32le wrap, because
+        /// this runs on AV_PIX_FMT_CUDA frames directly (commit 61d6798), unlike the denoise
+        /// axis's own "optix" entry above which still wraps for the Vulkan/system-memory chain.
+        /// Only "optix"/"optix-temporal" qualify: oidn and the Vulkan denoise levels have no
+        /// CUDA-hw-frame path, so a session combining one of those with a CUDA-native neural level
+        /// has its denoise choice dropped for that session (see UpscaleEngine.Decide).
+        /// </summary>
+        public static string CudaDenoiseFilter(string level)
+        {
+            if (string.IsNullOrWhiteSpace(level))
+            {
+                return null;
+            }
+
+            switch (level.Trim().ToLowerInvariant())
+            {
+                case "optix":
+                    return "optix=mode=ldr";
+                case "optix-temporal":
+                    return "optix=mode=temporal";
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>
         /// The ffmpeg filter node for a denoise level, or null for none. Also reports whether the
         /// node wants hardware (Vulkan) frames, which decides whether it goes before or after
         /// hwupload in the chain.
@@ -1346,7 +1574,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 return false;
             }
 
-            string[] patched = { "oidn", "optix", "ort", "fsr2", "dlss" };
+            string[] patched = { "oidn", "optix", "ort", "fsr2", "dlss", "dlpp_rtcuda", "vsr_rtcuda" };
             foreach (string name in patched)
             {
                 if (filter.StartsWith(name, StringComparison.OrdinalIgnoreCase)

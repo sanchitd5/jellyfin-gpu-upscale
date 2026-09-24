@@ -1,5 +1,20 @@
 # Integration design: `dlpp_rtcuda` and `vsr_rtcuda`
 
+**Status update, 2026-09-24: IMPLEMENTED, staged, not activated.** The Phase A risk this doc's own
+section 2 and `ARCHITECTURE.md` flagged as never tested -- both hosted DLLs (`nvdlppx.dll`,
+`nvaivpx.dll`) alive in the same ffmpeg process -- was verified clean (see `TASK.md`, "Combined
+optix + dlpp_rtcuda + vsr_rtcuda chain"). The plugin code below was then written following this
+doc's recommendations (section 1: both filters as `neural` axis values; section 2: a separate
+CUDA hwaccel branch; section 3: the shim's `PATCHED_FILTERS` tuple; sections 4/6/8: probe-driven
+`fromProbe` wording, no hardcoded CONTROLS entries needed after all), with one addition this doc
+did not have: dlpp-3/4 chain into `vsr_rtcuda` as a conform-resize rather than ever being asked for
+an arbitrary output ratio directly, because Phase A also found dlpp level>=3 segfaults on a
+non-integer ratio taken alone. See `TASK.md` for what is built/staged versus what still needs a
+production ffmpeg rebuild and a restart before it is live. The design notes below are left as
+written at the time; where this session's actual findings differ (mostly section 2's "genuinely
+new chain-building logic" now written, and the dlpp-3/4 native-scale risk now concrete rather than
+theoretical) TASK.md is the source of truth, not this file.
+
 Design only. No plugin code changed. Every claim about existing behaviour cites the file:line it
 came from; anything that would need a live server to confirm is marked UNVERIFIED.
 

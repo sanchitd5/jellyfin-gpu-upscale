@@ -471,14 +471,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return first < 0 || last <= first ? string.Empty : vfParam.Substring(first + 1, last - first - 1);
         }
 
-        /// <summary>Swaps Jellyfin's CUDA/VAAPI device setup for the Vulkan device libplacebo needs.</summary>
+        /// <summary>
+        /// Swaps Jellyfin's CUDA/VAAPI device setup for the device this plan's chain needs: Vulkan
+        /// for the normal libplacebo chain, CUDA for a session running one of the CUDA-native
+        /// neural levels (see UpscaleEngine.Plan.UsesCudaNeural).
+        /// </summary>
         private static void InputVideoHwaccelArgsPostfix(EncodingJobInfo state, EncodingOptions options, ref string __result)
         {
             try
             {
-                if (ShouldAct(state, out _))
+                if (ShouldAct(state, out var plan))
                 {
-                    __result = UpscaleEngine.HwaccelArgs();
+                    __result = UpscaleEngine.HwaccelArgs(plan);
                 }
             }
             catch (Exception ex)
@@ -487,12 +491,16 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
         }
 
-        /// <summary>Drops decode-side -hwaccel so frames arrive in system memory for hwupload.</summary>
+        /// <summary>
+        /// Drops decode-side -hwaccel so frames arrive in system memory for hwupload - UNLESS this
+        /// session's chain is the CUDA-native branch, which needs decode's own hwaccel left alone
+        /// (it is what produces the AV_PIX_FMT_CUDA frames the branch runs on).
+        /// </summary>
         private static void HwaccelTypePostfix(EncodingJobInfo state, EncodingOptions options, string videoCodec, int bitDepth, bool outputHwSurface, ref string __result)
         {
             try
             {
-                if (ShouldAct(state, out _))
+                if (ShouldAct(state, out var plan) && !plan.UsesCudaNeural)
                 {
                     __result = string.Empty;
                 }
@@ -503,12 +511,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
         }
 
-        /// <summary>Drops the hardware decoder (-c:v *_cuvid) for the same reason.</summary>
+        /// <summary>
+        /// Drops the hardware decoder (-c:v *_cuvid) for the same reason, and with the same
+        /// CUDA-native exception: that branch needs the hardware decoder, not the suppression.
+        /// </summary>
         private static void HardwareVideoDecoderPostfix(EncodingJobInfo state, EncodingOptions options, ref string __result)
         {
             try
             {
-                if (ShouldAct(state, out _))
+                if (ShouldAct(state, out var plan) && !plan.UsesCudaNeural)
                 {
                     __result = null;
                 }

@@ -52,6 +52,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// <summary>True only when a neural super-resolution network really went into the command.</summary>
         public bool NeuralApplied { get; set; }
 
+        /// <summary>
+        /// True when this session's neural level (dlpp-1..4, vsr-rtcuda) runs CUDA-native and, as
+        /// a real, felt consequence and not an internal detail, Detail/Refine/Chroma/Debanding and
+        /// the scaling-kernel choice were all forced off for it - the Vulkan libplacebo stage those
+        /// axes need is not reachable from this session's CUDA-only chain. See
+        /// INTEGRATION_DESIGN.md section 6, "what should be user-visible."
+        /// </summary>
+        public bool CudaNeuralBypass { get; set; }
+
         public bool GameApplied { get; set; }
 
         /// <summary>True only when libplacebo debanding really went into the command.</summary>
@@ -286,6 +295,23 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             public bool GameApplied { get; set; }
 
+            /// <summary>
+            /// True when NeuralLevel is dlpp-1..4 or vsr-rtcuda: both need AV_PIX_FMT_CUDA frames
+            /// straight from decode, so BuildChain takes a separate, much shorter path for this
+            /// session (decode cuda -> [optix] -> the neural filter(s) -> NVENC, no Vulkan, no
+            /// libplacebo) and HwaccelArgs/the two hwaccel-suppression patches must leave decode's
+            /// own -hwaccel cuda alone instead of forcing system memory. See
+            /// INTEGRATION_DESIGN.md section 2.
+            /// </summary>
+            public bool UsesCudaNeural { get; set; }
+
+            /// <summary>
+            /// The bare "optix" node (no format=gbrpf32le wrap) to run ahead of the CUDA-native
+            /// neural filter(s), or null when this session's denoise choice does not carry over
+            /// (see ShaderLibrary.CudaDenoiseFilter - only optix/optix-temporal qualify).
+            /// </summary>
+            public string CudaDenoiseNode { get; set; }
+
             /// <summary>The resolved jitter / depth / reactive the game filter node was built with.</summary>
             public string GameJitter { get; set; }
 
@@ -487,6 +513,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 GameReactive = plan.Act && plan.GameApplied ? plan.GameReactive : null,
                 GameDepthDowngraded = plan.Act && plan.GameApplied && plan.GameDepthDowngraded,
                 DenoiseDroppedForPatchedBinary = plan.Act ? plan.DenoiseDroppedForPatchedBinary : null,
+                CudaNeuralBypass = plan.Act && plan.UsesCudaNeural,
                 Status = status,
                 Reason = reason,
             };
@@ -530,6 +557,24 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         private static string NeuralName(string level)
         {
+            // RTX VSR bypass resampler: a fast GPU resample, not a network - the filter's own
+            // header comment is explicit about this, and the report must not overclaim it (see
+            // INTEGRATION_DESIGN.md section 4). No "-x" model factor, no ONNX Runtime.
+            if (ShaderLibrary.IsVsrRtcudaLevel(level))
+            {
+                return "RTX VSR bypass resample (nvaivpx.dll), NOT a neural network - "
+                    + "fast GPU resample, measured better than bilinear, no detail added";
+            }
+
+            // RTX DLPP: content-dependent, never negative but never large either (the filter's
+            // own DEGRADED AVOption text) - do not present the four levels as a ladder.
+            if (ShaderLibrary.IsDlppLevel(level))
+            {
+                return "RTX DLPP level " + level.Trim().Substring("dlpp-".Length)
+                    + " (nvdlppx.dll), DEGRADED: gain is content-dependent across levels, "
+                    + "never negative but never large either";
+            }
+
             string path = ShaderLibrary.NeuralModelPath(level, Settings);
             if (string.IsNullOrWhiteSpace(path))
             {
@@ -1175,12 +1220,57 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     ? neuralLevel.Trim().ToLowerInvariant()
                     : "off";
 
-                // The heights go in because the weight that runs depends on the ratio: a x4 network
-                // at a 2x target spends four times the pixels and libplacebo discards half of them.
-                plan.NeuralFilter = ShaderLibrary.NeuralFilter(
-                    neuralLevel, plan.SourceHeight, plan.Height, out string neuralUsed, cfg);
-                plan.NeuralLevel = neuralUsed;
-                plan.NeuralApplied = plan.NeuralFilter != null;
+                plan.UsesCudaNeural = ShaderLibrary.IsCudaNeuralLevel(neuralLevel);
+
+                if (plan.UsesCudaNeural)
+                {
+                    // CUDA-NATIVE BRANCH: dlpp-1..4 / vsr-rtcuda. Both filters need AV_PIX_FMT_CUDA
+                    // frames straight from decode (RTXDLPP.md/RTXVSR.md), and the Vulkan-CUDA
+                    // interop the rest of this chain would need to reach them from the normal
+                    // Vulkan pipeline is confirmed broken today (vulkan-cuda-hwmap-task.md). So
+                    // this session takes UpscaleEngine's separate CUDA hwaccel branch instead
+                    // (see HwaccelArgs/BuildChain): decode cuda -> [optix] -> the neural filter(s)
+                    // -> NVENC, and every Vulkan-only axis is forced off for it rather than
+                    // silently ignored - see INTEGRATION_DESIGN.md sections 2 and 6.
+                    plan.NeuralFilter = ShaderLibrary.CudaNeuralFilter(
+                        neuralLevel, plan.Width, plan.Height, out string cudaNeuralUsed, cfg);
+                    plan.NeuralLevel = cudaNeuralUsed;
+                    plan.NeuralApplied = plan.NeuralFilter != null;
+                    plan.UsesCudaNeural = plan.NeuralApplied;
+
+                    // Only optix/optix-temporal have a CUDA-hw-frame path (ARCHITECTURE.md); any
+                    // other denoise choice does not carry over to this branch and is dropped, the
+                    // same "reported, not silent" rule DenoiseDroppedForPatchedBinary already uses
+                    // a few lines below for a different reason.
+                    plan.CudaDenoiseNode = ShaderLibrary.CudaDenoiseFilter(denoiseLevel);
+                    if (plan.CudaDenoiseNode == null && plan.DenoiseApplied)
+                    {
+                        plan.DenoiseDroppedForPatchedBinary = plan.DenoiseLevel;
+                    }
+
+                    plan.DenoiseFilter = null;
+                    plan.DenoiseApplied = false;
+                    plan.DenoiseLevel = "off";
+                    plan.DenoiseWantsHwFrames = false;
+
+                    // The Vulkan-only stages this branch cannot reach: forced off here rather than
+                    // silently dropped downstream, so the session record and BuildChain agree with
+                    // each other about what actually ran.
+                    srLevel = "off";
+                    refineLevel = "off";
+                    chromaLevel = "off";
+                    deblurLevel = "off";
+                }
+                else
+                {
+                    // The heights go in because the weight that runs depends on the ratio: a x4
+                    // network at a 2x target spends four times the pixels and libplacebo discards
+                    // half of them.
+                    plan.NeuralFilter = ShaderLibrary.NeuralFilter(
+                        neuralLevel, plan.SourceHeight, plan.Height, out string neuralUsed, cfg);
+                    plan.NeuralLevel = neuralUsed;
+                    plan.NeuralApplied = plan.NeuralFilter != null;
+                }
 
                 // ---- game temporal upscalers (fsr2 / dlss / dlaa) --------------------------
                 // Advanced, opt-in, off by default and never chosen automatically. See the
@@ -1190,6 +1280,15 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 if (!ShaderLibrary.IsGameLevel(gameLevel))
                 {
                     gameLevel = ShaderLibrary.IsGameLevel(gameDefault) ? gameDefault : "off";
+                }
+
+                // fsr2/dlss/dlaa are Vulkan (vf_dlss.c's own header, "through NGX's Vulkan path");
+                // this session's CUDA-native branch has no Vulkan device at all, so a game level
+                // asked for alongside dlpp-*/vsr-rtcuda cannot run either. Same forced-off,
+                // reported-not-silent treatment as srLevel/refineLevel/chromaLevel just above.
+                if (plan.UsesCudaNeural)
+                {
+                    gameLevel = "off";
                 }
 
                 // jitter / depth / reactive are per-session on exactly the same carrier as the
@@ -1291,6 +1390,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     {
                         wantDeband = true;
                     }
+                }
+
+                // Debanding and the scaling kernel both belong to the libplacebo pass, which this
+                // session's CUDA-native branch never reaches.
+                if (plan.UsesCudaNeural)
+                {
+                    wantDeband = false;
                 }
 
                 plan.Upscaler = ShaderLibrary.CanonicalUpscaler(Option(state, "kernel"))
@@ -2009,8 +2115,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return configured;
         }
 
-        /// <summary>Vulkan device arguments the libplacebo chain needs.</summary>
-        public static string HwaccelArgs() => " -init_hw_device vulkan=vk:0 -filter_hw_device vk";
+        /// <summary>
+        /// The hwaccel device arguments this plan's chain needs: Vulkan for the normal libplacebo
+        /// chain, or CUDA for a session running one of the CUDA-native neural levels (dlpp-1..4,
+        /// vsr-rtcuda) - see Plan.UsesCudaNeural and INTEGRATION_DESIGN.md section 2. The CUDA
+        /// form also asks for the OUTPUT format on the decoder itself
+        /// (-hwaccel_output_format cuda), unlike the Vulkan form, because this branch never
+        /// leaves GPU memory: decode hands CUDA frames straight to the filter chain.
+        /// </summary>
+        public static string HwaccelArgs(Plan plan) =>
+            plan != null && plan.UsesCudaNeural
+                ? " -hwaccel cuda -hwaccel_output_format cuda"
+                : " -init_hw_device vulkan=vk:0 -filter_hw_device vk";
 
         /// <summary>
         /// The libplacebo chain for this plan.
@@ -2024,6 +2140,31 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public static string BuildChain(Plan plan)
         {
             UpscaleSettings cfg = Settings;
+
+            if (plan.UsesCudaNeural)
+            {
+                // CUDA-NATIVE BRANCH. Decode already produced AV_PIX_FMT_CUDA frames (see
+                // HwaccelArgs), so this never touches "format=yuv420p", never hwuploads and never
+                // reaches libplacebo - the whole point being no system-memory round trip anywhere
+                // in the graph, verified this session (host-callback counters showed +0 allocs
+                // and +0 host-to-device copies after init, across every frame, for both
+                // dlpp_rtcuda and vsr_rtcuda together). NVENC takes the CUDA frame directly, same
+                // as GpuResidentEncode's hwmap path does for the Vulkan chain, except there is no
+                // hwmap needed here because the frame was never anywhere else.
+                var cudaNodes = new List<string>();
+                if (!string.IsNullOrEmpty(plan.CudaDenoiseNode))
+                {
+                    cudaNodes.Add(plan.CudaDenoiseNode);
+                }
+
+                if (plan.NeuralApplied && !string.IsNullOrEmpty(plan.NeuralFilter))
+                {
+                    cudaNodes.Add(plan.NeuralFilter);
+                }
+
+                return string.Join(",", cudaNodes);
+            }
+
             var sb = new StringBuilder();
             sb.Append("format=yuv420p");
 

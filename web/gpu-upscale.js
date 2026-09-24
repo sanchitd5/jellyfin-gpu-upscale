@@ -150,8 +150,17 @@
             // it never reaches a real viewer. NvVFX_Load hangs indefinitely rather than returning;
             // see VSR.md. Do not remove the server-side gate to make this entry "work" - that would
             // let a real session hang forever instead of degrading.
+            // Two CUDA-native levels also live on this axis: 'vsr-rtcuda' (RTX VSR bypass
+            // resampler - a fast GPU resample, explicitly NOT a neural network, see RTXVSR.md)
+            // and 'dlpp-1'..'dlpp-4' (RTX DLPP, DEGRADED: content-dependent, not a ladder, see
+            // RTXDLPP.md). Neither is hardcoded below: `fromProbe`/`labelsKey` means the server's
+            // probe (`Neural`/`NeuralLabels`) supplies both which of them exist on this server
+            // (gated on nvaivpx.dll/nvdlppx.dll being installed - see ShaderLibrary.RtxVsrOffered/
+            // RtxDlppOffered) and their exact display wording, the same mechanism the `game`
+            // control below already uses. Picking either turns off Detail/Refine/Chroma/Debanding
+            // for that session - see `neuralCudaBypass` in the session-record row wiring.
             key: 'neural', label: 'Neural super-resolution', fallback: 'off', group: 'Detail',
-            probeKey: 'Neural', costKey: 'neural',
+            probeKey: 'Neural', labelsKey: 'NeuralLabels', fromProbe: true, costKey: 'neural',
             options: [
                 { id: 'off', name: 'Off' },
                 { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },
@@ -1567,6 +1576,15 @@
             // therefore not claimed here either way.
             lines.push(['Note', 'The depth weights are not installed on this server, so the game'
                 + ' upscaler ran with a flat depth plane whatever was asked for.']);
+        }
+
+        if (s.CudaNeuralBypass) {
+            // A real, felt consequence of the RTX VSR/DLPP levels, not an internal detail: this
+            // session's chain never reaches libplacebo, so Detail/Refine/Chroma/Debanding and the
+            // scaling kernel could not run this time whatever the dashboard or panel asked for.
+            // See INTEGRATION_DESIGN.md section 6.
+            lines.push(['Note', 'This neural level runs its own CUDA-only chain, so Refine, Chroma,'
+                + ' Debanding and the scaling kernel choice did not apply to this session.']);
         }
 
         return lines;

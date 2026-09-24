@@ -2511,6 +2511,100 @@ Next: roadmap step (2), a real production ffmpeg build with optix plus everythin
 a live-viewer check before any restart; then step (3), wiring a default GPU-resident pipeline
 into the plugin. Both out of scope for this entry.
 
+## Combined optix + dlpp_rtcuda + vsr_rtcuda chain: verified, then wired (2026-09-24)
+
+**Phase A, the never-tested risk this session flagged: does the SAME ffmpeg process host both
+`nvdlppx.dll` (dlpp_rtcuda) and `nvaivpx.dll` (vsr_rtcuda) at once? YES, VERIFIED.**
+
+Scratch build `/root/gu-scratch3` on CT114, fresh checkout of this repo at commit `c3f6e92` (all
+three CUDA-native commits present: `61d6798` optix, `82bab39` dlpp_rtcuda, `fc999dd` vsr_rtcuda),
+built with `WITH_OPTIX=1 WITH_RTXDLPP=1 WITH_RTXVSR=1` (oidn/ort/fsr2/dlss left off, not needed for
+this test). Confirmed both DLLs present and distinct BEFORE running anything:
+`/root/rtxv-spike/dll/Display.Driver/{nvdlppx.dll,nvaivpx.dll}`, different sizes and sha256 (not a
+copy-paste of one file under two names).
+
+Real decode, real content (`Rick and Morty S09E06`, the same file used earlier this session),
+`-hwaccel cuda -hwaccel_output_format cuda -vf optix,dlpp_rtcuda=dll=...:level=N,vsr_rtcuda=dll=...:w=W:h=H -c:v h264_nvenc`:
+
+| Test | Result |
+|---|---|
+| level=1, vsr to 3840x2160 (dlpp defaults to its own 2x, vsr's request happened to match, so vsr ran as a no-op resize) | clean, both self-tests passed, both `frames 120; ... alloc(1) +0 htod(9) +0` -- zero per-frame host<->device copies after init, for BOTH filters, in the SAME process |
+| level=3, default 2x (exact integer ratio) | clean |
+| level=1, explicit non-integer ratio (1920x1080 -> 2880x1620, 1.5x) | clean |
+| **level=3, explicit non-integer ratio (1920x1080 -> 2880x1620, 1.5x)** | **segfault**, standalone (no vsr_rtcuda, no optix in the chain at all) -- reproduces RTXDLPP.md's own documented "levels 3/4 native-scale path verified only at exact integer ratios so far" |
+| level=3 at an EXACT 3x ratio (1920x1080 -> 5760x3240), chained into vsr_rtcuda conforming to a DIFFERENT final target (3840x2160) | clean, GPU-resident (same +0/+0 host-copy counters), the genuine "non-matching intermediate size" case the brief asked for |
+| Output correctness | produced a real `.mp4`, ffprobe-equivalent dims 3840x2160, decoded a frame to raw RGB: full 0-255 range, mean 93.3, no PIL/GPU-corruption artefact |
+
+**Root cause of the one failure, isolated, not assumed:** dlpp_rtcuda level>=3's internal
+native-scale path crashes on a non-integer output ratio regardless of anything else in the chain --
+reproduced with dlpp_rtcuda alone, zero relation to vsr_rtcuda or to two DLLs coexisting. The
+two-DLL-coexistence question the brief actually asked about is answered cleanly: yes, safely,
+zero crashes, zero extra host copies, across every combination that used an integer ratio.
+
+**Phase A verdict: WORKS**, with the pre-existing level 3/4 non-integer-ratio limitation now
+concretely reproduced and root-caused (not new, not a combination bug) and carried into the wiring
+as a real constraint, not an assumption.
+
+**Phase B: wired**, on the strength of that verdict. `INTEGRATION_DESIGN.md`'s recommendation
+(both filters as `neural` axis values, not a new axis) followed as designed, with one addition the
+design doc did not have: dlpp-1/2 take the session's requested output size directly (no
+native-scale complication, verified safe at a non-integer ratio); dlpp-3/4 always run their own
+fixed, safe 2x internally and hand off to `vsr_rtcuda` as a conform-resize to the actual requested
+size -- the exact chain shape Phase A proved safe, and the only CUDA-native way to reach dlpp-3/4
+at all without risking the segfault. If `nvaivpx.dll` is not installed, dlpp-3/4 are refused
+(`CudaNeuralFilter` returns null) rather than run at the risky ratio.
+
+Implemented: `ShaderLibrary.cs` (`RtxDlppOffered`/`RtxVsrOffered`, `IsDlppLevel`/
+`IsVsrRtcudaLevel`/`IsCudaNeuralLevel`, `CudaNeuralFilter`, `CudaDenoiseFilter`, `NeuralLabel`,
+`IsPatchedOnlyFilter` extended); `UpscaleEngine.cs` (`Plan.UsesCudaNeural`/`CudaDenoiseNode`,
+`Decide()`'s new branch forcing sr/refine/chroma/deblur/deband/kernel/game off for this session
+and reporting it via `SessionRecord.CudaNeuralBypass`, `HwaccelArgs(Plan)` CUDA branch,
+`BuildChain(Plan)`'s short CUDA-only path, `NeuralName` reporting); `UpscalePatches.cs` (the two
+hwaccel-suppression postfixes now skip suppression for a CUDA-native session); `UpscaleSettings.cs`
+/ `PluginConfiguration.cs` (`RtxDlppDllPath`/`RtxVsrDllPath`, mirroring `DlssRuntimeDirectory`);
+`configPage.html` (both settings, five-place checklist); `PatcherHost.cs` (`NeuralLabels` in the
+probe); `web/gpu-upscale.js` (`neural` control now `fromProbe`, so the two new levels and their
+DEGRADED/"not a network" wording arrive from the server with zero hardcoded option entries, plus a
+`CudaNeuralBypass` session-record note).
+
+**Built and staged, NOT activated.** `dotnet publish` on both `src` and `src/patcher` against a
+fresh rsync of this exact source tree on CT114 (`/root/gu-scratch3-plugin`) -- not
+`scripts/proxmox-build.sh` itself, because that script's source step is a hard `git fetch
+origin/<branch>` against the public GitHub remote and this session's changes are local-only commits
+(no push authorised), so its git-fetch step cannot see them; the build/stage steps that follow it
+(`dotnet publish` x2, copy into `$PATCH_DIR/staged`) were run by hand, identically to what the
+script does. Both assemblies compiled with 0 errors (2 pre-existing `CS0162` unreachable-code
+warnings on the already-const-`false`-gated `VsrOffered`/Maxine branch, unrelated to this change).
+Staged into `/usr/lib/jellyfin-gpuupscale/staged`, previous stage kept at `staged.prev`. Live
+`/var/lib/jellyfin/plugins/GpuUpscale_1.0.0.0` untouched. `web/gpu-upscale.js` was NOT published to
+the live web root and the injector's `VERSION` was NOT bumped -- that is a single atomic step this
+brief did not authorise (CLAUDE.md: a bumped buster over stale client code is the exact failure the
+injector already warns about), left for the activation step together with the restart.
+
+**Shim edited, live file, read-only production edit done carefully per the brief's own
+discipline:** `/usr/local/bin/jellyfin-ffmpeg-upscale` on CT114, backed up first to
+`jellyfin-ffmpeg-upscale.prev` (same `.prev` convention as the ffmpeg binary snapshot). One-line
+change, `PATCHED_FILTERS = ("oidn", "optix", "ort", "fsr2", "dlss")` ->
+`(..., "dlpp_rtcuda", "vsr_rtcuda")`. `PATCHED_NODE_RE`'s format-stripping regex verified against
+the ACTUAL option strings this session used (`dlpp_rtcuda=dll=...:level=N`,
+`vsr_rtcuda=dll=...:w=W:h=H`), not just read: `(?:=[^,]*)?` already captures a colon-separated
+option string with no comma in it, so no regex change was needed, confirming
+`INTEGRATION_DESIGN.md` section 3's "probably not." Diff reviewed (one line changed, nothing
+else); `py_compile` confirms the file still parses. This makes the shim route a session naming
+either filter to the patched binary -- it does NOT, by itself, make the feature work end to end
+(see below).
+
+**Still open, before activation:** the PRODUCTION ffmpeg binary does not yet carry
+`dlpp_rtcuda`/`vsr_rtcuda`/the CUDA-hw-frame `optix` together -- only this session's scratch build
+(`/root/gu-scratch3`) does. A production rebuild (mandatory five plus `WITH_RTXDLPP=1
+WITH_RTXVSR=1`) has not been run; without it the shim now routes to a patched binary that still
+lacks these two filters, and the fail-open `wants_patched()`/`patched_has()` machinery would (by
+design) strip them back out rather than fail loudly, so the panel would offer the levels and every
+one of them would silently degrade to nothing -- exactly the shape of bug this project keeps
+finding by using it, not by reading the diff. That rebuild is a real prerequisite for this feature
+to work live, is slow (`--with-ffmpeg`), and was out of scope for this session (the brief's hard
+limits stop short of the restart that would be needed to prove it end to end anyway).
+
 ## Definition of done
 
 A served Jellyfin segment comes back upscaled by a real NVIDIA network, with an fps number recorded

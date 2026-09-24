@@ -240,5 +240,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// Not shipped either; without it those levels have only a flat plane to work from.
         /// </summary>
         public string DepthModelPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx";
+
+        /// <summary>
+        /// Where nvdlppx.dll (RTX DLPP) has to be installed for the dlpp-1..dlpp-4 neural levels
+        /// to be offered. NOTHING from NVIDIA ships with this plugin: the operator fetches the DLL
+        /// themselves from a driver package. See RTXDLPP.md. Same trust boundary as
+        /// DlssRuntimeDirectory above.
+        /// </summary>
+        public string RtxDlppDllPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll";
+
+        /// <summary>
+        /// Where nvaivpx.dll (RTX VSR / AIVP) has to be installed for the vsr-rtcuda neural level
+        /// to be offered. Same trust boundary as RtxDlppDllPath above. See RTXVSR.md.
+        /// </summary>
+        public string RtxVsrDllPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll";
     }
 }

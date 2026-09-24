@@ -182,5 +182,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         /// Not shipped either; without it those levels fall back to a flat plane.
         /// </summary>
         public string DepthModelPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx";
+
+        /// <summary>
+        /// Where nvdlppx.dll lives, for the dlpp-1..dlpp-4 neural levels (RTX DLPP). Not shipped
+        /// with this plugin; until the operator puts it here those levels are not offered.
+        /// See RTXDLPP.md.
+        /// </summary>
+        public string RtxDlppDllPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll";
+
+        /// <summary>
+        /// Where nvaivpx.dll lives, for the vsr-rtcuda neural level (RTX VSR bypass resampler,
+        /// not a network - see RTXVSR.md). Not shipped with this plugin.
+        /// </summary>
+        public string RtxVsrDllPath { get; set; } = "/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll";
     }
 }

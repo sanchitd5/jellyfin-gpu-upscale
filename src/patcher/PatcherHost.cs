@@ -66,6 +66,18 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             return map;
         }
 
+        /// <summary>The server's own wording for each neural level this server actually offers.</summary>
+        private static Dictionary<string, string> NeuralLabels(UpscaleSettings cfg)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string level in ShaderLibrary.AvailableNeuralLevels(cfg))
+            {
+                map[level] = ShaderLibrary.NeuralLabel(level);
+            }
+
+            return map;
+        }
+
         /// <summary>The server's own wording for one option axis, keyed by value.</summary>
         private static Dictionary<string, string> OptionLabels(string axis, string[] values)
         {
@@ -102,6 +114,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ["Neural"] = cfg?.NeuralAllowed == false
                     ? new List<string> { "off" }
                     : ShaderLibrary.AvailableNeuralLevels(cfg),
+
+                // Per-level wording for the two CUDA-native levels (dlpp-1..4, vsr-rtcuda) - the
+                // DEGRADED / "not a network" framing belongs here, server-side, same rule as
+                // GameLabels just below. Keyed by every level this server actually offers, so the
+                // client never needs its own copy of which levels exist.
+                ["NeuralLabels"] = NeuralLabels(cfg),
 
                 // Game temporal upscalers: another axis of its own, and another that can be
                 // short. dlss and dlaa need an NVIDIA DLSS runtime that is not shipped with
