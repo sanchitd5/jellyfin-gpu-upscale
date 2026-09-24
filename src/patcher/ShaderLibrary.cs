@@ -1103,9 +1103,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             if (IsDlppLevel(level))
             {
+                // Not "degraded": it runs entirely on the GPU and is fast. What varies is how much
+                // it helps, which depends on the picture, and the levels are not a ladder.
                 return "RTX DLPP level " + DlppLevelNumber(level).ToString(CultureInfo.InvariantCulture)
-                    + " (DEGRADED: content-dependent gain, never negative but never large either - "
-                    + "not a ladder, higher is not simply better)";
+                    + " (GPU only, fast - the gain depends on the picture, and a higher level is "
+                    + "not simply better)";
             }
 
             return level ?? "off";

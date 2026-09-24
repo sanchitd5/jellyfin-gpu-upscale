@@ -124,6 +124,10 @@ export var CONTROLS = [
         key: 'neural', label: 'Detail engine (RTX / neural)', fallback: 'off', group: 'Detail',
         probeKey: 'Neural', labelsKey: 'NeuralLabels', fromProbe: true, costKey: 'neural',
         familiesKey: 'NeuralFamilies', familyLabelsKey: 'NeuralFamilyLabels', notesKey: 'NeuralNotes',
+        // dlpp-1..dlpp-4 are one engine with four levels: the picker shows "RTX DLPP" once and a
+        // Level control appears under it. The stored and sent value is still the level id, so
+        // nothing server-side changes. Any future family of numbered levels is one entry here.
+        levelGroups: [{ prefix: 'dlpp-', head: 'RTX DLPP', label: 'Level' }],
         options: [
             { id: 'off', name: 'Off' },
             { id: 'realesr-anime-x2', name: 'Real-ESRGAN x2 anime (0.56x realtime - slow)' },

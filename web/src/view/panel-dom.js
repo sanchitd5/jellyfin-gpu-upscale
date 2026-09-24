@@ -176,6 +176,9 @@ function changedCount(controls) {
     }).length;
 }
 
+/* The level last chosen inside each level group, so picking the engine again lands on it. */
+var lastLevel = {};
+
 /* One axis row: chips, a picker, or both. onPick receives the chosen level id. */
 function controlRow(c, onPick) {
     var cur = shownPrefs()[c.key] || c.fallback;
@@ -187,6 +190,31 @@ function controlRow(c, onPick) {
     // pickers, which show the server's wording whole.
     var chipIds = grade.length >= 2 ? grade : (c.chips && c.options.length <= 4 ? ids : []);
     var rest = c.options.filter(function (o) { return chipIds.indexOf(o.id) < 0; });
+
+    // A family of levels that share one engine (dlpp-1..dlpp-4) is one entry in the picker and a
+    // Level control of its own underneath, instead of the same long sentence four times. The wire
+    // value is still the level id, so the server reads exactly what it always read.
+    var levelGroups = c.levelGroups || [];
+    var groupOf = function (id) {
+        return levelGroups.filter(function (g) { return id.indexOf(g.prefix) === 0; })[0] || null;
+    };
+    var curGroup = groupOf(cur);
+    if (curGroup) { lastLevel[curGroup.prefix] = cur; }
+    if (levelGroups.length) {
+        var seenGroup = {};
+        rest = rest.reduce(function (acc, o) {
+            var g = groupOf(o.id);
+            if (!g) { acc.push(o); return acc; }
+            if (!seenGroup[g.prefix]) {
+                seenGroup[g.prefix] = true;
+                var members = c.options.filter(function (x) { return groupOf(x.id) === g; });
+                // Picking the engine lands on the level last used, else the first one offered.
+                var landing = (curGroup === g && cur) || lastLevel[g.prefix] || members[0].id;
+                acc.push({ id: landing, name: g.head, head: g });
+            }
+            return acc;
+        }, []);
+    }
 
     // Inert because of another axis, not because of this one. Shown rather than hidden: a
     // control that vanishes when an unrelated pick changes is harder to understand than one
@@ -241,7 +269,7 @@ function controlRow(c, onPick) {
         var makeOption = function (o) {
             var opt = el('option', null, o.name + costSuffix(c, o.id));
             opt.value = o.id;
-            if (o.id === cur) { opt.selected = true; }
+            if (o.head ? curGroup === o.head : o.id === cur) { opt.selected = true; }
             var optInert = optionInert(c, o.id);
             if (optInert) {
                 opt.disabled = true;
@@ -296,6 +324,39 @@ function controlRow(c, onPick) {
             };
         }
         box.appendChild(sel);
+    }
+
+    // The Level control for the engine picked above, and the one line the server says about it.
+    if (curGroup) {
+        var levels = c.options.filter(function (o) { return groupOf(o.id) === curGroup; });
+        var lv = el('div', 'gpuup-chips');
+        lv.setAttribute('role', 'radiogroup');
+        lv.setAttribute('aria-label', curGroup.label);
+        lv.appendChild(el('span', 'gpuup-note', curGroup.label));
+        levels.forEach(function (o) {
+            var n = o.id.slice(curGroup.prefix.length);
+            var b = el('button', 'gpuup-chip' + (o.id === cur ? ' on' : ''), n);
+            b.type = 'button';
+            b.setAttribute('role', 'radio');
+            b.setAttribute('aria-checked', o.id === cur ? 'true' : 'false');
+            var lvInert = optionInert(c, o.id);
+            if (conflict || lvInert) {
+                b.disabled = true;
+                b.setAttribute('aria-disabled', 'true');
+                b.title = o.name + ' - ' + (conflict || lvInert);
+            } else {
+                b.title = o.name;
+                b.onclick = function () { onPick(o.id); };
+            }
+            lv.appendChild(b);
+        });
+        row.appendChild(lv);
+
+        // The server's wording for the current level, minus the engine name and level number,
+        // shown once: what it says about the engine is the same for every level.
+        var said = ((levels.filter(function (o) { return o.id === cur; })[0] || {}).name || '')
+            .match(/\(([^)]*)\)/);
+        if (said) { row.appendChild(el('div', 'gpuup-note', said[1])); }
     }
 
     // The reason comes first: a greyed row with no explanation is worse than no greying, since

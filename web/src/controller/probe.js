@@ -131,6 +131,7 @@ export function axisControls(caps) {
                 basic: c.basic || 0, expert: c.expert || null, expertHead: !!c.expertHead,
                 grade: c.grade || null, chips: !!c.chips, costKey: c.costKey || null,
                 showWhen: c.showWhen || null, options: options,
+                levelGroups: c.levelGroups || null,
                 // WEB_PANEL_DESIGN.md 1.3(b)/2.3: optional server-supplied grouping and
                 // per-level notes for a picker. Null when the control declares no such key,
                 // or when this server's probe did not send one - controlRow() renders the

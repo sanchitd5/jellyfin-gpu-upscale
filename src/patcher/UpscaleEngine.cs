@@ -633,8 +633,8 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (ShaderLibrary.IsDlppLevel(level))
             {
                 return "RTX DLPP level " + level.Trim().Substring("dlpp-".Length)
-                    + " (nvdlppx.dll), DEGRADED: gain is content-dependent across levels, "
-                    + "never negative but never large either";
+                    + " (nvdlppx.dll), GPU only - the gain depends on the picture, and a higher "
+                    + "level is not simply better";
             }
 
             string path = ShaderLibrary.NeuralModelPath(level, Settings);
