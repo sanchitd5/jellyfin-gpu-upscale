@@ -2633,3 +2633,37 @@ default. "Deployed and restarted cleanly" is not done, and neither is "the filte
 The plugin already ships working super-resolution and none of this blocks it: FSRCNNX at three
 tiers, Anime4K at two, NVScaler, RAVU-Zoom, and Real-ESRGAN through `vf_ort`. This track adds an
 NVIDIA network, it does not rescue a gap.
+
+## Live-apply smoothness: root cause + A/B swap design (2026-09-24, `.agent-briefs/live-apply-smoothness.md`)
+
+Design-only pass, no CT114 restart/deploy/config change; full write-up in
+`LIVE_APPLY_DESIGN.md`. Checked CT114 first: no live transcode running, only the jellyfin daemon
+(PID 548311) and unrelated ffmpeg builds, so read-only inspection was safe.
+
+**Phase 1 root cause:** the stutter is jellyfin-web's own stock bitrate-change path
+(`playbackManager.setMaxStreamingBitrate` -> `changeStream()`), which this project's live-apply
+reuses unmodified: new `PlaySessionId`, new HLS segment sequence, player restart at current tick,
+old ffmpeg torn down via `stopActiveEncodings`. No Harmony patch in this repo touches transcode
+job lifecycle (`grep` for `TranscodingJobHelper`/`StopEncoding`/`KillTranscodingJob` in `src/`:
+zero matches) so the kill-vs-new-ffmpeg-ready ordering is entirely stock Jellyfin, not this
+plugin's code, and its exact timing is ASSUMED/unverified this pass.
+
+**Phase 2 headline decision:** `UpscaleEngine.HasCapacity()` (`/proc` scan, `src/patcher/
+UpscaleEngine.cs:1512`, called from `UpscalePatches.BuildVerdict`) is the cap actually enforced in
+production today, NOT the shim's `take_slot()`/`SLOT_DIR` -- VERIFIED that
+`/usr/local/bin/jellyfin-ffmpeg-upscale` on CT114 short-circuits to `passthrough()` on
+`plugin_patch_active` before `take_slot()` ever runs, and CT114's `/etc/jellyfin-upscale.json` has
+`plugin_patch_active: true`, `max_concurrent: 4` (not 2 -- that's only the shim script's unused
+internal default). Design: an A/B swap's temporary second ffmpeg counts against
+`HasCapacity()`'s existing count (it is real GPU load) AND against a new, separate, small
+`MaxConcurrentSwaps` cap (suggested default 1) that bounds concurrent in-flight swaps
+specifically, since many viewers each briefly doubling their own load is a different failure
+shape than steady-state aggregate load. At either cap, a swap request falls back to today's
+tear-down-and-restart, reported honestly via a new `"swap-capacity"` status alongside the existing
+negative statuses (AGENTS.md invariant 7), never silently. Player-side seamlessness (can hls.js/
+jellyfin-web take a new segment source without its own visible re-init) is flagged as unverified,
+needs a live test -- not guessed, per AGENTS.md's `window.playbackManager` lesson.
+
+Nothing implemented beyond the design doc: no seam exists yet to hang a `MaxConcurrentSwaps`
+setting off without also building the session-lifecycle patch Phase 2 says is missing, and adding
+inert config would be exactly the "axis nothing reads" anti-pattern (invariant 11).
