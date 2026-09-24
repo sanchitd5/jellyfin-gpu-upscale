@@ -73,6 +73,37 @@ set -euo pipefail
 FFMPEG_VER="${FFMPEG_VER:-8.1.2}"
 PREFIX="${PREFIX:-/usr/lib/jellyfin-ffmpeg-oidn}"
 BUILD="${BUILD:-$(mktemp -d)}"
+
+# This script always extracts a fresh ffmpeg-8.1.2.tar.xz into a brand new mktemp -d, every
+# single run (see BUILD's default above and the tar xf below) - there is deliberately no
+# persistent build tree to reuse. Without CCACHE_BASEDIR, that alone defeats ccache almost
+# entirely: -I flags and -g3 debug info bake $BUILD's own random absolute path into every
+# compiler invocation's hash input, so byte-identical source compiled from two different
+# $BUILD paths (i.e. every run) hashes differently and misses every time - measured directly,
+# 22 hits out of 7810 cacheable calls (0.28%) on a same-flags rebuild that should have hit
+# heavily. CCACHE_BASEDIR tells ccache to normalise any path under it to a path relative to
+# it before hashing, so "$BUILD/ffmpeg-8.1.2/libavcodec/foo.c" from two different $BUILD
+# values both hash as "ffmpeg-8.1.2/libavcodec/foo.c" - the whole point of caching a build
+# whose absolute paths are never the same twice. CCACHE_SLOPPINESS covers the other half of
+# the same problem for headers: a fresh tar extraction gives every header a new mtime/ctime
+# each run even though its content is identical (same tarball, same patches), and ccache's
+# default (non-sloppy) mode treats a changed mtime as a cache-relevant change. Both are safe
+# here specifically because every build starts from the same pinned tarball checksum and the
+# same patch files - there is no scenario where content is unchanged but SHOULD miss.
+#
+# CCACHE_BASEDIR alone is NOT enough, confirmed by direct testing (two builds under different
+# mktemp -d roots but otherwise identical relative source, same as this script's real pattern):
+# 0 hits out of 2 with only BASEDIR+SLOPPINESS set. ccache's own debug log showed why - it
+# separately hashes the absolute compilation working directory by default ("Hashing CWD
+# <path>", the hash_dir option, on by default) specifically so relative paths embedded in
+# debug info still resolve correctly without BASEDIR. That protection is redundant once
+# BASEDIR already normalises those same paths, and actively defeats caching across the
+# different-mktemp-root builds this script always produces. CCACHE_NOHASHDIR turns it off.
+# Retested with both set: 1 hit out of 2 on the same two-different-roots scenario - confirmed
+# fixed, not assumed. See livetestbox.md for the two failed attempts this was found through.
+export CCACHE_BASEDIR="$BUILD"
+export CCACHE_SLOPPINESS="include_file_mtime,include_file_ctime"
+export CCACHE_NOHASHDIR=1
 WITH_OIDN="${WITH_OIDN:-1}"
 WITH_OPTIX="${WITH_OPTIX:-0}"
 WITH_ORT="${WITH_ORT:-0}"
@@ -440,6 +471,7 @@ patch -p1 < "$HERE/ffmpeg/0006-vulkan-to-cuda-hwmap.patch"
 # cuMemcpy2DAsync reasoning as 0006, not a true zero-copy map, no host round trip.
 patch -p1 < "$HERE/ffmpeg/0007-cuda-to-vulkan-hwmap.patch"
 patch -p1 < "$HERE/ffmpeg/0008-hwmap-chain-format.patch"
+patch -p1 < "$HERE/ffmpeg/0009-hwmap-query-formats.patch"
 
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then

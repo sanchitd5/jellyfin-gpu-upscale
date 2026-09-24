@@ -48,10 +48,13 @@ A session running `denoise=optix` + `neural=ort` pays that round trip twice befo
 
 See `hw-resident-encode-plan.md` for the full writeup, findings so far:
 
-1. **Vulkan output -> NVENC**: `hwdownload,format=yuv420p` before encode is a real, confirmed gap
-   in FFmpeg itself (`hwcontext_vulkan.c`'s `vulkan_map_from()` has no `AV_PIX_FMT_CUDA` case, in
+1. **Vulkan output -> NVENC**: `hwdownload,format=yuv420p` before encode was a real, confirmed gap
+   in FFmpeg itself (`hwcontext_vulkan.c`'s `vulkan_map_from()` had no `AV_PIX_FMT_CUDA` case, in
    any FFmpeg release including `master` - not a driver/config issue, checked against source).
-   Smoke-tested and confirmed failing on CT114, 2026-09-22.
+   Smoke-tested and confirmed failing on CT114, 2026-09-22. **Fixed 2026-09-24**, in this project's
+   own patch stack rather than upstream FFmpeg - see Tier 2 below and `livetestbox.md` for the full
+   real fix and verification, not just this one gap but the chained round trip and two more real
+   bugs found getting `UpscaleEngine.BuildChain` to actually use it.
 2. **Every CPU-side node boundary**: bigger in aggregate than (1). Each of `oidn`/`optix`/`ort`/
    `fsr2`/`dlss` round-trips system memory independently, regardless of (1). Not yet measured.
 3. **CUDA-to-CUDA sidestep**: `optix` now reads/writes `AV_PIX_FMT_CUDA` hw frames directly
@@ -105,26 +108,60 @@ that is entirely CUDA-native - `dlpp_rtcuda` and `vsr_rtcuda` each host their dr
 own PE loader and never touch Vulkan (see the backend table above). Per the correction in
 `INTEGRATION_DESIGN.md`, made after that doc's first draft: because `vf_optix.c` is now also pure
 CUDA, this three-filter chain needs NO Vulkan-CUDA bridge at all, unlike the `optix`/`ort` pairing
-this section was originally scoped around. The broken Vulkan-CUDA interop documented in Tier 2
-below only blocks combining these three with the Vulkan-only stages (`sr`/`refine`/`chroma`/
-`deband`/`kernel`, `dlss`, `fsr2`), not the CUDA chain itself. Two things still stand between this
-and a shipped feature: `dlpp_rtcuda`/`vsr_rtcuda` are not wired into `UpscaleEngine` or the
-plugin's 5-place checklist yet (see `TASK.md`, `INTEGRATION_DESIGN.md`), and running both hosted
-loaders alive in the same ffmpeg process has never been tested - every test so far ran exactly one
-of the two.
+this section was originally scoped around. **The Vulkan-CUDA interop documented in Tier 2 below is
+now fixed** (2026-09-24) - it no longer blocks combining these with the Vulkan-only stages
+(`sr`/`refine`/`chroma`/`deband`/`kernel`; `dlss`/`fsr2` remain out of scope for that fix, still
+Vulkan-only, see Tier 2), verified real end to end. `dlpp_rtcuda`/`vsr_rtcuda` are wired into
+`UpscaleEngine` as of this session (`Plan.UsesCudaNeural`, `BuildChain`'s CUDA-native branch - not
+just scoped, the code is there and builds). Still not in the plugin's mandatory 5-place filter
+checklist (`scripts/proxmox-build.sh`'s required five stay `oidn`/`optix`/`ort`/`fsr2`/`dlss`), and
+running both hosted DLL loaders alive in the same ffmpeg process at once remains untested - every
+test so far, including this session's, ran at most one of `dlpp_rtcuda`/`vsr_rtcuda` per command.
 
-### Tier 2 - blocked on the Vulkan-CUDA interop gap, or a much larger fork
+### Tier 2 - the Vulkan-CUDA interop gap is now fixed for one real path; a much larger fork remains open for everything else
 
-Any session touching the Vulkan-only stage - FSRCNNX, RCAS, deband, chroma upscaling via
-libplacebo, or `dlss`/`fsr2` - crosses Vulkan<->CUDA twice (once on the way in if decode or a
-prior filter is CUDA, once on the way out to NVENC). That's the exact gap documented above and in
-`hw-resident-encode-plan.md`: FFmpeg's `hwcontext_vulkan.c` has no Vulkan-to-CUDA `hwmap` case, in
-any release including `master`.
+**Status as of 2026-09-24, corrected from this section's original text below (kept for history,
+marked where it's now wrong).** The interop gap itself - FFmpeg's `hwcontext_vulkan.c` never had a
+Vulkan-to-CUDA `hwmap` case, in any release including `master` - is fixed, upstream in this
+project's own patch stack, not in FFmpeg itself: `ffmpeg/0006-vulkan-to-cuda-hwmap.patch` (the
+Vulkan->CUDA direction) and `ffmpeg/0007-cuda-to-vulkan-hwmap.patch` (the reverse). Getting the
+*chained* round trip (`hwmap=derive_device=vulkan` immediately followed by
+`hwmap=derive_device=cuda`, needed for a CUDA-native session to reach the Vulkan libplacebo stage
+and come back) actually working took three more real, separate bugs on top of those two patches
+existing - a segfault from a stale buffer alias, a frames-context format field baked in wrong and
+never corrected, and a per-frame format field that went stale again after exactly one frame - all
+fixed 2026-09-24, `ffmpeg/0008-hwmap-chain-format.patch` plus a fix folded into 0007, full root
+causes and real verification commands in `livetestbox.md`. Two further real bugs surfaced only once
+`UpscaleEngine.BuildChain` actually used the bridge for the five Vulkan-only axes below alongside a
+CUDA-native neural level: `hwmap`'s own format negotiation was completely unconstrained without an
+anchoring filter (`ffmpeg/0009-hwmap-query-formats.patch`), and libplacebo specifically needs a
+Vulkan device attached to the filtergraph itself (`-filter_hw_device vk`) to negotiate at all, which
+`UpscaleEngine.HwaccelArgs` now always provides for a `UsesCudaNeural` session. See `livetestbox.md`
+for both, with real commands and real exit codes, not summarized here.
 
-Two ways past it, both substantial, neither started:
+**What this actually unblocks**: `UpscaleEngine.BuildChain`'s CUDA-native branch (`dlpp_rtcuda`/
+`vsr_rtcuda`, see "A second, separately-arrived instance of Tier 1 residency" above) can now also
+run FSRCNNX/RCAS/deband/KrigBilateral/chroma/the scaling kernel - Vulkan libplacebo - in the same
+session, bridging out to Vulkan and back to CUDA around one libplacebo pass, with no system-memory
+round trip anywhere in the bridge itself. Verified end to end, real GPU: `EXIT:0` for the full
+combination (chroma + deband + scale + `dlpp_rtcuda`), plus a 15-case combinatorial matrix across
+individual axes, all five together, both `optix`/`optix-temporal` denoise states, all four `dlpp`
+levels and `vsr_rtcuda`, all passing. Not yet a shipped feature end to end: this is the ffmpeg
+command shape working, proven on the actual build; the web client's conflict list
+(`web/src/model/conflicts.js`'s `NEURAL_CUDA_DISABLES_FALLBACK`) has been updated to stop disabling
+those five controls for a CUDA-native neural level, but nothing in this pass has been through a
+full production deploy + live Jellyfin session probe yet - see `livetestbox.md` for exactly what
+has and hasn't been confirmed as of this edit.
+
+**What is still NOT fixed, and this section's original framing for it still holds**: `oidn`, `ort`,
+`fsr2` and `dlss` still round-trip system memory exactly as described below - none of them read or
+write hardware frames directly (only `optix` does, see the Tier 1 table above), so the hwmap bridge
+fixed today has nothing to attach to for those four yet. The two ways past THAT remain unstarted:
 
 - **Write the `hwcontext_vulkan.c` patch** (see `hw-resident-encode-plan.md` for the full scoping
-  and risk discussion - it's shared plumbing under every Vulkan-touching filter here).
+  and risk discussion - it's shared plumbing under every Vulkan-touching filter here). **Correction:
+  this is now written and working**, per above - what remains unstarted is converting `oidn`/`ort`/
+  `fsr2`/`dlss` themselves to read/write hardware frames so they'd have anything to hand the bridge.
 - **Port the Vulkan-only stages to CUDA**: FSRCNNX/RCAS/deband/KrigBilateral as CUDA kernels
   instead of GLSL shaders, `vf_dlss.c` switched from NGX's Vulkan path to NGX's CUDA path. This
   is not a patch - it's replacing libplacebo's role in this project's SR ladder, which is most of

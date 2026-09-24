@@ -39,7 +39,21 @@ The GPU-resident preset (TASK.md Track C) requires none of that.
    That halves memory bandwidth even before going fully GPU-only.
 4. **Engine chain building.** Once the filters take hardware frames, `UpscaleEngine` must emit
    `-hwaccel` and hwmap steps instead of `hwdownload,format=gbrpf32le`. The GPU-resident preset is
-   enforced there too.
+   enforced there too. **The hwmap half of this is now real for one path, not yet for these five
+   filters**: 2026-09-24, `ffmpeg/0007-0009` fixed the chained `hwmap=derive_device=vulkan` ->
+   `hwmap=derive_device=cuda` round trip (three separate bugs - a segfault, a stale-format
+   self-heal, and a frame-format staleness fix; see `livetestbox.md`), and `UpscaleEngine.BuildChain`
+   now uses it to let deband/kernel-scale/refine/chroma/deblur (the Vulkan libplacebo stage) run
+   alongside the CUDA-native neural levels this project already ships (`dlpp_rtcuda`/`vsr_rtcuda` -
+   RTXDLPP.md/RTXVSR.md, a different track from this doc's optix/ort/oidn/fsr2/dlss table, since
+   those two never went through system memory in the first place). That is the SAME hwmap
+   mechanism this item names, proven working end to end and in production, but it does not by
+   itself move ort/oidn/fsr2/dlss onto hardware frames - those five still round-trip system memory
+   exactly as this table describes until each is separately converted. What today's fix removes is
+   one blocker for whichever of them gets converted next: once a filter reads/writes
+   `AV_PIX_FMT_CUDA` (optix's own conversion, done, is the model - see the table row below) or Vulkan
+   hw frames directly, this same bridge is available to route it through the other stage's Vulkan
+   frames without a host round trip either.
 5. **The copy-count interposer as a regression check,** run against each filter.
 
 ## Order

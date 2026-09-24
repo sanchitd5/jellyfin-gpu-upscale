@@ -55,22 +55,33 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public bool NeuralApplied { get; set; }
 
         /// <summary>
-        /// True when this session's neural level (dlpp-1..4, vsr-rtcuda) runs CUDA-native and, as
-        /// a real, felt consequence and not an internal detail, Detail/Refine/Chroma/Debanding and
-        /// the scaling-kernel choice were all forced off for it - the Vulkan libplacebo stage those
-        /// axes need is not reachable from this session's CUDA-only chain. See
-        /// INTEGRATION_DESIGN.md section 6, "what should be user-visible."
+        /// True when this session's neural level (dlpp-1..4, vsr-rtcuda) runs CUDA-native. Until
+        /// 2026-09-24 this also meant Detail/Refine/Chroma/Debanding and the scaling-kernel choice
+        /// were always forced off for it - the Vulkan libplacebo stage those axes need was not
+        /// reachable from a CUDA-only chain (ffmpeg/0006 hwmap=derive_device=cuda existed, but not
+        /// the reverse hop). Fixed: BuildChain now bridges through hwmap=derive_device=vulkan and
+        /// back when any of those five axes is requested alongside a CUDA-native level (see its own
+        /// comment; ffmpeg/0007-0009, livetestbox.md). So this flag alone no longer tells you
+        /// whether those axes ran - check Pipeline for that, which now distinguishes the bridged
+        /// case. Kept named CudaNeuralBypass and still true in both cases: the session's ENCODE
+        /// HANDOFF still bypasses Vulkan-for-encode either way (NVENC gets a CUDA frame directly,
+        /// never software), which is the part everything downstream of this flag (ResizeCredit)
+        /// actually cares about. See INTEGRATION_DESIGN.md section 6, "what should be
+        /// user-visible."
         /// </summary>
         public bool CudaNeuralBypass { get; set; }
 
         /// <summary>
         /// The branch UpscaleEngine actually took for this session's encode handoff: "CUDA (RTX)"
-        /// for a CudaNeuralBypass session (dlpp-1..4, vsr-rtcuda - never reaches libplacebo at
-        /// all), "Vulkan (GPU-resident)" when GpuResidentEncode handed NVENC a mapped CUDA frame
-        /// straight off the Vulkan chain (hwmap=derive_device=cuda - see
-        /// ffmpeg/0006-vulkan-to-cuda-hwmap.patch, verified on real GPU for every libplacebo axis),
-        /// or "Vulkan" for the older hwdownload round trip. Null when nothing ran. See
-        /// WEB_PANEL_DESIGN.md section 3.5, which named this row before the server sent it.
+        /// for a CudaNeuralBypass session that never touches libplacebo (dlpp-1..4/vsr-rtcuda with
+        /// none of deband/kernel-scale/refine/chroma/deblur requested), "CUDA+Vulkan (RTX bridge)"
+        /// for a CudaNeuralBypass session that DOES touch libplacebo (BuildChain's hwmap bridge,
+        /// fixed 2026-09-24 - ffmpeg/0007-0009, livetestbox.md), "Vulkan (GPU-resident)" when
+        /// GpuResidentEncode handed NVENC a mapped CUDA frame straight off the Vulkan chain
+        /// (hwmap=derive_device=cuda - see ffmpeg/0006-vulkan-to-cuda-hwmap.patch, verified on real
+        /// GPU for every libplacebo axis), or "Vulkan" for the older hwdownload round trip. Null
+        /// when nothing ran. See WEB_PANEL_DESIGN.md section 3.5, which named this row before the
+        /// server sent it.
         /// </summary>
         public string Pipeline { get; set; }
 
@@ -543,10 +554,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 GameDepthDowngraded = plan.Act && plan.GameApplied && plan.GameDepthDowngraded,
                 DenoiseDroppedForPatchedBinary = plan.Act ? plan.DenoiseDroppedForPatchedBinary : null,
                 CudaNeuralBypass = plan.Act && plan.UsesCudaNeural,
+                // Same condition BuildChain's own UsesCudaNeural branch uses to decide whether it
+                // builds the hwmap bridge (deband/kernel-scale/refine/chroma/deblur) - kept as the
+                // same field checks rather than a shared helper because Plan itself lives in this
+                // file already and duplicating five field reads costs less than a cross-call
+                // dependency for a value this simple. If BuildChain's own condition ever changes,
+                // this one has to move with it.
                 Pipeline = !plan.Act
                     ? null
                     : plan.UsesCudaNeural
-                        ? "CUDA (RTX)"
+                        ? ((plan.UpscaleApplied || plan.DeblurApplied || plan.RefineApplied
+                                || plan.ChromaApplied || plan.DebandApplied)
+                            ? "CUDA+Vulkan (RTX bridge)"
+                            : "CUDA (RTX)")
                         : (Settings?.GpuResidentEncode == true ? "Vulkan (GPU-resident)" : "Vulkan"),
                 Status = status,
                 Reason = reason,
@@ -1311,13 +1331,20 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 if (plan.UsesCudaNeural)
                 {
                     // CUDA-NATIVE BRANCH: dlpp-1..4 / vsr-rtcuda. Both filters need AV_PIX_FMT_CUDA
-                    // frames straight from decode (RTXDLPP.md/RTXVSR.md), and the Vulkan-CUDA
-                    // interop the rest of this chain would need to reach them from the normal
-                    // Vulkan pipeline is confirmed broken today (vulkan-cuda-hwmap-task.md). So
-                    // this session takes UpscaleEngine's separate CUDA hwaccel branch instead
-                    // (see HwaccelArgs/BuildChain): decode cuda -> [optix] -> the neural filter(s)
-                    // -> NVENC, and every Vulkan-only axis is forced off for it rather than
-                    // silently ignored - see INTEGRATION_DESIGN.md sections 2 and 6.
+                    // frames straight from decode (RTXDLPP.md/RTXVSR.md). The Vulkan-CUDA interop
+                    // this branch needs to also reach chroma/deband/scale(kernel)/refine/deblur -
+                    // hwmap=derive_device=vulkan then back to hwmap=derive_device=cuda around one
+                    // libplacebo pass, same node shape GpuResidentEncode's own hwmap path already
+                    // uses for the Vulkan chain - was fixed 2026-09-24
+                    // (ffmpeg/0007-cuda-to-vulkan-hwmap.patch, ffmpeg/0008-hwmap-chain-format.patch;
+                    // see livetestbox.md for the three root causes and the real verification, incl.
+                    // this exact bridge composed with dlpp_rtcuda). So this session still takes
+                    // UpscaleEngine's separate CUDA hwaccel branch (see HwaccelArgs), but BuildChain
+                    // now bridges through Vulkan for those five axes rather than skipping them -
+                    // see BuildChain's own comment for the node order. Deblock, CPU-side denoise and
+                    // the game temporal upscalers remain forced off below: none of that was part of
+                    // this fix, and deblock/denoise already have their own drop-and-report path
+                    // (plan.DenoiseDroppedForPatchedBinary) for a different, pre-existing reason.
                     plan.NeuralFilter = ShaderLibrary.CudaNeuralFilter(
                         neuralLevel, plan.Width, plan.Height, out string cudaNeuralUsed, cfg);
                     plan.NeuralLevel = cudaNeuralUsed;
@@ -1350,13 +1377,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     plan.DeblockLevel = "off";
                     plan.DeblockWantsHwFrames = false;
 
-                    // The Vulkan-only stages this branch cannot reach: forced off here rather than
-                    // silently dropped downstream, so the session record and BuildChain agree with
-                    // each other about what actually ran.
-                    srLevel = "off";
-                    refineLevel = "off";
-                    chromaLevel = "off";
-                    deblurLevel = "off";
+                    // srLevel/refineLevel/chromaLevel/deblurLevel are NOT forced off here anymore
+                    // (were, until the hwmap bridge above was fixed) - BuildChain now reaches them
+                    // for a UsesCudaNeural session too, via hwmap=derive_device=vulkan around one
+                    // libplacebo pass, then hwmap=derive_device=cuda back to the neural filter.
+                    // Left as whatever was read above; deband/kernel below get the same treatment.
                 }
                 else
                 {
@@ -1489,26 +1514,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     }
                 }
 
-                // Debanding and the scaling kernel both belong to the libplacebo pass, which this
-                // session's CUDA-native branch never reaches.
-                if (plan.UsesCudaNeural)
-                {
-                    wantDeband = false;
-                }
-
+                // Debanding and the scaling kernel both belong to the libplacebo pass - reached for
+                // a UsesCudaNeural session too now, via the hwmap bridge BuildChain builds when any
+                // of deband/kernel-scale/refine/chroma/deblur is active (see the branch's own
+                // comment above). Nothing forced off here anymore for that reason.
                 plan.Upscaler = ShaderLibrary.CanonicalUpscaler(Option(state, "kernel"))
                     ?? ShaderLibrary.CanonicalUpscaler(cfg.Upscaler)
                     ?? "ewa_lanczos";
-
-                // The scaling kernel belongs to the same libplacebo instance as deband, which the
-                // CUDA-native branch never builds (BuildChain returns early with only
-                // CudaDenoiseNode + NeuralFilter). Left as the resolved string here, Describe()
-                // would report a kernel choice - e.g. "ewa_lanczos" - that never actually ran,
-                // the same stale-"on" failure mode deband/kernel were flagged for in review.
-                if (plan.UsesCudaNeural)
-                {
-                    plan.Upscaler = null;
-                }
 
                 plan.ShaderPath = ShaderLibrary.Resolve(
                     cfg,
@@ -2418,15 +2430,31 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
         /// <summary>
         /// The hwaccel device arguments this plan's chain needs: Vulkan for the normal libplacebo
-        /// chain, or CUDA for a session running one of the CUDA-native neural levels (dlpp-1..4,
-        /// vsr-rtcuda) - see Plan.UsesCudaNeural and INTEGRATION_DESIGN.md section 2. The CUDA
-        /// form also asks for the OUTPUT format on the decoder itself
-        /// (-hwaccel_output_format cuda), unlike the Vulkan form, because this branch never
-        /// leaves GPU memory: decode hands CUDA frames straight to the filter chain.
+        /// chain, or CUDA (plus, always, a Vulkan device too - see below) for a session running
+        /// one of the CUDA-native neural levels (dlpp-1..4, vsr-rtcuda) - see Plan.UsesCudaNeural
+        /// and INTEGRATION_DESIGN.md section 2. The CUDA form also asks for the OUTPUT format on
+        /// the decoder itself (-hwaccel_output_format cuda), unlike the Vulkan form, because this
+        /// branch never leaves GPU memory: decode hands CUDA frames straight to the filter chain.
+        ///
+        /// A UsesCudaNeural session also always gets "-init_hw_device vulkan=vk:0 -filter_hw_device
+        /// vk" alongside the CUDA hwaccel, even when this particular plan's chain never touches
+        /// libplacebo. Confirmed by direct testing this is required, not optional, for BuildChain's
+        /// hwmap bridge (see its own comment) to actually reach libplacebo: hwmap derives its own
+        /// device ad hoc mid-graph and that alone is enough for hwmap<->hwmap round trips (the
+        /// original three-bug fix's own repro has no top-level Vulkan device either and works),
+        /// but libplacebo specifically needs a Vulkan device already attached to the filtergraph
+        /// itself (AVFilterContext.hw_device_ctx, which only -filter_hw_device sets) to negotiate
+        /// at all - without it FFmpeg auto-inserts a generic software "scale" filter ahead of
+        /// libplacebo that then can't accept the incoming Vulkan hw frames and fails with
+        /// "Impossible to convert" / ENOSYS, regardless of what hwmap_query_formats declares (see
+        /// ffmpeg/0009-hwmap-query-formats.patch's own comment - that fix was necessary but not
+        /// sufficient on its own). Retested with both devices present and no libplacebo in the
+        /// chain (plain dlpp-alone): unaffected, still EXIT 0, no added cost - declaring a device
+        /// the graph never references costs nothing at run time. See livetestbox.md.
         /// </summary>
         public static string HwaccelArgs(Plan plan) =>
             plan != null && plan.UsesCudaNeural
-                ? " -hwaccel cuda -hwaccel_output_format cuda"
+                ? " -init_hw_device vulkan=vk:0 -filter_hw_device vk -hwaccel cuda -hwaccel_output_format cuda"
                 : " -init_hw_device vulkan=vk:0 -filter_hw_device vk";
 
         /// <summary>
@@ -2445,17 +2473,50 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             if (plan.UsesCudaNeural)
             {
                 // CUDA-NATIVE BRANCH. Decode already produced AV_PIX_FMT_CUDA frames (see
-                // HwaccelArgs), so this never touches "format=yuv420p", never hwuploads and never
-                // reaches libplacebo - the whole point being no system-memory round trip anywhere
-                // in the graph, verified this session (host-callback counters showed +0 allocs
-                // and +0 host-to-device copies after init, across every frame, for both
-                // dlpp_rtcuda and vsr_rtcuda together). NVENC takes the CUDA frame directly, same
-                // as GpuResidentEncode's hwmap path does for the Vulkan chain, except there is no
-                // hwmap needed here because the frame was never anywhere else.
+                // HwaccelArgs), so this never touches "format=yuv420p" and never hwuploads -
+                // whatever a system-memory round trip would mean here, there is none: even the
+                // bridge below stays on GPU memory throughout (verified this session, host-callback
+                // counters showed +0 allocs and +0 host-to-device copies after init, across every
+                // frame, for dlpp_rtcuda and vsr_rtcuda both with and without the bridge active).
+                //
+                // Whether it ALSO reaches libplacebo depends on whether this plan asked for any of
+                // deband/kernel-scale/refine/chroma/deblur - those five live on one libplacebo
+                // instance the CUDA-native branch could not reach until the chained hwmap bridge
+                // was fixed (ffmpeg/0007-cuda-to-vulkan-hwmap.patch,
+                // ffmpeg/0008-hwmap-chain-format.patch, livetestbox.md). When none of them is
+                // active this returns exactly what it always did - CudaDenoiseNode, then the
+                // neural filter, nothing else - because there is nothing for the bridge to buy: no
+                // sense adding two hwmap hops and a libplacebo instance whose own node would be a
+                // no-op. When at least one is active: decode cuda -> [CudaDenoiseNode] ->
+                // hwmap=derive_device=vulkan -> the same libplacebo instance the Vulkan branch
+                // below builds (AppendLibplaceboSegment) -> hwmap=derive_device=cuda -> [the neural
+                // filter] -> NVENC takes the CUDA frame directly, same as GpuResidentEncode's own
+                // hwmap path does for the plain Vulkan chain.
+                bool wantsLibplacebo = plan.UpscaleApplied || plan.DeblurApplied
+                    || plan.RefineApplied || plan.ChromaApplied || plan.DebandApplied;
+
                 var cudaNodes = new List<string>();
                 if (!string.IsNullOrEmpty(plan.CudaDenoiseNode))
                 {
                     cudaNodes.Add(plan.CudaDenoiseNode);
+                }
+
+                if (wantsLibplacebo)
+                {
+                    cudaNodes.Add("hwmap=derive_device=vulkan");
+
+                    // AppendLibplaceboSegment's own leading "," (every node append in this class
+                    // carries its own, so a StringBuilder that already has content just grows) is
+                    // wrong here: this segment becomes its own single element in cudaNodes, joined
+                    // with "," below, so a leading comma inside the element would render as an
+                    // empty node ("...,,libplacebo=..."). Strip it - the segment always starts with
+                    // that one leading comma and nothing else does, so TrimStart(',') is exact, not
+                    // a heuristic.
+                    var bridgeSb = new StringBuilder();
+                    AppendLibplaceboSegment(bridgeSb, plan, cfg);
+                    cudaNodes.Add(bridgeSb.ToString().TrimStart(','));
+
+                    cudaNodes.Add("hwmap=derive_device=cuda");
                 }
 
                 if (plan.NeuralApplied && !string.IsNullOrEmpty(plan.NeuralFilter))
@@ -2536,6 +2597,33 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 sb.Append(',').Append(plan.DenoiseFilter);
             }
 
+            AppendLibplaceboSegment(sb, plan, cfg);
+
+            // Default: bring the frame back to system memory so NVENC re-uploads it itself.
+            // GpuResidentEncode instead derives a CUDA device from the existing Vulkan one and
+            // hands NVENC the frame without leaving the GPU - see the config page for why this
+            // is opt-in rather than the default.
+            sb.Append(cfg?.GpuResidentEncode == true
+                ? ",hwmap=derive_device=cuda"
+                : ",hwdownload,format=yuv420p");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Appends one libplacebo node - the scale/kernel, deband and the composed
+        /// deblur/refine/chroma shader - to <paramref name="sb"/>. Shared between the plain
+        /// Vulkan chain (which already has Vulkan frames from hwupload when this runs) and the
+        /// CUDA-native branch's hwmap bridge (which derives Vulkan frames from CUDA immediately
+        /// before this runs, then bridges back to CUDA immediately after) - same node, same
+        /// options, same shader resolution either way, because chroma/deband/scale/refine/deblur
+        /// don't care which side of a hwmap bridge produced the Vulkan frames they're reading.
+        /// Every append here starts with its own leading "," (matching this class's convention
+        /// elsewhere), so the caller's StringBuilder can already hold content (the Vulkan branch)
+        /// or start empty (the CUDA bridge, which strips the one resulting leading comma before
+        /// using this as a single filtergraph node - see BuildChain).
+        /// </summary>
+        private static void AppendLibplaceboSegment(StringBuilder sb, Plan plan, UpscaleSettings cfg)
+        {
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
                 ",libplacebo=w={0}:h={1}:upscaler={2}",
@@ -2573,15 +2661,6 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     sb.Append(":shader_cache=").Append(cachePrefix);
                 }
             }
-
-            // Default: bring the frame back to system memory so NVENC re-uploads it itself.
-            // GpuResidentEncode instead derives a CUDA device from the existing Vulkan one and
-            // hands NVENC the frame without leaving the GPU - see the config page for why this
-            // is opt-in rather than the default.
-            sb.Append(cfg?.GpuResidentEncode == true
-                ? ",hwmap=derive_device=cuda"
-                : ",hwdownload,format=yuv420p");
-            return sb.ToString();
         }
 
         /// <summary>

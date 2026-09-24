@@ -33,12 +33,23 @@ function nothingIsEnlarged(p) {
 // branch forces off (`NeuralCudaDisables`). An older server that does not send these keys
 // falls back to the literal lists the CUDA-native levels shipped with, so this degrades to
 // "no new UI" rather than to wrong UI on a mixed-version deployment - the same rule every
-// other probe-driven list in this file already follows.
+// other probe-driven list in this file already follows. `NeuralCudaDisables`/`NeuralCudaLevels`
+// are not actually sent by the server today (checked: no match anywhere in src/), so this
+// fallback list is, in practice, the only list currently in effect - keep it in sync with
+// UpscaleEngine.Decide's own forced-off set until a real probe key is wired up.
+//
+// refine/chroma/deblur/deband/kernel were forced off here (and server-side) only because the
+// CUDA-native branch had no Vulkan stage to reach them from - fixed 2026-09-24
+// (ffmpeg/0007-0009, UpscaleEngine.BuildChain's hwmap bridge; see livetestbox.md), so all five
+// are no longer disabled for a CUDA-native neural level. `sr` and `game` stay disabled: `sr` is
+// a genuinely separate SR network (dlpp/vsr-rtcuda already ARE the SR step for this branch,
+// same reason a game upscaler that owns the output size also disables `sr` below), and `game`
+// (fsr2/dlss/dlaa) is still Vulkan-only game-upscaler-specific, not part of this fix's scope.
 //
 // Exact match only, never a prefix test: the pre-existing Maxine placeholder id is the bare
 // 'vsr', and a prefix match on 'vsr' would wrongly catch it too.
 var NEURAL_CUDA_LEVELS_FALLBACK = ['vsr-rtcuda', 'dlpp-1', 'dlpp-2', 'dlpp-3', 'dlpp-4'];
-var NEURAL_CUDA_DISABLES_FALLBACK = ['sr', 'refine', 'chroma', 'deblur', 'game', 'deband', 'kernel'];
+var NEURAL_CUDA_DISABLES_FALLBACK = ['sr', 'game'];
 var CUDA_DENOISE_LEVELS_FALLBACK = ['off', 'optix', 'optix-temporal'];
 
 function probeList(key, fallback) {

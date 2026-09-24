@@ -1,0 +1,58 @@
+--- a/libavfilter/vf_hwmap.c
++++ b/libavfilter/vf_hwmap.c
+@@ -41,12 +41,52 @@
+                                AVFilterFormatsConfig **cfg_in,
+                                AVFilterFormatsConfig **cfg_out)
+ {
++    const HWMapContext *ctx = avctx->priv;
+     int ret;
++    AVFilterFormats *out_formats = NULL;
+ 
+     if ((ret = ff_formats_ref(ff_all_formats(AVMEDIA_TYPE_VIDEO),
+-                              &cfg_in[0]->formats)) < 0 ||
+-        (ret = ff_formats_ref(ff_all_formats(AVMEDIA_TYPE_VIDEO),
+-                              &cfg_out[0]->formats)) < 0)
++                              &cfg_in[0]->formats)) < 0)
++        return ret;
++
++    /* With no derive_device_type this stays ff_all_formats(), unchanged from before -
++     * every case except the one below (explicit derive_device=vulkan/cuda from a hardware
++     * source) keeps FFmpeg's own generic behaviour, including the reverse (software-to-
++     * hardware) and pass-through (unmap) shapes elsewhere in this file that this query also
++     * serves.
++     *
++     * With derive_device_type set, this filter's OWN config_output (below) always builds
++     * its output frames context as exactly one hw pixel format: the one that device type
++     * uses. Leaving this query unconstrained still let FFmpeg's generic link-format
++     * negotiation land on anything mutually acceptable across the WHOLE downstream
++     * subgraph, not just this link, and when nothing further downstream anchors it either -
++     * a hwmap chained straight off raw hwaccel decode output, with no intervening filter
++     * declaring a single strict format (compare vf_optix.c's FILTER_SINGLE_PIXFMT) - that
++     * negotiation is free to wander to something like AV_PIX_FMT_GRAY, which is never
++     * actually buildable and fails downstream with a confusing ENOSYS instead of a clear
++     * format error at graph-config time. Pinning the query to the one format this filter
++     * will really produce fixes the negotiation at its source rather than requiring every
++     * caller to add an anchoring filter upstream. Only vulkan/cuda are named here because
++     * they are the only derive_device_type values this project's own patches
++     * (0006/0007/0008) exercise or have verified; any other device type name keeps the
++     * previous ff_all_formats() behaviour rather than guess at a mapping nothing here
++     * confirms. See livetestbox.md for the real failing chain this was found from. */
++    if (ctx->derive_device_type) {
++        enum AVPixelFormat pinned = AV_PIX_FMT_NONE;
++
++        if (!strcmp(ctx->derive_device_type, "vulkan"))
++            pinned = AV_PIX_FMT_VULKAN;
++        else if (!strcmp(ctx->derive_device_type, "cuda"))
++            pinned = AV_PIX_FMT_CUDA;
++
++        if (pinned != AV_PIX_FMT_NONE)
++            out_formats = ff_make_formats_list_singleton(pinned);
++    }
++
++    if (!out_formats)
++        out_formats = ff_all_formats(AVMEDIA_TYPE_VIDEO);
++
++    if ((ret = ff_formats_ref(out_formats, &cfg_out[0]->formats)) < 0)
+         return ret;
+ 
+     return 0;
