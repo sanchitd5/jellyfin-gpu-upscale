@@ -56,10 +56,65 @@ export function notePlaybackManager(exports) {
     } catch (err) { /* never worth breaking a module for */ }
 }
 
+/*
+ * A THIRD capture path, tried lazily every time player() is asked for the manager and nothing has
+ * been captured yet.
+ *
+ * The webpack-chunk capture in webpack-hook.js only sees a module's factory run AFTER this script
+ * has installed its hook. That is fine for a chunk lazy-loaded later, but playbackManager is a
+ * core singleton most builds load as part of the initial bundle - already executed, and its result
+ * already cached in webpack's own module cache, by the time an injected `<script defer>` runs.
+ * Replacing `modules[id]` at that point changes nothing: webpack never calls the factory again.
+ * That is a real, silent gap this project's own prior "capture by shape" fix did not close, and
+ * the exact shape of THIS bug: playback starts fine (fetch/xhr hooks fire on PlaybackInfo, proven
+ * by "source height"/"new item" in the log), but requestRestream() logs "nothing is playing" and
+ * does nothing, because playbackManagerRef was never set and window.playbackManager does not
+ * exist on this build either.
+ *
+ * jellyfin-web (and Emby before it) has separately kept an AMD-style module shim for exactly this
+ * class of problem - it is the officially documented way a third-party script/plugin reaches a
+ * core singleton after the fact: `window.require(['playbackManager'], function (pm) {...})`. If
+ * the module is already loaded, the callback fires immediately (synchronously or on a microtask);
+ * if not yet loaded, it queues and fires once it is - either way, unlike the webpack-chunk
+ * capture, this does not depend on WHEN our script attached relative to WHEN the module first ran.
+ * Tried at most once (a failed/absent `window.require` is not worth retrying every call), pure
+ * fallback: this changes nothing when the webpack-chunk capture already worked.
+ */
+var requireShimTried = false;
+export function tryRequireShim() {
+    if (requireShimTried || state.playbackManagerRef) {
+        return;
+    }
+
+    requireShimTried = true;
+    try {
+        if (typeof window.require !== 'function') {
+            return;
+        }
+
+        window.require(['playbackManager'], function (pm) {
+            try {
+                if (!state.playbackManagerRef && isPlaybackManager(pm)) {
+                    state.playbackManagerRef = pm;
+                    log('found playbackManager via the require() module shim');
+                }
+            } catch (err) { /* never worth breaking the shim callback for */ }
+        });
+    } catch (err) {
+        log('require() shim probe failed', err);
+    }
+}
+
 export function player() {
-    return isPlaybackManager(window.playbackManager)
-        ? window.playbackManager
-        : state.playbackManagerRef;
+    if (isPlaybackManager(window.playbackManager)) {
+        return window.playbackManager;
+    }
+
+    if (!state.playbackManagerRef) {
+        tryRequireShim();
+    }
+
+    return state.playbackManagerRef;
 }
 
 export function playerPresent() {

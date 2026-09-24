@@ -5,6 +5,7 @@ import { hookWebpack } from './controller/webpack-hook.js';
 import { hookFetch, hookXhr } from './controller/network.js';
 import { watchPlaybackInfoDialog } from './controller/playback-hooks.js';
 import { probeServer } from './controller/probe.js';
+import { tryRequireShim } from './controller/live-apply.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -16,6 +17,7 @@ import { probeServer } from './controller/probe.js';
         hookWebpack();
         hookFetch();
         hookXhr();
+        tryRequireShim();
         watchPlaybackInfoDialog();
         probeServer();
         state.installed = true;
