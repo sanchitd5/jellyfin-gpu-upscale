@@ -144,12 +144,19 @@ if [ "$WITH_FFMPEG" = "1" ]; then
 
     required_filters="oidn optix ort fsr2 dlss"
     [ "${WITH_MAXINE_VSR:-0}" = "1" ] && required_filters="$required_filters vsr"
+    # Capture the list once. Piping ffmpeg into `grep -q` under pipefail reports failure whenever
+    # grep exits on its first match while ffmpeg is still writing (SIGPIPE, status 141), so a
+    # filter that is present can be counted as missing.
+    filters_rc=0
+    filters_out=$("$PATCHED_FFMPEG" -hide_banner -filters 2>/dev/null) || filters_rc=$?
     missing=""
     for f in $required_filters; do
-        "$PATCHED_FFMPEG" -hide_banner -filters 2>/dev/null | grep -qE "^ *[TSC.]* *$f " || missing="$missing $f"
+        grep -qE "^ *[TSC.]* *$f " <<<"$filters_out" || missing="$missing $f"
     done
     if [ -n "$missing" ]; then
         echo "==> FAILED: the rebuilt ffmpeg is missing:$missing" >&2
+        echo "    -filters exit status $filters_rc, $(printf '%s\n' "$filters_out" | wc -l) lines of output; custom filter lines seen:" >&2
+        printf '%s\n' "$filters_out" | grep -E ' (oidn|optix|ort|fsr2|dlss|dlpp_rtcuda|vsr_rtcuda|transpose_cuda) ' | sed 's/^/      /' >&2 || true
         if [ -f "$PATCHED_FFMPEG.prev" ]; then
             mv "$PATCHED_FFMPEG.prev" "$PATCHED_FFMPEG"
             echo "    restored the previous binary; nothing was deployed" >&2
