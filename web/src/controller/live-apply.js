@@ -29,6 +29,28 @@ export function isPlaybackManager(o) {
         && typeof o.currentItem === "function";
 }
 
+/*
+ * THE PLAYER ARGUMENT currentItem()/currentTime() ACTUALLY WANT.
+ *
+ * Confirmed live (this session's own diagnostic dump: chunks/modulesWrapped/hasRef all healthy,
+ * capture worked) that pm.currentItem() returns nothing during real, active playback -
+ * playerPresent() read that as "nothing is playing" and applyNow() refused with exactly that
+ * message on a portrait video that WAS playing. jellyfin-web's playbackManager tracks more than
+ * one registered player (html video, cast, etc.) and several of its methods, this one included,
+ * take the ACTIVE player instance as an argument rather than assuming a single implicit one -
+ * calling them with none is a silent wrong answer, not an error, which is exactly the failure
+ * shape this project keeps hitting (AGENTS.md). getCurrentPlayer() is the same object's own way
+ * of naming which player is active; pass it through when the method carries it, but keep the
+ * no-arg call available as a fallback for a build old enough not to need it.
+ */
+function activePlayer(pm) {
+    try {
+        return typeof pm.getCurrentPlayer === 'function' ? pm.getCurrentPlayer() : undefined;
+    } catch (err) {
+        return undefined;
+    }
+}
+
 export function notePlaybackManager(exports) {
     if (state.playbackManagerRef || !exports) {
         return;
@@ -124,7 +146,7 @@ export function playerPresent() {
             && typeof pm.setMaxStreamingBitrate === 'function'
             && typeof pm.getMaxStreamingBitrate === 'function'
             && typeof pm.currentItem === 'function'
-            && pm.currentItem());
+            && pm.currentItem(activePlayer(pm)));
     } catch (err) {
         return false;
     }
@@ -185,7 +207,8 @@ export function watchApplied(previousId) {
 export function replayHere() {
     try {
         var pm = player();
-        var item = pm && typeof pm.currentItem === 'function' ? pm.currentItem() : null;
+        var pl = activePlayer(pm);
+        var item = pm && typeof pm.currentItem === 'function' ? pm.currentItem(pl) : null;
         var id = item && (item.Id || item.id);
         if (!id || typeof pm.play !== 'function') {
             return false;
@@ -193,7 +216,7 @@ export function replayHere() {
 
         var ticks = 0;
         if (typeof pm.currentTime === 'function') {
-            var ms = pm.currentTime();
+            var ms = pm.currentTime(pl);
             if (ms > 0) { ticks = Math.floor(ms) * 10000; }
         }
 

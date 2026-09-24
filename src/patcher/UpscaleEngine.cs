@@ -1094,6 +1094,21 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 {
                     upscaleReason = "no upscale requested";
                 }
+                else if (sw < sh)
+                {
+                    // Portrait source (width < height, a phone recording). The whole ladder - its
+                    // cost table, its shader choices, MaxSourceHeight's own cutoff - is measured
+                    // and tuned against 16:9 landscape content (state.js's FPS/DENOISE_COST/
+                    // NEURAL_COST comments, RTXDLPP.md's benchmark baseline). None of it has been
+                    // validated the other way round, and MaxSourceHeight's own check does not
+                    // reliably catch this: it compares sh against a landscape-tuned cutoff, but
+                    // for a portrait source sh is already the LONG dimension, so a 1080x1920
+                    // source can sail past a cutoff meant to stop enlarging something already
+                    // tall enough. Bypassed outright rather than run the landscape math on
+                    // sideways content and hope it holds - reported 2026-09-24 against a real
+                    // 1080x1920 source.
+                    upscaleReason = "portrait source, upscale bypassed";
+                }
                 else if (sh > cfg.MaxSourceHeight)
                 {
                     upscaleReason = "source taller than MaxSourceHeight";
