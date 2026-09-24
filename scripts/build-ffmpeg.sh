@@ -436,7 +436,7 @@ if [[ "$WITH_OPTIX" == "1" ]]; then
     # vf_optix.c takes AV_PIX_FMT_CUDA frames directly (both nv12 and p010le sw_format) and
     # embeds a small CUDA C module for the on-GPU NV12/P010<->RGB conversion (roadmap step 1,
     # GPU-resident conversion), compiled to PTX below the same way the DLPP/VSR modules are.
-    cp "$HERE/ffmpeg/gu_optix_nv12_rgbf32.cu" libavfilter/
+    cp "$HERE/ffmpeg/gu_optix_nv12_rgbf32.cu" "$HERE/ffmpeg/gu_colorconv.h" libavfilter/
     compile_cuda_to_header libavfilter/gu_optix_nv12_rgbf32.cu \
         gu_optix_nv12_rgbf32_ptx libavfilter/gu_optix_nv12_rgbf32_ptx.h
     mkdir -p libavfilter/optix-compat
@@ -513,7 +513,7 @@ if [[ "$WITH_RTXDLPP" == "1" ]]; then
     cp "$HERE/ffmpeg/gu_dlpp_pe_map.c" "$HERE/ffmpeg/gu_dlpp_aivp_loader.c" \
        "$HERE/ffmpeg/gu_dlpp_ngx_isr.c" "$HERE/ffmpeg/gu_dlpp_embed.h" \
        "$HERE/ffmpeg/gu_dlpp_embed.c" "$HERE/ffmpeg/vf_dlpp_rtcuda.c" \
-       "$HERE/ffmpeg/gu_dlpp_nv12_rgba.cu" libavfilter/
+       "$HERE/ffmpeg/gu_dlpp_nv12_rgba.cu" "$HERE/ffmpeg/gu_colorconv.h" libavfilter/
 
     # gu_dlpp_nv12_rgba_ptx.h is generated, not committed: real CUDA C compiled to PTX with
     # clang's NVPTX backend (compile_cuda_to_header, defined above), then the same
@@ -535,7 +535,7 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
     cp "$HERE/ffmpeg/gu_vsr_pe_map.c" "$HERE/ffmpeg/gu_vsr_aivp_loader.c" \
        "$HERE/ffmpeg/gu_vsr_ngx_isr.c" "$HERE/ffmpeg/gu_vsr_embed.h" \
        "$HERE/ffmpeg/gu_vsr_embed.c" "$HERE/ffmpeg/vf_vsr_rtcuda.c" \
-       "$HERE/ffmpeg/gu_vsr_nv12_rgba.cu" libavfilter/
+       "$HERE/ffmpeg/gu_vsr_nv12_rgba.cu" "$HERE/ffmpeg/gu_colorconv.h" libavfilter/
 
     # gu_vsr_nv12_rgba_ptx.h is generated, not committed: same compile_cuda_to_header path
     # WITH_RTXDLPP uses for its own PTX-as-header file.

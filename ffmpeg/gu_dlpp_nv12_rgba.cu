@@ -1,27 +1,15 @@
-/* nv12_to_rgba / p010_to_rgba / rgba_to_nv12: NV12<->RGBA8 CUDA surface conversion for
- * dlpp_rtcuda, real CUDA C compiled to PTX with clang's NVPTX backend (no NVIDIA SDK,
- * no NVIDIA material -- our own BT.709 limited-range integer conversion). CT114 has no
- * nvcc; clang-18's own bundled __clang_cuda_builtin_vars.h supplies blockIdx/threadIdx/
- * blockDim without a CUDA toolkit install (see scripts/build-ffmpeg.sh for the exact
- * compile command). The two `sust`/`suld` bindless-surface accesses stay inline PTX asm
- * because CUDA's surface intrinsics live in headers this build deliberately doesn't pull
- * in; everything else here is ordinary, auditable C.
- *
- * p010_to_rgba exists because NVDEC decodes 10-bit sources straight to p010le (10-bit
- * samples packed into 16-bit little-endian words, value = sample << 6), not nv12 --
- * nv12_to_rgba's byte reads silently misread that layout. This filter's whole pipeline
- * (DLPP SDK call, rgba_to_nv12 below) is 8-bit only regardless of input, so p010_to_rgba
- * reduces to the 8-bit domain by keeping the top 8 bits of each 16-bit word (word >> 8)
- * before running the *same* BT.709 matrix nv12_to_rgba uses -- a deliberate, documented
- * downconvert, not a truncation bug.
+/* semiplanar_to_rgba / planar444_to_rgba / rgba_to_nv12: NVDEC-sw_format<->RGBA8 CUDA
+ * surface conversion for dlpp_rtcuda. The NVDEC<->RGB(A) BT.709 math and sample-format
+ * handling are shared with gu_optix_nv12_rgbf32.cu/gu_vsr_nv12_rgba.cu via gu_colorconv.h
+ * -- see that header for why (textual, not link-time, sharing: each .cu file is still its
+ * own independently-compiled PTX blob). This file keeps only what's actually
+ * dlpp_rtcuda-specific: the bindless CUDA surface read/write. The two `sust`/`suld`
+ * accesses stay inline PTX asm because CUDA's surface intrinsics live in headers this
+ * build deliberately doesn't pull in.
  */
-#define __global__ __attribute__((global))
-#define __device__ __attribute__((device))
-#include <__clang_cuda_builtin_vars.h>
+#include "gu_colorconv.h"
 
 typedef unsigned long long cudaSurfaceObject_t;
-
-__device__ static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 __device__ static inline void surf_write_rgba8(cudaSurfaceObject_t s, int x, int y,
                                                 unsigned char r, unsigned char g,
@@ -44,53 +32,35 @@ __device__ static inline void surf_read_rgba8(cudaSurfaceObject_t s, int x, int 
     *r = (unsigned char)rr; *g = (unsigned char)gg; *b = (unsigned char)bb; *a = (unsigned char)aa;
 }
 
-/* BT.709 limited-range YUV->RGB. y/u/v are already 8-bit-domain samples in [0,255] --
- * for p010 the caller has already reduced the 16-bit word to that domain. */
-__device__ static inline void yuv_to_rgb8(int y, int u, int v,
-                                           unsigned char *r, unsigned char *g, unsigned char *b)
-{
-    int c = y - 16;
-    int d = u - 128;
-    int e = v - 128;
-    int cy = c * 298 + 128;
-    *r = (unsigned char)clampi((cy + 459 * e) >> 8, 0, 255);
-    *g = (unsigned char)clampi((cy - 55 * d - 136 * e) >> 8, 0, 255);
-    *b = (unsigned char)clampi((cy + 541 * d) >> 8, 0, 255);
-}
-
-extern "C" __global__ void nv12_to_rgba(const unsigned char *y_plane, unsigned yp,
-                                        const unsigned char *uv_plane, unsigned uvp,
-                                        cudaSurfaceObject_t dst, unsigned w, unsigned h)
+extern "C" __global__ void semiplanar_to_rgba(const unsigned char *y_plane, unsigned yp,
+                                              const unsigned char *uv_plane, unsigned uvp,
+                                              cudaSurfaceObject_t dst, unsigned w, unsigned h,
+                                              int word_bytes, int chroma_vshift)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if ((unsigned)x >= w || (unsigned)y >= h) return;
 
-    int Y = y_plane[y * yp + x];
-    const unsigned char *uv = uv_plane + (y / 2) * uvp + (x & ~1);
-
-    unsigned char r, g, b;
-    yuv_to_rgb8(Y, uv[0], uv[1], &r, &g, &b);
-    surf_write_rgba8(dst, x, y, r, g, b, 255);
+    int Y, U, V, r, g, b;
+    gu_read_semiplanar(y_plane, yp, uv_plane, uvp, x, y, word_bytes, chroma_vshift, &Y, &U, &V);
+    gu_yuv_to_rgb8(Y, U, V, &r, &g, &b);
+    surf_write_rgba8(dst, x, y, (unsigned char)r, (unsigned char)g, (unsigned char)b, 255);
 }
 
-extern "C" __global__ void p010_to_rgba(const unsigned char *y_plane, unsigned yp,
-                                        const unsigned char *uv_plane, unsigned uvp,
-                                        cudaSurfaceObject_t dst, unsigned w, unsigned h)
+extern "C" __global__ void planar444_to_rgba(const unsigned char *y_plane, unsigned yp,
+                                             const unsigned char *u_plane, unsigned up,
+                                             const unsigned char *v_plane, unsigned vp,
+                                             cudaSurfaceObject_t dst, unsigned w, unsigned h,
+                                             int word_bytes)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if ((unsigned)x >= w || (unsigned)y >= h) return;
 
-    const unsigned short *y16 = (const unsigned short *)(y_plane + y * yp);
-    int Y = y16[x] >> 8;
-
-    const unsigned short *uv16 = (const unsigned short *)(uv_plane + (y / 2) * uvp) + (x & ~1);
-    int U = uv16[0] >> 8, V = uv16[1] >> 8;
-
-    unsigned char r, g, b;
-    yuv_to_rgb8(Y, U, V, &r, &g, &b);
-    surf_write_rgba8(dst, x, y, r, g, b, 255);
+    int Y, U, V, r, g, b;
+    gu_read_planar444(y_plane, yp, u_plane, up, v_plane, vp, x, y, word_bytes, &Y, &U, &V);
+    gu_yuv_to_rgb8(Y, U, V, &r, &g, &b);
+    surf_write_rgba8(dst, x, y, (unsigned char)r, (unsigned char)g, (unsigned char)b, 255);
 }
 
 extern "C" __global__ void rgba_to_nv12(cudaSurfaceObject_t src,
@@ -109,13 +79,11 @@ extern "C" __global__ void rgba_to_nv12(cudaSurfaceObject_t src,
             unsigned char r, g, b, a;
             surf_read_rgba8(src, x0 + i, y0 + j, &r, &g, &b, &a);
             sr += r; sg += g; sb += b;
-            int yv = ((r * 47 + g * 157 + b * 16 + 128) >> 8) + 16;
-            y_plane[(y0 + j) * yp + (x0 + i)] = (unsigned char)yv;
+            y_plane[(y0 + j) * yp + (x0 + i)] = gu_rgb_to_y(r, g, b);
         }
     }
-    int ar = (sr + 2) >> 2, ag = (sg + 2) >> 2, ab = (sb + 2) >> 2;
-    int u = ((ar * -26 + ag * -87 + ab * 112 + 128) >> 8) + 128;
-    int v = ((ar * 112 + ag * -102 + ab * -10 + 128) >> 8) + 128;
-    uv_plane[by * uvp + x0]     = (unsigned char)u;
-    uv_plane[by * uvp + x0 + 1] = (unsigned char)v;
+    unsigned char u, v;
+    gu_rgb_avg_to_uv((sr + 2) >> 2, (sg + 2) >> 2, (sb + 2) >> 2, &u, &v);
+    uv_plane[by * uvp + x0]     = u;
+    uv_plane[by * uvp + x0 + 1] = v;
 }

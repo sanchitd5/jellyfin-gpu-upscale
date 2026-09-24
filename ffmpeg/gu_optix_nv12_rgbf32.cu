@@ -1,52 +1,28 @@
-/* nv12_to_rgbf32 / p010_to_rgbf32 / rgbf32_to_nv12 / smooth_luma_dev / p010_smooth_luma_dev
- * / expand_flow_dev: OptiX's on-GPU NV12<->linear-float3 conversion plus the two device-to-
- * device helpers used for the NVOFA temporal flow path, real CUDA C compiled to PTX with
- * clang's NVPTX backend (no NVIDIA SDK, no NVIDIA material -- our own BT.709 limited-range
- * integer conversion and 3x3 box filter). CT114 has no nvcc; clang-18's own bundled
- * __clang_cuda_builtin_vars.h supplies blockIdx/threadIdx/blockDim without a CUDA toolkit
- * install (see scripts/build-ffmpeg.sh for the exact compile command). Everything here is
- * ordinary global-memory reads/writes -- no surface object, so no inline PTX asm needed
- * anywhere in this file.
- *
- * p010_to_rgbf32 and p010_smooth_luma_dev exist because NVDEC decodes 10-bit sources
- * straight to p010le (10-bit samples packed into 16-bit little-endian words, value =
- * sample << 6), not nv12 -- the 8-bit-only kernels' byte reads silently misread that
- * layout. This filter's denoiser output is 8-bit NV12 either way (rgbf32_to_nv12 never
- * varies with input format), so both p010 variants reduce to the 8-bit domain by keeping
- * the top 8 bits of each 16-bit word (word >> 8) before running the *same* math the 8-bit
- * kernels use -- a deliberate, documented downconvert, not a truncation bug.
+/* semiplanar_to_rgbf32 / planar444_to_rgbf32 / rgbf32_to_nv12 / smooth_luma_dev /
+ * expand_flow_dev: OptiX's on-GPU NVDEC-sw_format<->linear-float3 conversion plus the two
+ * device-to-device helpers used for the NVOFA temporal flow path. The NVDEC<->RGB(A) BT.709
+ * math and sample-format handling are shared with gu_dlpp_nv12_rgba.cu/gu_vsr_nv12_rgba.cu
+ * via gu_colorconv.h -- see that header for why (textual, not link-time, sharing: each .cu
+ * file is still its own independently-compiled PTX blob). This file keeps only what's
+ * actually optix-specific: the RGB float3 buffer read/write (as opposed to dlpp/vsr's RGBA8
+ * CUDA surface) and the NVOFA luma-smoothing / flow-grid-expansion kernels.
  */
-#define __global__ __attribute__((global))
-#define __device__ __attribute__((device))
-#include <__clang_cuda_builtin_vars.h>
+#include "gu_colorconv.h"
 
-__device__ static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-/* BT.709 limited-range YUV->RGB. y/u/v are already 8-bit-domain samples in [0,255] --
- * for p010 the caller has already reduced the 16-bit word to that domain. */
-__device__ static inline void yuv_to_rgb8(int y, int u, int v, int *r, int *g, int *b)
-{
-    int c = y - 16;
-    int d = u - 128;
-    int e = v - 128;
-    int cy = c * 298 + 128;
-    *r = clampi((cy + 459 * e) >> 8, 0, 255);
-    *g = clampi((cy - 55 * d - 136 * e) >> 8, 0, 255);
-    *b = clampi((cy + 541 * d) >> 8, 0, 255);
-}
-
-extern "C" __global__ void nv12_to_rgbf32(const unsigned char *y_plane, unsigned yp,
-                                          const unsigned char *uv_plane, unsigned uvp,
-                                          float *dst, unsigned dp, unsigned w, unsigned h)
+/* Every non-444 NVDEC sw_format, converted straight into OptiX's interleaved float3
+ * buffer in [0,1]. */
+extern "C" __global__ void semiplanar_to_rgbf32(const unsigned char *y_plane, unsigned yp,
+                                                 const unsigned char *uv_plane, unsigned uvp,
+                                                 float *dst, unsigned dp, unsigned w, unsigned h,
+                                                 int word_bytes, int chroma_vshift)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if ((unsigned)x >= w || (unsigned)y >= h) return;
 
-    int Y = y_plane[y * yp + x];
-    const unsigned char *uv = uv_plane + (y / 2) * uvp + (x & ~1);
-    int r, g, b;
-    yuv_to_rgb8(Y, uv[0], uv[1], &r, &g, &b);
+    int Y, U, V, r, g, b;
+    gu_read_semiplanar(y_plane, yp, uv_plane, uvp, x, y, word_bytes, chroma_vshift, &Y, &U, &V);
+    gu_yuv_to_rgb8(Y, U, V, &r, &g, &b);
 
     float *p = (float *)((unsigned char *)dst + y * dp) + x * 3;
     p[0] = r * (1.0f / 255.0f);
@@ -54,19 +30,21 @@ extern "C" __global__ void nv12_to_rgbf32(const unsigned char *y_plane, unsigned
     p[2] = b * (1.0f / 255.0f);
 }
 
-extern "C" __global__ void p010_to_rgbf32(const unsigned char *y_plane, unsigned yp,
-                                          const unsigned char *uv_plane, unsigned uvp,
-                                          float *dst, unsigned dp, unsigned w, unsigned h)
+/* yuv444p and its >8-bit siblings, converted straight into OptiX's interleaved float3
+ * buffer in [0,1]. */
+extern "C" __global__ void planar444_to_rgbf32(const unsigned char *y_plane, unsigned yp,
+                                                const unsigned char *u_plane, unsigned up,
+                                                const unsigned char *v_plane, unsigned vp,
+                                                float *dst, unsigned dp, unsigned w, unsigned h,
+                                                int word_bytes)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if ((unsigned)x >= w || (unsigned)y >= h) return;
 
-    const unsigned short *y16 = (const unsigned short *)(y_plane + y * yp);
-    int Y = y16[x] >> 8;
-    const unsigned short *uv16 = (const unsigned short *)(uv_plane + (y / 2) * uvp) + (x & ~1);
-    int r, g, b;
-    yuv_to_rgb8(Y, uv16[0] >> 8, uv16[1] >> 8, &r, &g, &b);
+    int Y, U, V, r, g, b;
+    gu_read_planar444(y_plane, yp, u_plane, up, v_plane, vp, x, y, word_bytes, &Y, &U, &V);
+    gu_yuv_to_rgb8(Y, U, V, &r, &g, &b);
 
     float *p = (float *)((unsigned char *)dst + y * dp) + x * 3;
     p[0] = r * (1.0f / 255.0f);
@@ -74,6 +52,7 @@ extern "C" __global__ void p010_to_rgbf32(const unsigned char *y_plane, unsigned
     p[2] = b * (1.0f / 255.0f);
 }
 
+/* Denoiser output is always 8-bit NV12 regardless of input sw_format. */
 extern "C" __global__ void rgbf32_to_nv12(const float *src, unsigned sp,
                                           unsigned char *y_plane, unsigned yp,
                                           unsigned char *uv_plane, unsigned uvp,
@@ -89,26 +68,27 @@ extern "C" __global__ void rgbf32_to_nv12(const float *src, unsigned sp,
         const float *row = (const float *)((const unsigned char *)src + (y0 + j) * sp);
         for (int i = 0; i < 2; i++) {
             const float *px = row + (x0 + i) * 3;
-            int r = clampi((int)(px[0] * 255.0f + 0.5f), 0, 255);
-            int g = clampi((int)(px[1] * 255.0f + 0.5f), 0, 255);
-            int b = clampi((int)(px[2] * 255.0f + 0.5f), 0, 255);
+            int r = gu_clampi((int)(px[0] * 255.0f + 0.5f), 0, 255);
+            int g = gu_clampi((int)(px[1] * 255.0f + 0.5f), 0, 255);
+            int b = gu_clampi((int)(px[2] * 255.0f + 0.5f), 0, 255);
             sr += r; sg += g; sb += b;
-            int yv = ((r * 47 + g * 157 + b * 16 + 128) >> 8) + 16;
-            y_plane[(y0 + j) * yp + (x0 + i)] = (unsigned char)yv;
+            y_plane[(y0 + j) * yp + (x0 + i)] = gu_rgb_to_y(r, g, b);
         }
     }
-    int ar = (sr + 2) >> 2, ag = (sg + 2) >> 2, ab = (sb + 2) >> 2;
-    int u = ((ar * -26 + ag * -87 + ab * 112 + 128) >> 8) + 128;
-    int v = ((ar * 112 + ag * -102 + ab * -10 + 128) >> 8) + 128;
-    uv_plane[by * uvp + x0]     = (unsigned char)u;
-    uv_plane[by * uvp + x0 + 1] = (unsigned char)v;
+    unsigned char u, v;
+    gu_rgb_avg_to_uv((sr + 2) >> 2, (sg + 2) >> 2, (sb + 2) >> 2, &u, &v);
+    uv_plane[by * uvp + x0]     = u;
+    uv_plane[by * uvp + x0 + 1] = v;
 }
 
 /* smooth_luma_dev: device-to-device 3x3 box filter over the decoded Y plane, writing
- * straight into NVOFA's own pitched input buffer (temporal mode only). */
+ * straight into NVOFA's own pitched input buffer (temporal mode only). word_bytes handles
+ * both 8-bit and 16-bit-word luma the same way semiplanar reads do; yuv444p's Y plane is
+ * byte-identical in layout to a semiplanar format's Y plane, so no is_planar444 variant is
+ * needed here. */
 extern "C" __global__ void smooth_luma_dev(const unsigned char *y_plane, unsigned yp,
                                            unsigned char *dst, unsigned dp,
-                                           unsigned w, unsigned h)
+                                           unsigned w, unsigned h, int word_bytes)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -118,42 +98,26 @@ extern "C" __global__ void smooth_luma_dev(const unsigned char *y_plane, unsigne
     int ym = y > 0 ? y - 1 : 0, ypp = y < (int)h - 1 ? y + 1 : (int)h - 1;
 
     int sum = 0;
-    sum += y_plane[ym  * yp + xm] + y_plane[ym  * yp + x] + y_plane[ym  * yp + xp];
-    sum += y_plane[y   * yp + xm] + y_plane[y   * yp + x] + y_plane[y   * yp + xp];
-    sum += y_plane[ypp * yp + xm] + y_plane[ypp * yp + x] + y_plane[ypp * yp + xp];
-
-    dst[y * dp + x] = (unsigned char)((sum + 4) / 9);
-}
-
-/* p010_smooth_luma_dev: same box filter, reading 16-bit p010le luma samples reduced to
- * the 8-bit domain (word >> 8) first -- same convention as p010_to_rgbf32 above. */
-extern "C" __global__ void p010_smooth_luma_dev(const unsigned char *y_plane, unsigned yp,
-                                                 unsigned char *dst, unsigned dp,
-                                                 unsigned w, unsigned h)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if ((unsigned)x >= w || (unsigned)y >= h) return;
-
-    int xm = x > 0 ? x - 1 : 0, xp = x < (int)w - 1 ? x + 1 : (int)w - 1;
-    int ym = y > 0 ? y - 1 : 0, ypp = y < (int)h - 1 ? y + 1 : (int)h - 1;
-
-    const unsigned short *row_ym  = (const unsigned short *)(y_plane + ym  * yp);
-    const unsigned short *row_y   = (const unsigned short *)(y_plane + y   * yp);
-    const unsigned short *row_ypp = (const unsigned short *)(y_plane + ypp * yp);
-
-    int sum = 0;
-    sum += (row_ym[xm]  >> 8) + (row_ym[x]  >> 8) + (row_ym[xp]  >> 8);
-    sum += (row_y[xm]   >> 8) + (row_y[x]   >> 8) + (row_y[xp]   >> 8);
-    sum += (row_ypp[xm] >> 8) + (row_ypp[x] >> 8) + (row_ypp[xp] >> 8);
+    if (word_bytes == 1) {
+        sum += y_plane[ym  * yp + xm] + y_plane[ym  * yp + x] + y_plane[ym  * yp + xp];
+        sum += y_plane[y   * yp + xm] + y_plane[y   * yp + x] + y_plane[y   * yp + xp];
+        sum += y_plane[ypp * yp + xm] + y_plane[ypp * yp + x] + y_plane[ypp * yp + xp];
+    } else {
+        const unsigned short *row_ym  = (const unsigned short *)(y_plane + ym  * yp);
+        const unsigned short *row_y   = (const unsigned short *)(y_plane + y   * yp);
+        const unsigned short *row_ypp = (const unsigned short *)(y_plane + ypp * yp);
+        sum += (row_ym[xm]  >> 8) + (row_ym[x]  >> 8) + (row_ym[xp]  >> 8);
+        sum += (row_y[xm]   >> 8) + (row_y[x]   >> 8) + (row_y[xp]   >> 8);
+        sum += (row_ypp[xm] >> 8) + (row_ypp[x] >> 8) + (row_ypp[xp] >> 8);
+    }
 
     dst[y * dp + x] = (unsigned char)((sum + 4) / 9);
 }
 
 /* expand_flow_dev: device-to-device expansion of NVOFA's S10.5 4x4 grid (still in NVOFA's
- * own output buffer, never downloaded) into the dense float2 field OptiX wants. Grid
- * data is NVOFA's own motion-vector format, independent of the decoded frame's pixel
- * format, so this needs no p010 variant. */
+ * own output buffer, never downloaded) into the dense float2 field OptiX wants. Grid data
+ * is NVOFA's own motion-vector format, independent of the decoded frame's pixel format, so
+ * this needs no word_bytes/chroma_vshift parameters. */
 extern "C" __global__ void expand_flow_dev(const short *grid, unsigned gp, unsigned gw, unsigned gh,
                                            float *dst, unsigned w, unsigned h)
 {

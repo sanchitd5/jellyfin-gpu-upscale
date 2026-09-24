@@ -117,6 +117,13 @@ if [ "$WITH_FFMPEG" = "1" ]; then
     # `set -e` would abort straight past the restore logic below and leave the broken binary
     # installed - happened twice on this exact VSR task before this guard existed. `|| true`
     # keeps control here so the checks after this always run against whatever got installed.
+    # WITH_RTXDLPP/WITH_RTXVSR default on here too: this project only ever builds for an
+    # NVIDIA CUDA target (see AGENTS.md), and both filters' prerequisites (the nvdlppx.dll/
+    # nvaivpx.dll PE blobs, clang-18 w/ NVPTX) are ordinary standing requirements on that
+    # target, same class as OPTIX_SDK below - not gated behind an NGC login like the DLSS
+    # runtime or Maxine VSR are. They stay OUT of `required_filters` below deliberately:
+    # AGENTS.md is explicit these two are not part of the mandatory five, so a box missing
+    # their DLLs still gets a valid deploy, just without dlpp_rtcuda/vsr_rtcuda compiled in.
     PREFIX="$FFMPEG_PREFIX" \
         WITH_OIDN="${WITH_OIDN:-1}" \
         WITH_OPTIX="${WITH_OPTIX:-1}" \
@@ -124,6 +131,8 @@ if [ "$WITH_FFMPEG" = "1" ]; then
         WITH_FSR2="${WITH_FSR2:-1}" \
         WITH_DLSS="${WITH_DLSS:-1}" \
         WITH_MAXINE_VSR="${WITH_MAXINE_VSR:-0}" \
+        WITH_RTXDLPP="${WITH_RTXDLPP:-1}" \
+        WITH_RTXVSR="${WITH_RTXVSR:-1}" \
         OPTIX_SDK="${OPTIX_SDK:-/root/gameupscale/optix-dev-8.1.0}" \
         ./scripts/build-ffmpeg.sh || true
 
