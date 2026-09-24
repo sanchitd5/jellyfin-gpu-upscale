@@ -5,6 +5,15 @@ CT114 restart/deploy/config change. CT114 checked for active sessions before rea
 production shim: only the Jellyfin daemon (PID 548311) and unrelated ffmpeg build jobs were
 running, no live transcode, so read-only `cat`/`ssh` was safe.
 
+**See also `RUNTIME_FILTER_CONTROL_DESIGN.md`** (`.agent-briefs/runtime-filter-control.md`): a
+complementary design, not a replacement for the A/B swap below. It fixes the stutter at its root
+for `optix`'s `blend`/`mode`/`flow` only (same process, no re-negotiation), because that parameter
+is already read live per frame with no NVENC dependency. Everything that changes output geometry,
+or `dlpp_rtcuda`'s `level` (only read at filter init, not per frame), still needs the A/B swap or
+today's restart — NVENC's own `reconfig_encoder()` never reconfigures coded width/height on an
+open session, confirmed by reading `nvenc.c`. So the A/B swap's scope narrows to "resolution/level
+changes and anything runtime filter control cannot reach," rather than being obsoleted.
+
 ## Phase 1: why live-apply stutters today (transcoding session)
 
 Full chain, VERIFIED against source in this repo plus the production shim on CT114:

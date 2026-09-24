@@ -2667,3 +2667,24 @@ needs a live test -- not guessed, per AGENTS.md's `window.playbackManager` lesso
 Nothing implemented beyond the design doc: no seam exists yet to hang a `MaxConcurrentSwaps`
 setting off without also building the session-lifecycle patch Phase 2 says is missing, and adding
 inert config would be exactly the "axis nothing reads" anti-pattern (invariant 11).
+
+## Runtime filter control (zmq/sendcmd) as an A/B-swap alternative (2026-09-24, `.agent-briefs/runtime-filter-control.md`)
+
+Design-only pass, no CT114 restart/deploy/config change (a concurrent build was found running on
+CT114 during this pass, so the live binary was not queried, only source). Full write-up in
+`RUNTIME_FILTER_CONTROL_DESIGN.md`; pointer also added to `LIVE_APPLY_DESIGN.md`.
+
+**Verdict, complementary to the A/B swap above, not a replacement:** `zmq`/`azmq` are not built
+(`--enable-libzmq` absent from `build-ffmpeg.sh`), but `sendcmd`/`asendcmd` need no extra library
+and are not disabled, so they should be available. None of `vf_optix.c`/`vf_dlpp_rtcuda.c`/
+`vf_vsr_rtcuda.c` implement `process_command` today. `optix`'s `blend` (and `mode`/`flow`) is
+already read fresh every frame, so wiring `process_command` for it is small (same shape as
+upstream `af_volume.c`/`vf_eq.c`, read directly from a local ffmpeg checkout) and fixes the
+live-apply stutter at its root for that parameter: same process, same `PlaySessionId`, no
+re-negotiation at all. `dlpp_rtcuda`'s `level` is only read once at filter init, so live-changing
+it needs an embed-instance rebuild mid-stream -- large, not a quick add. Any resolution change
+still needs a real NVENC re-init regardless of filter-side control: `nvenc.c`'s
+`reconfig_encoder()` only ever reconfigures DAR and bitrate, never coded width/height. So the A/B
+swap (or today's restart) stays the only path for geometry changes and for `dlpp_rtcuda`'s
+`level`; runtime filter control narrows the A/B swap's scope down to that subset rather than
+replacing it.
