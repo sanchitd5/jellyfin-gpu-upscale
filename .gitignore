@@ -25,3 +25,10 @@ web/gpu-upscale.js
 __pycache__/
 *.pyc
 livetestbox.md
+
+# user-supplied NVIDIA driver/SDK DLLs for local investigation and future
+# filters (nvdlppx.dll, nvaivpx.dll, nvngx_dlssnr.dll, its forwarder, etc.) -
+# already covered by *.dll above, called out explicitly here since this is
+# the conventional local drop location. Never fetched or committed by us:
+# see DLSS.md / RTXDLPP.md / roadmap/dlss-neural-rendering.md.
+/dll/
