@@ -2407,6 +2407,98 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         public static string EncoderFor(EncodingJobInfo state, out string reason)
         {
+            string chosen = ChooseEncoder(state, out reason);
+            string guarded = GuardAv1(state, chosen, out string guardReason);
+            if (guardReason != null)
+            {
+                reason = guardReason + "; " + reason;
+            }
+
+            return guarded;
+        }
+
+        /// <summary>
+        /// Swaps av1_nvenc for hevc_nvenc (h264_nvenc when the session cannot take HEVC) on a GPU
+        /// without an AV1 encoder. ffmpeg lists av1_nvenc whenever it is compiled in, so the
+        /// encoder list cannot catch this; the encoder only fails at open, killing the transcode.
+        /// reason is null when nothing was swapped.
+        /// </summary>
+        public static string GuardAv1(EncodingJobInfo state, string encoder, out string reason)
+        {
+            reason = null;
+            if (!string.Equals(encoder, "av1_nvenc", StringComparison.OrdinalIgnoreCase) || Av1NvencUsable() != false)
+            {
+                return encoder;
+            }
+
+            var supported = SupportedCodecs(state);
+            string swap = supported.Count == 0 || supported.Contains("hevc") ? "hevc_nvenc" : "h264_nvenc";
+            reason = "GPU has no AV1 encoder (needs compute capability 8.9+), used " + swap + " instead of av1_nvenc";
+            return swap;
+        }
+
+        private static bool? _av1Nvenc;
+        private static readonly object _av1Lock = new object();
+
+        /// <summary>
+        /// Whether the GPU can encode AV1 (Ada, compute capability 8.9, or newer). Null when
+        /// nvidia-smi cannot say; the caller leaves the choice alone rather than guessing.
+        /// </summary>
+        private static bool? Av1NvencUsable()
+        {
+            lock (_av1Lock)
+            {
+                if (_av1Nvenc.HasValue)
+                {
+                    return _av1Nvenc;
+                }
+
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo("nvidia-smi", "--query-gpu=compute_cap --format=csv,noheader")
+                    {
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                    };
+
+                    using (var proc = System.Diagnostics.Process.Start(psi))
+                    {
+                        var stdoutRead = proc.StandardOutput.ReadToEndAsync();
+                        var stderrRead = proc.StandardError.ReadToEndAsync();
+                        if (!proc.WaitForExit(5000))
+                        {
+                            try
+                            {
+                                proc.Kill();
+                            }
+                            catch (Exception)
+                            {
+                                // already gone
+                            }
+
+                            return null;
+                        }
+
+                        string first = stdoutRead.Result.Split('\n')[0].Trim();
+                        if (proc.ExitCode == 0
+                            && double.TryParse(first, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double cap))
+                        {
+                            _av1Nvenc = cap >= 8.9;
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    // unknown stays null and is not cached
+                }
+
+                return _av1Nvenc;
+            }
+        }
+
+        private static string ChooseEncoder(EncodingJobInfo state, out string reason)
+        {
             string clientCodec = ClientCodec(state);
             string clientEncoder = clientCodec == "h264" ? "h264_nvenc"
                 : clientCodec == "hevc" ? "hevc_nvenc"

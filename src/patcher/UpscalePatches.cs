@@ -687,6 +687,19 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         /// </summary>
         private static void ApplyConfiguredEncoderToTranscode(EncodingJobInfo state, UpscaleSettings cfg, ref string __result)
         {
+            string swapped = UpscaleEngine.GuardAv1(state, __result, out string av1Reason);
+            if (av1Reason != null)
+            {
+                UpscaleEngine.NoteEncoder(UpscaleEngine.SessionKey(state), swapped, av1Reason);
+                _logger?.LogInformation(
+                    "GpuUpscale: encoder {Was} -> {Now} for {Path} ({Reason})",
+                    __result,
+                    swapped,
+                    state.MediaPath,
+                    av1Reason);
+                __result = swapped;
+            }
+
             string configured = cfg.Encoder;
             if (string.IsNullOrWhiteSpace(configured)
                 || string.Equals(configured.Trim(), "auto", StringComparison.OrdinalIgnoreCase))
