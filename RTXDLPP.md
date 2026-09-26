@@ -1,8 +1,9 @@
-# RTX DLPP super-resolution as a video filter (`dlpp_rtcuda`) — opt-in, unverified in production
+# RTX DLPP super-resolution as a video filter (`dlpp_rtcuda`) — opt-in, deployed on CT114
 
-`upscale=rtxdlpp` (once wired into `UpscaleEngine`; today this filter exists and builds, but is
-**not yet plumbed into the plugin's 5-place checklist** — see "Where this stands" below) would run
-**RTX DLPP**, hosted live via our own PE loader against a user-supplied `nvdlppx.dll`. This is a
+`dlpp-1` .. `dlpp-4` are live panel levels reachable from a Jellyfin session as of commits `43f0e41` /
+`e7952b9` (2026-09-25). **`vsr_rtcuda` is the conform-resize step for every DLPP level while it is
+available.** This file documents the filter's architecture and build steps. **RTX DLPP** runs via our own
+PE loader against a user-supplied `nvdlppx.dll`. This is a
 genuinely different architecture from every other filter in this repo: `vf_oidn.c`, `vf_optix.c`,
 `vf_ort.c`, `vf_fsr2.c` and `vf_dlss.c` all link an NVIDIA-published SDK at compile time.
 `vf_dlpp_rtcuda.c` links nothing NVIDIA at all — it maps a Windows DLL the user places themselves,
@@ -81,8 +82,8 @@ cp nvdlppx.dll /usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/
 ```
 
 **Until that file is present, this filter's init-time self-test fails and FFmpeg refuses to build
-any chain containing it** — see "Self-test / gate" below. There is no availability probe wired into
-the plugin yet (see "Where this stands"); today this is a build-and-smoke-test-only filter.
+any chain containing it** — see "Self-test / gate" below. The plugin probes `ShaderLibrary.RtxDlppOffered` at session build time and only offers DLPP levels
+when the DLL is present at its expected path.
 
 ## Licensing — NOTHING FROM NVIDIA IS IN THIS REPOSITORY
 
@@ -128,12 +129,19 @@ verified only at exact integer ratios so far.
 
 ## Where this stands
 
-This filter builds standalone from this repo and has been smoke-tested in a scratch build (see
-`TASK.md` "Track B: DLPP" for the exact commands and results). It is **not** wired into
-`UpscaleEngine.Option()`, the probe, the dashboard, or the client — none of the plugin's 5-place
-checklist has been touched. `WITH_RTXDLPP=1` in `scripts/build-ffmpeg.sh` produces a binary that
-registers and runs the filter directly with `ffmpeg -vf dlpp_rtcuda=...`; it does not yet make
-`dlpp_rtcuda` reachable from a Jellyfin session. That plumbing is the next step.
+**Wired in and deployed on CT114, 2026-09-25.** `UpscaleEngine.Option()`, the probe
+(`ShaderLibrary.RtxDlppOffered`), the dashboard and the client panel all treat `dlpp-1..4` as live
+levels. The panel shows one "RTX DLPP" entry with a Level 1–4 sub-control (commit `e7952b9`).
+`vsr_rtcuda` is the conform-resize at the end of every DLPP chain while it is available
+(commit `43f0e41`). Levels 3/4 at non-integer ratios without `vsr_rtcuda` are the one known gap
+— they segfault taken alone at a non-integer ratio; the plugin routes them through `vsr_rtcuda`
+to avoid it.
+
+Verified end-to-end on CT114 against real library content: GPU-resident across 10 790 frames,
+113 fps at 1080p→4K, gain content-dependent and modest. See `TASK.md` "Track B: DLPP" for numbers.
+
+Still open: `INTEGRATION_DESIGN.md` and the "known open" items in `TASK.md`. `dlpp_drv_cuda`
+(capture + codegen, patch 0006) is a separate Route B, not started.
 
 ## Building it
 

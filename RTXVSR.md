@@ -1,9 +1,9 @@
-# RTX VSR bypass resampler as a video filter (`vsr_rtcuda`) — opt-in, unverified in production
+# RTX VSR bypass resampler as a video filter (`vsr_rtcuda`) — opt-in, deployed on CT114
 
-`upscale=rtxvsr` (not wired into `UpscaleEngine` yet; today this filter exists and builds in a
-scratch prefix, but is **not plumbed into the plugin's 5-place checklist** — same "where this
-stands" caveat as `RTXDLPP.md`) would run a fast, GPU-resident resampler hosted live via our own
-PE loader against a user-supplied `nvaivpx.dll`. Same architecture family as RTX DLPP
+`vsr-rtcuda` is a live panel level and the conform-resize step for every DLPP chain, wired in as of
+commit `43f0e41` (2026-09-25). It runs **RTX VSR in bypass mode** (no network, `AIVP_FLAGS=0x100`),
+delivering better-than-bicubic GPU resampling at ~0.08 ms/frame via our own PE loader against a
+user-supplied `nvaivpx.dll`. Same architecture family as RTX DLPP
 (`dlpp_rtcuda`, see `RTXDLPP.md`): `vf_vsr_rtcuda.c` links nothing NVIDIA at compile time — it
 maps the DLL at *run time* through its own copy of the PE32+ loader (`gu_vsr_pe_map.c`,
 `gu_vsr_aivp_loader.c`, `gu_vsr_ngx_isr.c` — forked from the same `rtx-video-re` origin as the
@@ -105,12 +105,11 @@ report can show exactly which DLL build a run was against.
 
 ## Where this stands
 
-This filter builds standalone from this repo and has been smoke-tested in a scratch build (see
-`TASK.md` for the exact commands and results). It is **not** wired into `UpscaleEngine.Option()`,
-the probe, the dashboard, or the client — none of the plugin's 5-place checklist has been touched.
-`WITH_RTXVSR=1` in `scripts/build-ffmpeg.sh` produces a binary that registers and runs the filter
-directly with `ffmpeg -vf vsr_rtcuda=...`; it does not yet make `vsr_rtcuda` reachable from a
-Jellyfin session. That plumbing is a later step.
+**Wired in and deployed on CT114, 2026-09-25.** `UpscaleEngine.Option()`, the probe
+(`ShaderLibrary.RtxVsrOffered`), and the panel all treat `vsr-rtcuda` as a live level. It also
+serves as the conform-resize at the end of every DLPP chain (levels 3/4 require it to avoid a
+non-integer-ratio segfault; levels 1/2 benefit from it). Verified: 43.93 dB vs 41.66 dB bicubic,
+0.08 ms/frame, GPU-resident, zero per-frame host↔device copies.
 
 ## Building it
 

@@ -15,36 +15,42 @@ Each of these is reusable by every feature below:
 - **A whole ffmpeg chain in VRAM.** `vf_aivp_spike` goes NVDEC -> nv12 to RGBA -> DLL Process ->
   RGBA to nv12 -> NVENC. It makes zero per-frame copies between host and GPU and runs at 400 to
   440 fps at 960x540 -> 1920x1080.
-- **GPU kernels without nvcc.** The colour conversion kernels are hand-written PTX, loaded with
-  `cuModuleLoadData`.
+- **GPU kernels without nvcc.** The colour conversion kernels are real CUDA C (`.cu`, e.g.
+  `gu_dlpp_nv12_rgba.cu`) compiled to PTX with clang's NVPTX backend and loaded with
+  `cuModuleLoadData`. They handle both NV12 and p010le, so 10-bit/HDR sources work.
+- **Filters that host the driver DLLs live inside the patched ffmpeg.** `dlpp_rtcuda` and
+  `vsr_rtcuda` map `nvdlppx.dll` / `nvaivpx.dll` at run time through our own PE32+ loader
+  (`gu_*_pe_map.c`). Nothing from NVIDIA is in the repo; the DLLs are user-supplied. Both DLLs
+  coexist in one ffmpeg process, verified in a combined `optix` + `dlpp_rtcuda` + `vsr_rtcuda`
+  chain.
 
 ## Features
 
 | # | Feature | Source | Status | What it gives ffmpeg |
 |---|---|---|---|---|
-| 1 | RTX VSR (`vsr_drv_cuda`) | `nvaivpx.dll` / AIVP | Runs. 13 rounds of host-side work (TASK.md/TASK.L17.md) narrowed the blocker to L17's own constant bias term, not fixed. Stays on the table as an option; see status note below | Neural upscaling for 720p to 1080p/4K transcodes. The main target |
-| 2 | Bypass resampler (`AIVP_FLAGS=0x100`) | same DLL | **Works**: 43.93 dB vs 41.66 dB bilinear, 0.08 ms/frame | A GPU scaler better than bilinear, usable now. The interim path while #1's neural output is unresolved |
+| 1 | RTX VSR as a neural upscaler (`vsr_drv_cuda`) | `nvaivpx.dll` / AIVP | **Retired as a neural target, 2026-09-23** (user decision). 16 agent rounds (TASK.L17.md) never got the network to contribute real detail; L17's constant bias term dominated. AIVP wraps DLPP's network internally, so real neural SR goes through #5 instead | Nothing further planned. Do not pursue L17 |
+| 2 | Bypass resampler, shipped as `vsr_rtcuda` (`AIVP_FLAGS=0x100`) | same DLL | **Works, deployed on CT114** (2026-09-24). 43.93 dB vs 41.66 dB bicubic, 0.08 ms/frame, GPU-resident. Opt-in via `WITH_RTXVSR=1`, not in the mandatory five | A GPU scaler better than bicubic. Also the conform-resize that DLPP levels 3/4 chain into. Not neural |
 | 3 | RTX Video HDR (TrueHDR, SDR to HDR) | `truehdr_drv_cuda` in the patch series | Not started | SDR library shown as HDR10 on HDR TVs. Stock ffmpeg has nothing like it |
 | 4 | RTX Dynamic Vibrance (DeepDVC) | `deepdvc_drv_cuda` in the patch series | Not started | Neural colour and vibrance enhancement. Small and low risk |
-| 5 | DLPP (`dlpp_drv_cuda`) | `nvdlppx.dll` | **In progress.** Now the active alternate route to real neural VSR, explored in parallel with #1, not a fallback held in reserve. Same host-callback/CUDA-launch pattern as AIVP; whether it hits the same kind of network-output blocker is not yet known | A second path to the same goal as #1: neural upscaling, in case AIVP's L17 blocker doesn't resolve |
+| 5 | DLPP, shipped as `dlpp_rtcuda` | `nvdlppx.dll` | **Works, deployed on CT114** (2026-09-24), and reachable from the panel as one "RTX DLPP" entry with a Level control (commit e7952b9). Real cross-frame gain over bicubic once two harness bugs were fixed (wipe field forced to 0.0, native-scale derived from the output/input ratio). Level 4 at the correct scale: 37.48 dB vs 34.81 dB at the wrong scale. Levels 3/4 segfault on a non-integer ratio taken alone, so they chain into `vsr_rtcuda` for the final resize. p010le fixed and verified on the production binary. Opt-in via `WITH_RTXDLPP=1`. Still open: the "known open" items in TASK.md "Track B: DLPP" and `INTEGRATION_DESIGN.md`. `dlpp_drv_cuda` (capture + codegen, patch 0006) is a separate Route B, not started | The real neural upscaling path. Replaces #1 as the main target |
 | 6 | NGX DLISR | `nvngx_dlisr.dll` | Init works, stuck at the `CreateFeature` trap. Decided: user-supplied DLL, same convention as `nvdlppx.dll`/`nvaivpx.dll` and the DLSS runtime - never fetched or vendored by us, no forwarder/spoof needed since this is a documented feature (`nvsdk_ngx_helpers_cuda.h` wraps `NVSDK_NGX_Feature_ImageSignalProcessing` legitimately) | Image SR on fixed 256x256 tiles. Mainly de-risking |
 | 7 | Frame interpolation (NVOFFRUC / SmoothMotion) | patches 0010-0023 | Patches exist, never built | 24 to 48/60 fps motion smoothing on the GPU |
 
-**RTX VSR (#1) status, 2026-09-23:** 13 host-side agent rounds (TASK.md Track B "L17 agent 1-13",
-detail in `TASK.L17.md`) confirmed the network genuinely computes on real feature data, but L17's
-output is dominated by its own constant bias term regardless of any argbuf field, field
-combination, or allocation layout tried so far; no fix transfers between the two test frames. The
-bypass path (#2) already beats bicubic and ships as the interim option; it does not replace this
-goal. Two efforts are running in parallel to unblock it: DLPP (#5) as an alternate route to the
-same neural-VSR goal, and a public-research pass checking whether documented NVIDIA behaviour
-(Control Panel quality levels, driver-side gating) explains the blocker. Both are **in progress**;
-this file will be updated once either reports back, not before.
+**Where the neural goal landed, 2026-09-25:** the AIVP route (#1) was retired on 2026-09-23 after
+16 rounds. DLPP driven directly (#5) went around the blocker: AIVP's kernels are internally named
+`dlpp_*`, so it is a wrapper around DLPP's network, and its wrapper never sets the two fields DLPP
+needs. With those fixed, DLPP gives a real gain over bicubic. Both filters are built into the
+production ffmpeg (all seven filters confirmed via `-filters`: the mandatory five plus
+`dlpp_rtcuda` and `vsr_rtcuda`) and deployed. Both are opt-in, outside the mandatory five. Still
+not started: #3, #4, #7. #6 is stuck at `CreateFeature`.
 
 ## Shared infrastructure
 
 - **A generic driver DLL filter.** `vf_aivp_spike` does not depend on the feature it runs: nv12/RGBA
-  PTX, pooled surfaces and ffmpeg's CUDA stream. Features #3 to #6 would reuse it and supply only
-  their own Process call and parameters.
+  PTX, pooled surfaces and ffmpeg's CUDA stream. `dlpp_rtcuda` and `vsr_rtcuda` are the two
+  productised instances (each with its own copy of the loader so neither build depends on the
+  other). Features #3, #4 and #6 would reuse the same pattern and supply only their own Process
+  call and parameters.
 - **A self-test and a driver hash gate.** Required before any of this ships. DLL offsets break when
   the driver updates, so the filter checks itself at startup and reports DEGRADED the way
   `vf_dlss.c` does.
@@ -58,9 +64,9 @@ this file will be updated once either reports back, not before.
 
 ## Suggested order
 
-1. **#2**, because it ships soonest.
-2. **#1**, which means solving L17.
-3. **#3 and #4**, which are cheap once the shared filter exists.
-4. **#7**, the largest new capability.
-5. **#5 and #6**, only as fallbacks if AIVP stays gated.
+1. **#2 and #5**: done, deployed.
+2. **#3 and #4**, which are cheap now that the DLL-hosting filter pattern is proven twice.
+3. **#7**, the largest new capability.
+4. **#6**, low priority: image SR on fixed tiles, mainly de-risking.
+5. **#1**: retired, not scheduled.
 

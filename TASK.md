@@ -3013,3 +3013,84 @@ still needs a real NVENC re-init regardless of filter-side control: `nvenc.c`'s
 swap (or today's restart) stays the only path for geometry changes and for `dlpp_rtcuda`'s
 `level`; runtime filter control narrows the A/B swap's scope down to that subset rather than
 replacing it.
+
+
+## Track D: DLSS Neural Rendering (feature 18), planned - not started (2026-09-24)
+
+**Status: planned, not started.** No code, no filter file, nothing committed. Cross-reference:
+[roadmap/dlss-neural-rendering.md](roadmap/dlss-neural-rendering.md) has the full investigation this
+track is built from - two walls found (caller-identity check, RenoDX-derived composition shader),
+one proven-working precedent (`DLSS5VKLayer`'s snippet-direct + IAT-hook path, `0x1` success, logged
+`path=vulkan-snippet`), and the three untried causes behind `0xBAD0000B` on the core-routed path.
+Read that file before starting item 1 below.
+
+1. **CUDA-path feature-18 create attempt.** **BLOCKED, 2026-09-24 - real finding, new wall, earlier
+   than `0xBAD0000B`.** Real `nvngx_dlssnr.dll` (165MB genuine artifact) confirmed present and
+   reachable (`dll/nvngx_dlssnr.dll` in this repo, plus two other local copies); its CUDA export set
+   is the full standard shape (`Init`/`Init1`/`Init_Ext`/`Init_Ext1`/`GetFeatureRequirements`/
+   `GetScratchBufferSize`/`CreateFeature`/`CreateFeature1`/`EvaluateFeature`), same as D3D11/D3D12/
+   Vulkan. Reused `~/dev/rtx-video-re/loader` (`pe_map.c`/`ngx_isr.c`/`aivp.c`, a mature PE32+
+   loader that maps a Windows DLL into a Linux process directly, no Wine, already spoofing
+   `GetModuleFileNameW` - the same caller-identity defeat item 2 below was going to add), built a
+   feature-18 variant (`ngx_dlssnr.c`) on CT114 with plain `gcc`, ran it against the real DLL on
+   CT114's RTX 3090. Result: `NVSDK_NGX_CUDA_Init(appid=0x1337, version=0x15)[feature=18]` ->
+   `0xbad00001 FAIL_FeatureNotSupported` - rejected at generic `Init`, never reaches `CreateFeature`
+   at all. Same-harness control against `nvngx_dlisr.dll` (a different NGX snippet) succeeded
+   (`0x1 Success`, full param set accepted) - rules out a harness bug, confirms this is real
+   information about `nvngx_dlssnr.dll`'s CUDA path specifically: it exports the CUDA API surface
+   but its implementation declines the whole CUDA family outright, upstream of anything
+   feature-18-specific. Of the three untried causes named below: (1) driver-core search path is
+   moot for this snippet-direct call shape, no core involved; (2) discovery call tested
+   (`GetFeatureRequirements(18)` pre-`Init` -> `0xbad00005 FAIL_InvalidParameter`, no help); (3)
+   scratch-buffer-first never reached, `Init` gates everything downstream. None explain it - the
+   failure is upstream of all three. Not yet tried: `Init_Ext`/`Init1` (richer init variants, also
+   exported), and the real core-routed shape (needs the actual Windows driver core `_nvngx.dll`,
+   not staged anywhere this session - materially bigger, `OptiScaler_DLSSNR`'s `DlssNr_Proxy` in
+   miniature). Full command output in `livetestbox.md` (gitignored). Test artifacts left at
+   `/root/dlssnr_test/` on CT114 (~330MB) for a follow-up session. Nothing live touched.
+
+   **Follow-up, same day: two real binary-patch attempts, both still hit `0xbad00001`.**
+   `dev-camo/dlssnr-patcher` (a real Ampere-targeting patcher, run for real against a copy of the
+   real DLL, on CT101 - not CT114 - with real CUDA 12.0) failed before reaching any CUDA
+   compilation step: its static x86 case-table scanner can't find a match in this DLL's actual
+   (2026-08-11) machine code, for any of the four architectures, not just Ampere - its own history
+   shows it was never validated against a real DLL. A second, independently-sourced patched DLL
+   (the "ShortFuse cross-generation 310.8" Ampere/Turing/Ada compatibility runtime, extracted from
+   `ShyVortex/dlss-unlocked`'s latest release and hash-verified against `wilsjo2/
+   OptiScaler-DLSSNR-PreSR-Multipass`'s documented checksum) tested clean on CT114 with the same
+   loader - genuinely different DLL, byte-for-byte identical `0xbad00001 FAIL_FeatureNotSupported`
+   result. Full detail, exact commands and reasoning in `livetestbox.md`. Net: a patched DLL alone,
+   via either route tried, does not clear the CUDA `Init` gate - `Init_Ext`/`Init1` and the
+   core-routed shape (item 2 below) remain the untried paths. Patched DLL kept at
+   `dll/nvngx_dlssnr_ampere.patched.dll` on this Mac (gitignored, not committed) for reuse.
+2. **Port `DLSS5VKLayer`'s IAT-hook caller-identity spoof.** `core/ngx_snippet.cpp`'s
+   `InstallCallerSpoof()` hooks `KERNEL32!GetModuleFileNameW` on the loaded `nvngx_dlssnr.dll`
+   module so it sees `"nvngx.dll"` as its own caller - the one demonstrated way past both the
+   caller check and the `0xBAD0000B` core-routing wall. Port it to this project's own loader
+   pattern, same shape as `loader_ngx` in `~/dev/rtx-video-re` (already runs `nvngx_dlisr.dll` live
+   on Linux). Snippet-direct, no forwarder file. Vulkan first, since that is the family
+   `DLSS5VKLayer` proved working; attempt CUDA with the same hook after.
+3. **Validate real frame output correctness** once `CreateFeature`/`EvaluateFeature` succeeds.
+   Per this repo's own `AGENTS.md` verification standard: a build that compiles proves nothing.
+   Needs a probed served segment, not a log line - `DLSS5VKLayer`'s own "verified" claim for this
+   sequence covers creation succeeding, not that the produced frame is visually correct.
+4. **Composition shader.** Vendor `dlssnr.hlsl` (RenoDX-derived) with `RenoDX_ATTRIBUTION.txt`
+   alongside it, matching `OptiScaler_DLSSNR`'s and `DLSS5VKLayer`'s own convention - attribution
+   only, not a real license grant. **This explicitly diverges from `DLSS.md`'s and `RTXDLPP.md`'s
+   "nothing from NVIDIA ships without a real license" rule. By user decision, already confirmed
+   twice including an explicit license-risk warning - not to be re-litigated.** Record that
+   divergence plainly next to the vendored files when this item is done.
+5. **Build `vf_dlssnr` as a sixth custom filter**, beside `vf_oidn`/`vf_optix`/`vf_ort`/`vf_fsr2`/
+   `vf_dlss` in the patched ffmpeg binary. Same shim-degrades-gracefully pattern as the mandatory
+   five (AGENTS.md invariant 10): a session drops the node if the binary it lands on lacks the
+   filter, rather than failing. Verify presence via `-filters` per `scripts/proxmox-build.sh`'s
+   existing check pattern - presence is not capability (invariant 10 again), so this is necessary
+   but not sufficient; item 3 above is what actually proves it works.
+6. **Wire it through the 5-place checklist** (AGENTS.md invariant 11 / `CLAUDE.md`'s "Before you
+   change the config page") as a new neural level: `src/Configuration/PluginConfiguration.cs`, the
+   `src/patcher/UpscaleSettings.cs` mirror, `src/Configuration/configPage.html` (both the form
+   control and the load/save script lines), the probe so the client can offer the level, and the
+   session/status reporting. Data-driven per AGENTS.md: one `CONTROLS` entry plus one `LIVE_ROWS`
+   line, no bespoke rendering code, display name and any degraded wording come from the probe, not
+   from JavaScript. An axis is only real once `UpscaleEngine.Option(state, ...)` reads it - a
+   control that renders and stores a preference but nothing reads is dead UI.

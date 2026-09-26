@@ -124,10 +124,6 @@ WITH_RTXDLPP="${WITH_RTXDLPP:-0}"
 # under the name `vsr_rtcuda`, never `vsr_drv_cuda`, which ffmpeg-patches/0005 already reserves
 # for a different, Route B filter (see .agent-briefs/vsr-drv-promote-to-production.md).
 WITH_RTXVSR="${WITH_RTXVSR:-0}"
-# Crash log (ffmpeg/gu_crashlog.c): on a fatal signal, writes FFmpeg.Crash-<utc>-<pid>.log with the
-# command line, the crashing instruction, a backtrace and the memory map. On by default; costs
-# nothing until a crash. WITH_CRASHLOG=0 builds without it, GU_CRASHLOG=0 disables it at run time.
-WITH_CRASHLOG="${WITH_CRASHLOG:-1}"
 # Old name, renamed so it cannot be mistaken for RTX VSR (`vsr_drv_cuda`, planned as WITH_RTXCUDA).
 if [[ -n "${WITH_VSR:-}" ]]; then
     echo "WITH_VSR was renamed WITH_MAXINE_VSR (Maxine, retired). RTX VSR will be WITH_RTXCUDA (planned, TASK.md 2.2). Unset WITH_VSR." >&2
@@ -496,34 +492,6 @@ patch -p1 < "$HERE/ffmpeg/0009-hwmap-query-formats.patch"
 # *_cuda filters already use, not hand-written PTX).
 patch -p1 < "$HERE/ffmpeg/0010-add-transpose-cuda-filter.patch"
 
-# 0014: 0010's kernel calls saturate_rintf(), and the compat CUDA runtime it lands on has no
-# rintf(); both arrived upstream before that PR merged but after n8.1.2, so with 0010 alone the
-# kernel does not compile. Verbatim from upstream master (LGPL): a 23-line helper block appended
-# to libavfilter/cuda/vector_helpers.cuh and one rintf line in compat/cuda/cuda_runtime.h.
-patch -p1 < "$HERE/ffmpeg/0014-cuda-vector-helpers-saturate-rintf.patch"
-
-# 0011: hwcontext_vulkan.c's export_mem_to_cuda() imported Vulkan memory into CUDA without
-# CUDA_EXTERNAL_MEMORY_DEDICATED even though alloc_bind_mem() allocates it as a dedicated
-# allocation on NVIDIA. CUDA's array view then disagrees with Vulkan's tiling: a CUDA->Vulkan
-# hwmap followed by any Vulkan-side read (libplacebo, hwdownload) returned scrambled frames,
-# ~6-9 dB PSNR against the clean decode. cuda->vulkan->cuda alone stayed bit-exact because both
-# hops misread the memory the same way, which is why exit-code and frame-count checks all passed.
-patch -p1 < "$HERE/ffmpeg/0011-vulkan-cuda-import-dedicated.patch"
-
-# 0012: experiment. CUDA->Vulkan frames come out scrambled at 1280x720 and 1920x1080 but are exact
-# at 512x288, and the garbage differs from run to run - the signature of an ordering race, not a
-# layout mismatch. Make the CUDA copy complete before the semaphore is signalled, to see whether
-# the external semaphore is really ordering the two APIs.
-patch -p1 < "$HERE/ffmpeg/0012-vulkan-from-cuda-stream-sync.patch"
-
-# 0013: the real cause of the scrambled CUDA->Vulkan frames. try_export_flags() probed export
-# support with the combined multi-planar format, which NVIDIA does not offer for external memory,
-# while disable_multiplane makes the images R8/R8G8. The probe failed, the pool was created without
-# export capability, and vulkan_export_to_cuda() exported the memory anyway (found with the Vulkan
-# validation layer: VUID-VkMemoryGetFdInfoKHR-handleType-00671 on both directions). Vulkan->CUDA
-# happened to read correctly; CUDA->Vulkan did not, at sizes and planes that varied run to run.
-patch -p1 < "$HERE/ffmpeg/0013-vulkan-export-probe-real-format.patch"
-
 OPTIX_FLAGS=()
 if [[ "$WITH_OPTIX" == "1" ]]; then
     cp "$HERE/ffmpeg/vf_optix.c" libavfilter/
@@ -645,27 +613,6 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
 
     EXTRA_LIBS="$EXTRA_LIBS -ldl -lpthread"
 fi
-if [[ "$WITH_CRASHLOG" == "1" ]]; then
-    say "wiring the crash log into the build"
-    [[ -f "$HERE/ffmpeg/gu_crashlog.c" ]] || die "WITH_CRASHLOG=1: $HERE/ffmpeg/gu_crashlog.c missing"
-    cp "$HERE/ffmpeg/gu_crashlog.c" libavfilter/
-    # A static archive only pulls objects something references, so a constructor inside
-    # gu_crashlog.o alone would be dropped. allfilters.o is always linked (ffmpeg looks filters up
-    # through it), so the constructor lives there and calls into gu_crashlog.o.
-    grep -q gu_crashlog libavfilter/Makefile ||
-        sed -i '/^OBJS-\$(CONFIG_SCALE_CUDA_FILTER)/i OBJS += gu_crashlog.o' libavfilter/Makefile
-    grep -q gu_crashlog_install libavfilter/allfilters.c ||
-        cat >> libavfilter/allfilters.c <<'EOF'
-
-void gu_crashlog_install(void);
-static void __attribute__((constructor)) gu_crashlog_boot(void)
-{
-    gu_crashlog_install();
-}
-EOF
-    grep -q 'OBJS += gu_crashlog.o' libavfilter/Makefile \
-        || die "WITH_CRASHLOG=1: could not add gu_crashlog.o to libavfilter/Makefile"
-fi
 
 # ccache, if present, is opt-out via NO_CCACHE=1 rather than opt-in: this script always
 # re-downloads and re-extracts a fresh ffmpeg-8.1.2.tar.xz per run (see below), so the source
@@ -683,20 +630,6 @@ if [[ "${NO_CCACHE:-0}" != "1" ]] && command -v ccache >/dev/null 2>&1; then
     say "ccache found -- compiler invocations will be cached (NO_CCACHE=1 to disable)"
 fi
 
-# Every CUDA-kernel filter in FFmpeg (scale_cuda, transpose_cuda, thumbnail_cuda, ...) is gated on
-# cuda_nvcc or cuda_llvm, and this build had neither: only --enable-cuda, which gives
-# hwupload_cuda and nothing else. Jellyfin's own CUDA hwaccel chains emit transpose_cuda for a
-# rotated source, so those sessions died with "No such filter". cuda_llvm is meant to autodetect
-# but only looks for a binary named plain "clang"; this box has clang-18, so it never turned on.
-# The same clang already compiles this project's own kernels (see CLANG_CUDA above), and FFmpeg's
-# compat/cuda/cuda_runtime.h stands in for the CUDA SDK, so no toolkit is needed.
-CUDA_LLVM_FLAGS=()
-if [[ -n "$CLANG_CUDA" ]]; then
-    CUDA_LLVM_FLAGS=(--enable-cuda-llvm --nvcc="$CLANG_CUDA")
-else
-    echo "!! no clang found: transpose_cuda and the other CUDA-kernel filters will be missing" >&2
-fi
-
 say "configure"
 PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}" ./configure \
     --prefix="$PREFIX" \
@@ -705,9 +638,8 @@ PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
     --enable-gpl --enable-version3 \
     --enable-vulkan --enable-libplacebo --enable-libshaderc --enable-libx264 \
     --enable-ffnvcodec --enable-cuda --enable-cuvid --enable-nvdec --enable-nvenc \
-    "${CUDA_LLVM_FLAGS[@]}" \
     "${OIDN_FLAGS[@]}" "${OPTIX_FLAGS[@]}" "${ORT_FLAGS[@]}" "${GAME_FLAGS[@]}" "${VSR_FLAGS[@]}" \
-    --extra-libs="$EXTRA_LIBS"
+    --enable-debug=3 --disable-stripping --extra-libs="$EXTRA_LIBS"
 
 # By this point configure has already generated config.mak, config_components.h and
 # filter_list.c itself from the allfilters.c extern added above -- confirm it actually picked
@@ -811,21 +743,6 @@ if [[ "$WITH_RTXVSR" == "1" ]]; then
     "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\bvsr_rtcuda\b" \
         && echo "  vsr_rtcuda: present (registered - see RTXVSR.md for what's verified vs assumed)" \
         || die "vsr_rtcuda filter missing from the build"
-fi
-
-if [[ -n "$CLANG_CUDA" ]]; then
-    "$PREFIX/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E "\btranspose_cuda\b" \
-        && echo "  transpose_cuda: present" \
-        || die "transpose_cuda filter missing from the build (--enable-cuda-llvm did not take effect)"
-fi
-
-# Filters being present says nothing about pixels. The CUDA<->Vulkan bridge (0006-0012) once
-# passed every exit-code and frame-count check while returning scrambled frames, so a build whose
-# bridge corrupts is a failed build. BRIDGE_TEST=0 skips it, for building a binary that is known
-# to be broken in order to debug it; never for anything that gets deployed.
-if [[ "${BRIDGE_TEST:-1}" == "1" ]]; then
-    "$HERE/scripts/test-hwmap-bridge.sh" "$PREFIX/ffmpeg" \
-        || die "the CUDA<->Vulkan bridge returns corrupted frames (scripts/test-hwmap-bridge.sh); BRIDGE_TEST=0 skips this"
 fi
 
 cat <<EOF
