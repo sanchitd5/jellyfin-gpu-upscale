@@ -7,7 +7,7 @@ capture served at 1080p, reconstructed rather than stretched.
 Two engines sit behind that panel. **libplacebo GLSL user shaders on Vulkan** carry the super
 resolution, sharpening, refine and chroma passes. **Five custom ffmpeg video filters**, in a
 separately built binary beside the stock one, carry Intel Open Image Denoise, NVIDIA OptiX, ONNX
-neural models, FSR2 and DLSS/DLAA. Thirteen axes are exposed, all composable, all live-switchable
+neural models, FSR2 and DLSS/DLAA. Fourteen axes are exposed, all composable, all live-switchable
 mid-playback.
 
 Built and measured against Jellyfin **12.1.0** with an NVIDIA RTX 3090.
@@ -33,7 +33,7 @@ plainly rather than showing a quality badge that is a lie.
 
 **Using it** — [Requirements](#requirements) · [Install](#install) · [The player menu](#the-player-menu) · [Off means direct play](#off-means-direct-play)
 
-**What it does** — [Super-resolution levels](#super-resolution-levels) · [The non-2x ratio problem](#the-non-2x-ratio-problem) · [Two more axes: refine and chroma](#two-more-axes-refine-and-chroma) · [Neural models (neural=)](#neural-models-neural) · [Game temporal upscalers (game=)](#game-temporal-upscalers-game) · [Sharpening: RCAS](#sharpening-rcas) · [Denoise](#denoise) · [Intel Open Image Denoise (denoise=oidn)](#intel-open-image-denoise-denoiseoidn) · [NVIDIA OptiX (denoise=optix, denoise=optix-temporal)](#nvidia-optix-denoiseoptix-denoiseoptix-temporal)
+**What it does** — [Super-resolution levels](#super-resolution-levels) · [The non-2x ratio problem](#the-non-2x-ratio-problem) · [Two more axes: refine and chroma](#two-more-axes-refine-and-chroma) · [Detail engine: RTX DLPP / ONNX neural models (neural=)](#neural-models-neural) · [Game temporal upscalers (game=)](#game-temporal-upscalers-game) · [Sharpening: RCAS](#sharpening-rcas) · [Denoise](#denoise) · [Deblock (deblock=)](#deblock-deblock) · [Intel Open Image Denoise (denoise=oidn)](#intel-open-image-denoise-denoiseoidn) · [NVIDIA OptiX (denoise=optix, denoise=optix-temporal)](#nvidia-optix-denoiseoptix-denoiseoptix-temporal)
 
 **Running it** — [Configuration](#configuration) · [Honest reporting](#honest-reporting) · [Measured throughput](#measured-throughput)
 
@@ -114,7 +114,7 @@ QUALITY     [Automatic] [Off] [Manual]  + slider over the ladder
 SIZE        Upscale to
 SHARPNESS   Unblur
 NOISE       Denoise
-DETAIL      Neural SR | Detail (SR) | Refine | Chroma
+DETAIL      Detail engine (RTX / neural) | Detail (SR) | Refine | Chroma
 PICTURE     Debanding | Scaling kernel
 WHAT THE SERVER IS DOING   live, re-read every 3 s while open
 ```
@@ -262,22 +262,43 @@ order-sensitive.
 rather than being a fixed-2x network whose result gets shrunk back, which is the whole reason
 `SrMinScaleFactor` exists.
 
-## Neural models (`neural=`)
+## Detail engine: RTX DLPP and neural models (`neural=`)
 
-A fourth axis: ONNX super-resolution models running through ONNX Runtime with the CUDA execution
-provider, via [`ffmpeg/vf_ort.c`](ffmpeg/vf_ort.c). They are **not** `sr` levels — `sr` shaders run
+A fourth axis: the **Detail engine** control in the panel. It carries two families of CUDA-native
+levels (RTX DLPP and RTX VSR resampler, via PE-loader against driver DLLs — see
+[RTXDLPP.md](RTXDLPP.md) and [RTXVSR.md](RTXVSR.md)) and three ONNX super-resolution models
+running through ONNX Runtime with the CUDA execution provider, via
+[`ffmpeg/vf_ort.c`](ffmpeg/vf_ort.c). The ONNX models are **not** `sr` levels — `sr` shaders run
 inside libplacebo's scaling pass, while these are ONNX graphs applied CPU-side before `hwupload`, so
 they **compose with** an `sr` level rather than replacing one. See [NEURAL.md](NEURAL.md).
 
-| Level | Model | fps (960x540 -> 1080p) | realtime |
+| Level | Model / mechanism | fps (960x540 -> 1080p) | realtime |
 |---|---|---|---|
-| `realesr-anime-x2` | `realesr-animevideo-x2-fp16` | 24 | 0.56x |
-| `realesr-anime-x4` | `realesr-animevideov3-x4-fp16` | 15 | 0.34x |
-| `realesr-general-x4` | `realesr-general-x4v3-fp16` | 10 | 0.24x |
+| `realesr-anime-x2` | `realesr-animevideo-x2-fp16` (ONNX) | 24 | 0.56x |
+| `realesr-anime-x4` | `realesr-animevideov3-x4-fp16` (ONNX) | 15 | 0.34x |
+| `realesr-general-x4` | `realesr-general-x4v3-fp16` (ONNX) | 10 | 0.24x |
+| `dlpp-1` .. `dlpp-4` | RTX DLPP via `nvdlppx.dll` (CUDA-native) | ~115 est. | >1x |
+| `vsr-rtcuda` | RTX VSR bypass resampler (CUDA-native, not neural) | fast | >1x |
 
-**None reaches realtime for even one session** — roughly an order of magnitude dearer than the default
+**The ONNX models do not reach realtime for even one session** — roughly an order of magnitude dearer than the default
 FSRCNNX shader, which runs at 265 fps on the same source. They ship anyway, labelled with their real
 speed, because the option is worth having. No quality comparison was run and none is claimed.
+
+**RTX DLPP** (`dlpp-1` .. `dlpp-4`) is a different mechanism entirely: `vf_dlpp_rtcuda` maps
+`nvdlppx.dll` (an NVIDIA driver DLL) at runtime through a PE32+ loader, calling into the DLPP
+neural network directly via the PPE export table, with no NVIDIA SDK linked at compile time. The
+gain is content-dependent and modest — never negative across tested content, but not a dramatic
+jump. Four levels; level 4 applies the most processing. Requires the user to supply `nvdlppx.dll`
+(extractable from a GeForce/Studio driver package) and `WITH_RTXDLPP=1` at build time. See
+[RTXDLPP.md](RTXDLPP.md). Selecting any `dlpp` level turns off the Detail/Refine/Chroma/Debanding
+shader passes for that session — the CUDA-native chain owns the resize.
+
+**`vsr-rtcuda`** is a fast GPU resampler, not a neural network: it drives RTX VSR (`nvaivpx.dll`)
+in bypass mode, which skips the network entirely and delivers better-than-bicubic resampling
+at ~0.08 ms/frame. It requires `nvaivpx.dll` and `WITH_RTXVSR=1`. See [RTXVSR.md](RTXVSR.md).
+
+Both CUDA-native levels are offered on the same `neural=` axis as the ONNX models, controlled by
+the Detail engine picker in the panel, and are offered only when the respective DLL is present.
 
 **Why ONNX Runtime rather than TensorRT.** Both were sized before either was downloaded (236 MB
 against 4.39 GB), but size did not decide it: ORT has a C API and libavfilter is C, where TensorRT is
@@ -431,6 +452,25 @@ Denoise costs roughly 60% of throughput, so it is off by default and belongs as 
 denoising first measured worse than not sharpening at all. There is no noise estimate available where
 the chain is built, so no heuristic was invented — the config page states it beside the control.
 
+## Deblock (`deblock=`)
+
+Compression cleanup, running **before** the upscale at source resolution. Blocking and ringing are damage
+in the source; removing them first stops every later pass from sharpening and enlarging the damage along
+with the picture. Off by default and hidden in Advanced for the same reason: it is a restoration pass,
+not a picture control, and it only helps when the source has visible blocking.
+
+| Level | Filter | Notes |
+|---|---|---|
+| `light` | `deblock=filter=weak:block=8` | libavfilter's deblocker, weak threshold |
+| `strong` | `deblock=filter=strong:block=8` | same filter, strong threshold |
+| `fspp` | `fspp=quality=4` | DCT-domain deblock **and** dering — removes ringing from edges too, slower |
+| `pp7` | `pp7` | postprocessing-7 deblocker, third family; offered because it is present |
+
+`deblock`, `fspp` and `pp7` carry timeline (`T.`) support and no slice threading: the plugin
+runs them with an explicit `-filter_threads 1` override so they do not deadlock against Jellyfin's
+own thread settings. `fspp` and `pp7` are verified present in the stock `jellyfin-ffmpeg`; an
+unavailable level is silently dropped from the chain rather than failing the session.
+
 ## Intel Open Image Denoise (`denoise=oidn`)
 
 A neural denoiser, running OIDN's RT filter on CUDA. It is **advanced-only, off by default, and needs
@@ -529,7 +569,7 @@ Dashboard → Plugins → GPU Upscale. Defaults suit a single busy GPU:
 | `MinScaleFactor` | 1.15 | skip near-identity upscales entirely |
 | `MaxSourceHeight` | 1440 | never upscale sources taller than this |
 | `MaxConcurrent` | 2 | beyond this, stock transcoding is used |
-| `Encoder` | `hevc_nvenc` | falls back to the client's codec when unsupported |
+| `Encoder` | `hevc_nvenc` | falls back to the client's codec when unsupported; `av1_nvenc` requires compute 8.9+ (Ada Lovelace), guarded automatically |
 | `RequireClientOptIn` | true | off = enhance every eligible transcode |
 | `ForceTranscode` | false | turn a would-be stream copy into a real transcode |
 | `ForceTranscodeForDirectPlay` | false | see below — stops clients direct playing eligible material |
@@ -652,8 +692,8 @@ it carries and dropped the nodes it does not.
 
 Jellyfin's `ParseStreamOptions` copies **every lowercase-initial query parameter** into the request's
 `StreamOptions` dictionary, readable server-side via `GetOption(...)`. Nothing clamps or rewrites it.
-The injected client therefore appends the thirteen axes as plain query parameters:
-`&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=oidn&neural=off&game=off&refine=ssimsuperres`
+The injected client therefore appends the fourteen axes as plain query parameters:
+`&upscale=1440&sr=fsrcnnx&deblur=medium&denoise=oidn&deblock=off&neural=off&game=off&refine=ssimsuperres`
 `&chroma=krigbilateral&deband=on&kernel=ewa_lanczos&jitter=measured&depth=model&reactive=flow`.
 
 Server-side each one is read by `UpscaleEngine.Option(state, ...)`, and **that read is what makes an
