@@ -12,6 +12,7 @@ import {
 import {
     SORTS,
     TYPES,
+    ROLES,
     RESOLUTIONS,
     ADDED_PRESETS,
     RUNTIME_PRESETS,
@@ -474,7 +475,7 @@ function openSheet(opener) {
         });
         var input = el('input', 'jfp-input');
         input.type = 'search';
-        input.placeholder = kind === 'studio' ? 'Search studios' : 'Search people';
+        input.placeholder = kind === 'studio' ? 'Search studios' : 'Search cast & crew';
         input.autocomplete = 'off';
         input.setAttribute('aria-label', input.placeholder);
         stopKeys(input);
@@ -541,8 +542,62 @@ function openSheet(opener) {
         if (draft[key].length) {
             sec.open = true;
         }
+
+        return { sec: sec, input: input };
     }
-    entityPicker('person', 'People', 'people');
+
+    /* ---- cast & crew: people + role + any/all ---- */
+    var cast = entityPicker('person', 'Cast & Crew', 'people');
+    var castExtras = el('div', 'jfp-sub');
+    var matchBox = el('div', 'jfp-pills');
+    var matchBtns = [['Any of', false], ['All of', true]].map(function (m) {
+        var b = button('jfp-pill', m[0]);
+        b.setAttribute('aria-pressed', 'false');
+        b.addEventListener('click', function () {
+            draft.peopleAll = m[1];
+            refreshAll();
+        });
+        matchBox.appendChild(b);
+        return b;
+    });
+    var roleBox = el('div', 'jfp-pills');
+    var anyRole = button('jfp-pill', 'Any role');
+    anyRole.setAttribute('aria-pressed', 'false');
+    anyRole.addEventListener('click', function () {
+        draft.roles = [];
+        refreshAll();
+    });
+    roleBox.appendChild(anyRole);
+    var roleBtns = ROLES.map(function (r) {
+        var b = button('jfp-pill', r.label);
+        b.setAttribute('aria-pressed', 'false');
+        b.addEventListener('click', function () {
+            var at = draft.roles.indexOf(r.value);
+            if (at === -1) {
+                draft.roles.push(r.value);
+            } else {
+                draft.roles.splice(at, 1);
+            }
+
+            refreshAll();
+        });
+        roleBox.appendChild(b);
+        return b;
+    });
+    var castHint = el('p', 'jfp-hint', 'Role limits the picked people to that credit. With several people, All of keeps only items that credit every one of them.');
+    castExtras.appendChild(matchBox);
+    castExtras.appendChild(roleBox);
+    castExtras.appendChild(castHint);
+    cast.sec.insertBefore(castExtras, cast.input);
+    refreshers.push(function () {
+        // Neither choice means anything until someone is picked (and All of until two are).
+        castExtras.hidden = draft.people.length === 0;
+        matchBox.hidden = draft.people.length < 2;
+        setPressed(matchBtns[0], !draft.peopleAll);
+        setPressed(matchBtns[1], draft.peopleAll);
+        setPressed(anyRole, draft.roles.length === 0);
+        ROLES.forEach(function (r, i) { setPressed(roleBtns[i], draft.roles.indexOf(r.value) !== -1); });
+    });
     entityPicker('studio', 'Studio', 'studios');
 
     /* ---- runtime ---- */

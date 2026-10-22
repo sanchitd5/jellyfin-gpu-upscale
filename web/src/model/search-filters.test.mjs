@@ -98,6 +98,57 @@ t('people and studios are comma-separated guids; malformed ids are dropped', fun
     assert.deepEqual(p.studioIds, [G2]);
 });
 
+t('cast & crew: roles ride as personTypes next to personIds, canonical order, unknown names dropped', function () {
+    var ppl = [{ id: G1, name: 'P' }, { id: G2, name: 'Q' }];
+    var u = rewriteSearchUrl(ALL, st({ people: ppl, roles: ['Writer', 'Director', 'Bogus', 'GuestStar'] }), NOW);
+    var p = q(u);
+    assert.deepEqual(p.personIds, [G1 + ',' + G2]);
+    assert.deepEqual(p.personTypes, ['Director,Writer,GuestStar']);
+    assert.equal(p.jpPersonMatch, undefined);
+    assert.equal(rewriteSearchUrl(u, st({ people: ppl, roles: ['Writer', 'Director', 'GuestStar'] }), NOW), u);
+    assert.equal(q(rewriteSearchUrl(ALL, st({ people: ppl }), NOW)).personTypes, undefined);
+});
+
+t('cast & crew: roles without people send nothing (stock would ignore them anyway)', function () {
+    assert.equal(rewriteSearchUrl(ALL, st({ roles: ['Actor'] }), NOW), ALL);
+    assert.deepEqual(chipsOf(st({ roles: ['Actor'], peopleAll: true })), []);
+});
+
+t('cast & crew: All of -> jpPersonMatch=all, only with two or more people', function () {
+    var two = [{ id: G1, name: 'P' }, { id: G2, name: 'Q' }];
+    assert.deepEqual(q(rewriteSearchUrl(ALL, st({ people: two, peopleAll: true }), NOW)).jpPersonMatch, ['all']);
+    assert.equal(q(rewriteSearchUrl(ALL, st({ people: two }), NOW)).jpPersonMatch, undefined);
+    assert.equal(q(rewriteSearchUrl(ALL, st({ people: [two[0]], peopleAll: true }), NOW)).jpPersonMatch, undefined);
+    // a stale value already in the URL is replaced, never doubled
+    var u = rewriteSearchUrl(ALL + '&jpPersonMatch=all&personTypes=Actor', st({ people: two }), NOW);
+    assert.equal(q(u).jpPersonMatch, undefined);
+    assert.equal(q(u).personTypes, undefined);
+});
+
+t('cast & crew: chips read "Cast: Name (Role)", All of is its own chip, one badge group', function () {
+    var s = st({ people: [{ id: G1, name: 'P' }, { id: G2, name: 'Q' }], roles: ['Director', 'GuestStar'], peopleAll: true });
+    assert.deepEqual(chipsOf(s).map(function (c) { return c.label; }),
+        ['Cast: P (Director / Guest star)', 'Cast: Q (Director / Guest star)', 'Match all people']);
+    assert.deepEqual(activeGroups(s), ['people']);
+    assert.equal(chipsOf(st({ people: [{ id: G1, name: 'P' }] }))[0].label, 'Cast: P');
+});
+
+t('cast & crew: removing the last person clears roles and All of; All of chip clears alone', function () {
+    var s = st({ people: [{ id: G1, name: 'P' }, { id: G2, name: 'Q' }], roles: ['Actor'], peopleAll: true });
+    var n = removeChip(s, 'person:' + G1);
+    assert.deepEqual(n.roles, ['Actor']);
+    n = removeChip(n, 'person:' + G2);
+    assert.deepEqual([n.people, n.roles, n.peopleAll], [[], [], false]);
+    n = removeChip(s, 'peopleAll');
+    assert.equal(n.peopleAll, false);
+    assert.equal(n.people.length, 2);
+});
+
+t('older stored state (no roles / peopleAll) loads with defaults', function () {
+    var n = normalizeState({ people: [{ id: G1, name: 'P' }] });
+    assert.deepEqual([n.roles, n.peopleAll], [[], false]);
+});
+
 t('runtime min/max in whole minutes, either side optional, swapped if reversed', function () {
     var p = q(rewriteSearchUrl(ALL, st({ minRuntime: 5, maxRuntime: 20 }), NOW));
     assert.deepEqual([p.jpMinRuntime, p.jpMaxRuntime], [['5'], ['20']]);
