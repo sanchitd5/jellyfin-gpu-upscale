@@ -277,20 +277,15 @@ namespace Jellyfin.Plugin.Plus.Patcher
             var db = FilterCacheEngine.OpenDb(out var conn);
             try
             {
-                var stale = false;
-                foreach (var k in kinds)
+                var state = FilterCacheEngine.Check(db, conn, libs, kinds, out var why);
+                if (state == FilterCacheEngine.Freshness.Unusable)
                 {
-                    var state = FilterCacheEngine.Check(db, conn, libs, k, out var why);
-                    if (state == FilterCacheEngine.Freshness.Unusable)
-                    {
-                        FilterCacheEngine.RequestHeal();
-                        db.Dispose();
-                        return Reject(why);
-                    }
-
-                    stale |= state == FilterCacheEngine.Freshness.Stale;
+                    FilterCacheEngine.RequestHeal();
+                    db.Dispose();
+                    return Reject(why);
                 }
 
+                var stale = state == FilterCacheEngine.Freshness.Stale;
                 if (stale)
                 {
                     FilterCacheEngine.RequestHeal();

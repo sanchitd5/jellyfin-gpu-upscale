@@ -693,16 +693,51 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// Only about content: permissions are decided separately and live, per request.
         /// </summary>
         internal static Freshness Check(JellyfinDbContext db, DbConnection conn, Guid[] libs, Kind kind, out string why)
+            => Check(db, conn, libs, new[] { kind }, out why);
+
+        /// <summary>
+        /// The worst state over several kinds. The library fingerprint is computed ONCE for all of them (it is
+        /// a count/max over the library's rows, the dominant cost of a served request).
+        /// </summary>
+        internal static Freshness Check(JellyfinDbContext db, DbConnection conn, Guid[] libs, Kind[] kinds, out string why)
         {
             var meta = ReadMeta(conn, libs);
-            if (libs.Any(l => !meta.ContainsKey((l, kind))))
+            if (kinds.Any(k => libs.Any(l => !meta.ContainsKey((l, k)))))
             {
                 why = "not-built";
                 return Freshness.Unusable;
             }
 
             var fps = Fingerprints(db, libs);
-            var genreFp = kind == Kind.GenreEntity ? GenreFingerprint(db) : null;
+            var genreFp = kinds.Contains(Kind.GenreEntity) ? GenreFingerprint(db) : null;
+            var result = Freshness.Fresh;
+            why = null;
+            foreach (var kind in kinds)
+            {
+                var one = CheckOne(meta, fps, genreFp, libs, kind, out var w);
+                if (one == Freshness.Unusable)
+                {
+                    why = w;
+                    return one;
+                }
+
+                if (one == Freshness.Stale)
+                {
+                    result = Freshness.Stale;
+                }
+            }
+
+            return result;
+        }
+
+        private static Freshness CheckOne(
+            Dictionary<(Guid, Kind), Meta> meta,
+            Dictionary<Guid, string> fps,
+            string genreFp,
+            Guid[] libs,
+            Kind kind,
+            out string why)
+        {
             var stale = libs.Any(l => meta[(l, kind)].Fingerprint != FingerprintFor(kind, fps[l], genreFp));
             if (!stale)
             {
