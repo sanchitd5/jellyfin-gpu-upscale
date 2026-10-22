@@ -479,8 +479,8 @@ patch -p1 < "$HERE/ffmpeg/0009-hwmap-query-formats.patch"
 # tree never had it. Not one of this project's own filters and applies unconditionally, same as
 # 0006-0009: Jellyfin's own core EncodingHelper (not this project's code - grepped src/, no
 # match) emits "transpose_cuda" for a rotated source on the CUDA hwaccel path regardless of any
-# GpuUpscale setting, and the prebuilt jellyfin-ffmpeg binary this project runs alongside already
-# carries it (confirmed via -filters), so a session choosing a CUDA-native GpuUpscale level
+# Jellyfin Plus setting, and the prebuilt jellyfin-ffmpeg binary this project runs alongside already
+# carries it (confirmed via -filters), so a session choosing a CUDA-native upscale level
 # (dlpp-1..4/vsr-rtcuda) on a rotated source hit "No such filter: 'transpose_cuda'" and failed
 # outright on this project's own binary - a real production failure, not hypothetical, see
 # livetestbox.md. Trimmed from the upstream PR: its Changelog and libavfilter/version.h hunks

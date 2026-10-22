@@ -1,6 +1,6 @@
 #!/bin/bash
-# Builds web/gpu-upscale.js (the single file the injector actually publishes,
-# scripts/jellyfin-gpuupscale-webinject copies exactly this path) from the real ES modules in
+# Builds web/jellyfin-plus.js (the single file the injector actually publishes,
+# scripts/jellyfin-plus-webinject copies exactly this path) from the real ES modules in
 # web/src/. The source is honest modules with real import/export (web/src/bootstrap.js is the
 # entry point; web/src/{lib,model,controller,view}/*.js are the modules it pulls in); esbuild
 # bundles that module graph into ONE plain IIFE with no runtime module system, because
@@ -12,9 +12,9 @@
 # is required on that build machine to install and run esbuild; nothing else is.
 #
 # Usage: scripts/build-web-panel.sh
-#   Regenerates web/gpu-upscale.js from web/src/bootstrap.js and everything it imports. Does NOT
-#   touch VERSION/the cache-buster in scripts/jellyfin-gpuupscale-webinject and does NOT publish
-#   or copy the output anywhere - that stays a separate, explicit step. web/gpu-upscale.js is
+#   Regenerates web/jellyfin-plus.js from web/src/bootstrap.js and everything it imports. Does NOT
+#   touch VERSION/the cache-buster in scripts/jellyfin-plus-webinject and does NOT publish
+#   or copy the output anywhere - that stays a separate, explicit step. web/jellyfin-plus.js is
 #   gitignored, NOT committed: run this script (after `npm install` in web/, once per build
 #   machine) wherever the output is actually needed - scripts/proxmox-build.sh and INSTALL.md's
 #   manual steps both do this before publishing.
@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 
 WEB_DIR=web
 ENTRY=web/src/bootstrap.js
-OUT=web/gpu-upscale.js
+OUT=web/jellyfin-plus.js
 BANNER=web/src/banner.txt
 
 if [ ! -f "$ENTRY" ]; then
@@ -44,7 +44,7 @@ fi
         --format=iife \
         --target=es2018 \
         --banner:js="$(cat src/banner.txt)" \
-        --outfile=gpu-upscale.js.tmp
+        --outfile=jellyfin-plus.js.tmp
 )
 
 mv "$OUT.tmp" "$OUT"
