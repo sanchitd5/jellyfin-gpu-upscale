@@ -3,6 +3,7 @@ import { log } from '../lib/log.js';
 import { wrapActionSheet } from './action-sheet.js';
 import { notePlaybackManager } from './live-apply.js';
 import { noteQueryClient } from './search-exclude.js';
+import { noteCardBuilder } from './detail-related.js';
 
 function wrapChunkModules(chunk) {
     try {
@@ -32,6 +33,7 @@ function wrapChunkModules(chunk) {
                         wrapActionSheet(exports);
                         notePlaybackManager(exports);
                         noteQueryClient(exports);
+                        noteCardBuilder(exports);
                     }
                 } catch (err) {
                     log('module wrap failed', err);
