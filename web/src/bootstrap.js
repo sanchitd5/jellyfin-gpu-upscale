@@ -10,24 +10,49 @@ import { watchSearchPage } from './controller/search-exclude.js';
 import { installSearchScopeFix } from './controller/search-scope.js';
 import { installSearchGrid } from './view/search-grid.js';
 import { installImageZoom } from './view/image-zoom.js';
+import { installPlayAllFix } from './controller/play-all.js';
+import { installCardActions } from './view/card-actions.js';
+import { installDoubleTapSeek } from './controller/double-tap-seek.js';
+import { installClipUpNext } from './controller/clip-upnext.js';
+import { installDetailRelated } from './controller/detail-related.js';
+import { installPersonVideos } from './controller/person-videos.js';
+import { installBulkTags } from './controller/bulk-tags.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
  * or its exports (read by whichever module needs them); this is the only file that runs code at
  * the top level to actually install the hook, exactly as the old single IIFE's closing block did.
  */
+
+/* Each QoL feature installs on its own: one that throws must not take the others down with it. */
+function feature(name, install) {
+    try {
+        install();
+    } catch (err) {
+        log('bootstrap: ' + name + ' failed to install', err);
+    }
+}
+
 (function install() {
     log('bootstrap install: start');
     try {
         hookWebpack();
         hookFetch();
         hookXhr();
+        // Wraps fetch/XHR on top of the hooks above, so it must come after them.
+        feature('play-all fix', installPlayAllFix);
         tryRequireShim();
         watchPlaybackInfoDialog();
-        watchSearchPage();
-        installSearchScopeFix();
-        installSearchGrid();
-        installImageZoom();
+        feature('search page', watchSearchPage);
+        feature('search scope', installSearchScopeFix);
+        feature('search grid', installSearchGrid);
+        feature('image zoom', installImageZoom);
+        feature('card actions', installCardActions);
+        feature('double-tap seek', installDoubleTapSeek);
+        feature('clip up next', installClipUpNext);
+        feature('detail related', installDetailRelated);
+        feature('person videos', installPersonVideos);
+        feature('bulk tags', installBulkTags);
         probeServer();
         state.installed = true;
         log('bootstrap install: end, installed on', state.globals.join(', '));

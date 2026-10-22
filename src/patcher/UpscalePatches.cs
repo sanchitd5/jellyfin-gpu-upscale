@@ -204,6 +204,25 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 logger?.LogWarning(ex, "GpuUpscale: the tag search patch could not be installed. Stock name search is unaffected.");
             }
 
+            // More Like This for Video items (no stock provider covers Video). Own try/catch.
+            try
+            {
+                SimilarPatches.Apply(harmony, logger);
+                if (SimilarPatches.Available)
+                {
+                    applied.Add("video similar items");
+                }
+                else
+                {
+                    failed.Add("video similar items (stock behaviour unaffected)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("video similar items (stock behaviour unaffected)");
+                logger?.LogWarning(ex, "GpuUpscale: the Video similar-items patch could not be installed. Stock behaviour is unaffected.");
+            }
+
             // MediaInfoHelper lives in Jellyfin.Api, a different assembly from the core targets, and
             // is resolved BY NAME so that the patcher does not need a compile-time reference to a
             // web-API assembly it would then be version-pinned to.

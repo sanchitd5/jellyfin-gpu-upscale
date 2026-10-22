@@ -47,7 +47,13 @@ esbuild) support natively.
 | `controller/live-block.js` | `LIVE_ROWS`, `staleNote()`, `liveLines()`, `fetchServerState()` | `model/state.js`, `lib/utils.js` (`isOff`), `network.js` (`wireParams`, `paramSig`), `live-apply.js` (`activeState`) `<->` |
 | `controller/action-sheet.js` | `isPlayerSettingsSheet()`, `wrapActionSheet()` | `model/state.js`, `model/effective.js` (`summaryText`), `playback-hooks.js` (`openEnhancePanel`) `<->`, `lib/log.js` |
 | `controller/playback-hooks.js` | `hookPlaybackEvents()`, `resetUpscaleForNewSource()`, `openEnhancePanel()`, `watchPlaybackInfoDialog()` | `model/state.js`, `model/controls-data.js` (`DEFAULT_PREFS`), `model/prefs-store.js` (`savePrefs`), `lib/log.js`, `lib/dom.js` (`el`), `live-apply.js` (`player`), `probe.js` (`probeServer`), `live-block.js` (`fetchServerState`), `view/panel-dom.js` (`closePanel`, `ensureStyle`, `renderPanel`, `panelEl`, `applyPanelPos`, `liveRows`, `FOCUSABLE`, `PANEL_ID`) |
-| `controller/webpack-hook.js` | `hookWebpack()` | `model/state.js`, `lib/log.js`, `action-sheet.js` (`wrapActionSheet`), `live-apply.js` (`notePlaybackManager`), `search-exclude.js` (`noteQueryClient`) |
+| `controller/webpack-hook.js` | `hookWebpack()` | `model/state.js`, `lib/log.js`, `action-sheet.js` (`wrapActionSheet`), `live-apply.js` (`notePlaybackManager`), `search-exclude.js` (`noteQueryClient`), `detail-related.js` (`noteCardBuilder`) |
+| `controller/play-all.js` | `installPlayAllFix()`, `rewritePlaybackQueryUrl()` | `lib/log.js` |
+| `controller/double-tap-seek.js` | `installDoubleTapSeek()` | `model/state.js`, `lib/log.js`, `lib/dom.js` (`el`), `live-apply.js` (`player`, `activePlayer`) |
+| `controller/clip-upnext.js` | `installClipUpNext()` | `model/state.js`, `lib/log.js`, `lib/dom.js` (`el`), `live-apply.js` (`player`, `activePlayer`) |
+| `controller/detail-related.js` | `installDetailRelated()`, `noteCardBuilder()` | `lib/log.js`, `lib/dom.js` (`el`) |
+| `controller/person-videos.js` | `installPersonVideos()`, `rewriteSectionUrl()` | `lib/log.js` |
+| `controller/bulk-tags.js` | `parseTags()`, `mergeTags()`, `buildPayload()`, `changedFields()`, `editItemTags()`, `runBulk()`, `loadTagNames()`, `loadSelectionTags()`, `installBulkTags()` | `lib/log.js`, `view/bulk-tags-dialog.js` (`showTagDialog`) |
 
 ## view/ - DOM rendering
 
@@ -56,12 +62,14 @@ esbuild) support natively.
 | `view/panel-dom.js` | `FOCUSABLE`, `PANEL_ID`, `panelEl()`, `ensureStyle()`, `liveRows()`, `applyPanelPos()`, `renderPanel()`, `closePanel()` | `lib/dom.js` (`el`), `lib/log.js`, `model/state.js`, `model/controls-data.js` (`CONTROLS`, `DEFAULT_PREFS`), `model/conflicts.js`, `model/effective.js`, `model/ladder.js`, `model/costing.js`, `model/prefs-store.js` (`savePrefs`), `controller/live-apply.js` (`requestRestream`, `activeState`, `APPLY_LABEL`, `APPLY_FAILED_TEXT`) `<->`, `controller/live-block.js` (`liveLines`), `controller/probe.js` (`axisControls`, `controlNote`) |
 | `view/search-grid.js` | `installSearchGrid()` | `lib/log.js` |
 | `view/image-zoom.js` | `fullSizeUrl()`, `installImageZoom()` | `lib/log.js`, `lib/dom.js` (`el`) |
+| `view/card-actions.js` | `installCardActions()` | `lib/log.js`, `lib/dom.js` (`el`) |
+| `view/bulk-tags-dialog.js` | `showTagDialog()` | `lib/dom.js` (`el`), `lib/log.js` |
 
 ## Entry point
 
 | module | exports | imports |
 |---|---|---|
-| `bootstrap.js` | none (runs the install try/catch as a side effect) | `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`), `controller/search-exclude.js` (`watchSearchPage`), `controller/search-scope.js` (`installSearchScopeFix`), `view/search-grid.js` (`installSearchGrid`), `view/image-zoom.js` (`installImageZoom`) |
+| `bootstrap.js` | none (runs the install try/catch as a side effect) | `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`), `controller/search-exclude.js` (`watchSearchPage`), `controller/search-scope.js` (`installSearchScopeFix`), `view/search-grid.js` (`installSearchGrid`), `view/image-zoom.js` (`installImageZoom`), and the QoL installers: `controller/play-all.js`, `view/card-actions.js`, `controller/double-tap-seek.js`, `controller/clip-upnext.js`, `controller/detail-related.js`, `controller/person-videos.js`, `controller/bulk-tags.js` (each through `feature()`, its own try/catch) |
 | `banner.txt` | n/a - not a module, injected as the bundle's leading comment via esbuild's `--banner:js` | none |
 
 ## Build
