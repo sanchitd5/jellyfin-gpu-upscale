@@ -25,7 +25,7 @@ JELLYFIN_BIN="${JELLYFIN_BIN:-/usr/lib/jellyfin/bin}"
 DOTNET_ROOT="${DOTNET_ROOT:-/opt/dotnet}"
 FFMPEG_PREFIX="${FFMPEG_PREFIX:-/usr/lib/jellyfin-ffmpeg-oidn}"
 PLUGIN_VERSION="${PLUGIN_VERSION:-1.0.0.0}"
-PATCH_DIR=/usr/lib/jellyfin-gpuupscale
+PATCH_DIR=/usr/lib/jellyfin-plus
 
 WITH_FFMPEG=0
 WITH_SHADERS=0
@@ -53,7 +53,7 @@ done
 PATCHED_FFMPEG="$FFMPEG_PREFIX/ffmpeg"
 STAGE="$PATCH_DIR/staged"
 STAGE_NEW="$PATCH_DIR/staged.new"
-PLUGIN_DIR="/var/lib/jellyfin/plugins/GpuUpscale_$PLUGIN_VERSION"
+PLUGIN_DIR="/var/lib/jellyfin/plugins/JellyfinPlus_$PLUGIN_VERSION"
 
 [ "$(id -u)" = "0" ] || { echo "run as root: this writes to /usr/lib and restarts jellyfin" >&2; exit 1; }
 
@@ -198,16 +198,32 @@ rm -rf ./out ./out-patcher
 dotnet publish src         -c Release -p:JellyfinBin="$JELLYFIN_BIN" -o ./out         --nologo -v q
 dotnet publish src/patcher -c Release -p:JellyfinBin="$JELLYFIN_BIN" -o ./out-patcher --nologo -v q
 
+# ---- 4b. migrate a pre-rename install ------------------------------------------------------------
+# A box still on the GPU Upscale layout (GpuUpscale_* plugin dir, /usr/lib/jellyfin-gpuupscale, the
+# old sbin scripts and apt hook, gpu-upscale.js in the web root) is converted here, BEFORE staging
+# and before anything below creates a JellyfinPlus_* directory. That ordering is the point: the
+# first-install block further down would otherwise drop a second copy of the same plugin GUID
+# beside the old one. The freshly built assemblies are handed over so the migration can put a
+# complete plugin directory in place; it never leaves Jellyfin with zero or two copies, and it is a
+# no-op (exit 0) on a box that is already migrated or was never installed. It changes files on
+# disk only: the running server is not touched until step 7, so --no-activate is still safe.
+# --skip-web: the old client script and its index.html tag keep serving the still-running old
+# plugin until the restart; step 8's webinject strips them (it does so on every run) once the new
+# server half is live, which is the same "client last" rule as everything else here.
+echo "==> migrate (if the box predates the rename)"
+./scripts/migrate-to-jellyfin-plus.sh --skip-web --plugin-version="$PLUGIN_VERSION" \
+    --out="$REPO_DIR/out" --out-patcher="$REPO_DIR/out-patcher"
+
 # ---- 5. stage --------------------------------------------------------------------------------
 # Into a new directory that replaces the old one in one move, so an interrupted run cannot leave
 # a new plugin DLL staged beside the previous run's patcher DLL for a later activate to deploy.
 echo "==> staging"
 rm -rf "$STAGE_NEW"
 mkdir -p "$STAGE_NEW"
-cp -a out/Jellyfin.Plugin.GpuUpscale.dll                  "$STAGE_NEW/"
-cp -a out/Jellyfin.Plugin.GpuUpscale.deps.json            "$STAGE_NEW/"
-cp -a out-patcher/Jellyfin.Plugin.GpuUpscale.Patcher.dll  "$STAGE_NEW/"
-cp -a out-patcher/0Harmony.dll                            "$STAGE_NEW/"
+cp -a out/Jellyfin.Plugin.Plus.dll                  "$STAGE_NEW/"
+cp -a out/Jellyfin.Plugin.Plus.deps.json            "$STAGE_NEW/"
+cp -a out-patcher/Jellyfin.Plugin.Plus.Patcher.dll  "$STAGE_NEW/"
+cp -a out-patcher/0Harmony.dll                      "$STAGE_NEW/"
 rm -rf "$STAGE"
 mv "$STAGE_NEW" "$STAGE"
 
@@ -219,45 +235,45 @@ if [ ! -d "$PLUGIN_DIR" ]; then
     cat > "$PLUGIN_DIR/meta.json" <<META
 {
   "guid": "6f2a9c31-4d7b-4e2a-9d15-8a1c0b7e3f44",
-  "name": "GPU Upscale",
+  "name": "Jellyfin Plus",
   "version": "$PLUGIN_VERSION",
   "targetAbi": "12.1.0.0",
   "owner": "",
-  "overview": "Realtime GPU super-resolution upscaling",
+  "overview": "Search fixes, library filters and other quality-of-life patches, plus realtime GPU super-resolution upscaling",
   "category": "General"
 }
 META
-    cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.dll" "$STAGE/Jellyfin.Plugin.GpuUpscale.deps.json" "$PLUGIN_DIR/"
-    cp -a "$STAGE/Jellyfin.Plugin.GpuUpscale.Patcher.dll" "$STAGE/0Harmony.dll" "$PATCH_DIR/"
+    cp -a "$STAGE/Jellyfin.Plugin.Plus.dll" "$STAGE/Jellyfin.Plugin.Plus.deps.json" "$PLUGIN_DIR/"
+    cp -a "$STAGE/Jellyfin.Plugin.Plus.Patcher.dll" "$STAGE/0Harmony.dll" "$PATCH_DIR/"
     chown -R jellyfin:jellyfin "$PLUGIN_DIR"
 fi
 
 # Keep the previous activate script: it is what a rollback runs, so installing a new one and
 # immediately executing it should not be the only copy on the box.
-[ -f /usr/local/sbin/jellyfin-gpuupscale-activate ] && \
-    cp -a /usr/local/sbin/jellyfin-gpuupscale-activate /usr/local/sbin/jellyfin-gpuupscale-activate.prev
-install -m 0755 scripts/jellyfin-gpuupscale-webinject /usr/local/sbin/jellyfin-gpuupscale-webinject
-install -m 0755 scripts/jellyfin-gpuupscale-activate  /usr/local/sbin/jellyfin-gpuupscale-activate
+[ -f /usr/local/sbin/jellyfin-plus-activate ] && \
+    cp -a /usr/local/sbin/jellyfin-plus-activate /usr/local/sbin/jellyfin-plus-activate.prev
+install -m 0755 scripts/jellyfin-plus-webinject /usr/local/sbin/jellyfin-plus-webinject
+install -m 0755 scripts/jellyfin-plus-activate  /usr/local/sbin/jellyfin-plus-activate
 
 # An unparseable fragment here breaks every apt operation on the box, not just this project.
-if [ -f /etc/apt/apt.conf.d/99-jellyfin-gpuupscale ]; then
-    cp -a /etc/apt/apt.conf.d/99-jellyfin-gpuupscale /etc/apt/apt.conf.d/99-jellyfin-gpuupscale.prev
+if [ -f /etc/apt/apt.conf.d/99-jellyfin-plus ]; then
+    cp -a /etc/apt/apt.conf.d/99-jellyfin-plus /etc/apt/apt.conf.d/99-jellyfin-plus.prev
 fi
-install -m 0644 scripts/99-jellyfin-gpuupscale /etc/apt/apt.conf.d/99-jellyfin-gpuupscale
+install -m 0644 scripts/99-jellyfin-plus /etc/apt/apt.conf.d/99-jellyfin-plus
 if ! apt-config dump >/dev/null 2>&1; then
     echo "==> apt.conf fragment is invalid; restoring the previous one" >&2
-    if [ -f /etc/apt/apt.conf.d/99-jellyfin-gpuupscale.prev ]; then
-        mv /etc/apt/apt.conf.d/99-jellyfin-gpuupscale.prev /etc/apt/apt.conf.d/99-jellyfin-gpuupscale
+    if [ -f /etc/apt/apt.conf.d/99-jellyfin-plus.prev ]; then
+        mv /etc/apt/apt.conf.d/99-jellyfin-plus.prev /etc/apt/apt.conf.d/99-jellyfin-plus
     else
-        rm -f /etc/apt/apt.conf.d/99-jellyfin-gpuupscale
+        rm -f /etc/apt/apt.conf.d/99-jellyfin-plus
     fi
     exit 1
 fi
-rm -f /etc/apt/apt.conf.d/99-jellyfin-gpuupscale.prev
+rm -f /etc/apt/apt.conf.d/99-jellyfin-plus.prev
 
 if [ "$ACTIVATE" = "0" ]; then
     echo "==> staged in $STAGE, not activated, client script left as it was."
-    echo "    activate when ready: jellyfin-gpuupscale-activate"
+    echo "    activate when ready: jellyfin-plus-activate"
     exit 0
 fi
 
@@ -280,7 +296,7 @@ count="$(printf '%s' "$pids" | grep -c . || true)"
 if [ "${count:-0}" -gt 0 ]; then
     if [ "$KEEP_TRANSCODES" = "1" ]; then
         echo "==> $count transcode(s) in flight and --keep-transcodes given; not restarting." >&2
-        echo "    the build is staged in $STAGE. Activate later with: jellyfin-gpuupscale-activate" >&2
+        echo "    the build is staged in $STAGE. Activate later with: jellyfin-plus-activate" >&2
         exit 3
     fi
     echo "==> ending $count transcode(s) before the restart"
@@ -300,29 +316,29 @@ fi
 
 # ---- 7. activate -----------------------------------------------------------------------------
 echo "==> activating"
-/usr/local/sbin/jellyfin-gpuupscale-activate
+/usr/local/sbin/jellyfin-plus-activate
 
 # ---- 8. client -------------------------------------------------------------------------------
 # Only now. A client published ahead of the server sends axes the running plugin does not read,
 # silently, which is this project's oldest failure and the hardest to see.
 #
-# web/gpu-upscale.js is a BUILD OUTPUT, not checked in (see web/src/ - real ES modules, bundled
+# web/jellyfin-plus.js is a BUILD OUTPUT, not checked in (see web/src/ - real ES modules, bundled
 # by esbuild). It has to be built here, fresh, from whatever web/src/ this checkout just fetched -
 # there is no committed copy to fall back to.
 echo "==> building the client script"
-command -v npm >/dev/null || { echo "npm not on PATH: install Node.js on this machine to build web/gpu-upscale.js" >&2; exit 1; }
+command -v npm >/dev/null || { echo "npm not on PATH: install Node.js on this machine to build web/jellyfin-plus.js" >&2; exit 1; }
 [ -d web/node_modules/esbuild ] || (cd web && npm install --no-audit --no-fund)
 ./scripts/build-web-panel.sh
 
 echo "==> publishing the client script"
-install -m 0644 web/gpu-upscale.js "$PATCH_DIR/gpu-upscale.js.tmp.$$"
-mv "$PATCH_DIR/gpu-upscale.js.tmp.$$" "$PATCH_DIR/gpu-upscale.js"
-/usr/local/sbin/jellyfin-gpuupscale-webinject
+install -m 0644 web/jellyfin-plus.js "$PATCH_DIR/jellyfin-plus.js.tmp.$$"
+mv "$PATCH_DIR/jellyfin-plus.js.tmp.$$" "$PATCH_DIR/jellyfin-plus.js"
+/usr/local/sbin/jellyfin-plus-webinject
 
 # ---- 9. what actually happened ---------------------------------------------------------------
 echo "==> patch status"
-journalctl -u jellyfin --since "-2 min" --no-pager | grep -i 'gpuupscale' | tail -8 || \
-    echo "    no GpuUpscale lines in the log yet; check journalctl -u jellyfin"
+journalctl -u jellyfin --since "-2 min" --no-pager | grep -i 'jellyfinplus' | tail -8 || \
+    echo "    no JellyfinPlus lines in the log yet; check journalctl -u jellyfin"
 echo
 echo "Deployed. Still unproven: play something and probe the served segment."
 echo "  journalctl -u jellyfin | grep libplacebo"

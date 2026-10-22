@@ -1,0 +1,72 @@
+#!/bin/bash
+# Activates the staged Jellyfin Plus build. This is the only step that needs a Jellyfin restart:
+# the plugin assembly is loaded at startup and the patch assembly lives in the default assembly
+# load context, so neither can be swapped in a running server.
+#
+# Run this when a service restart is acceptable. It backs up the live assemblies first and can be
+# rolled back with --rollback.
+#
+# An install that still has the pre-rename layout (GpuUpscale_* plugin dir) must be migrated first
+# with scripts/migrate-to-jellyfin-plus.sh; this script refuses to run beside it.
+set -eu -o pipefail
+
+# Each assembly is copied to a .new name beside its destination first, then mv'd into place.
+# mv within the same directory is atomic, so a crash or kill mid-deploy leaves either the old
+# or the new file at the real name, never a mismatched plugin/patcher pair.
+PLUGIN_DIR=/var/lib/jellyfin/plugins/JellyfinPlus_1.0.0.0
+PATCH_DIR=/usr/lib/jellyfin-plus
+STAGE=$PATCH_DIR/staged
+BACKUP=$PATCH_DIR/previous
+
+# Two plugin directories with the same GUID is the one state that must never reach a restart.
+if compgen -G "/var/lib/jellyfin/plugins/GpuUpscale_*" >/dev/null; then
+    echo "a pre-rename GpuUpscale_* plugin directory is still present: run migrate-to-jellyfin-plus.sh first" >&2
+    exit 1
+fi
+
+if [ "${1:-}" = "--rollback" ]; then
+    [ -d "$BACKUP" ] || { echo "no backup to roll back to"; exit 1; }
+    cp -a "$BACKUP/Jellyfin.Plugin.Plus.dll" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.dll.new"
+    cp -a "$BACKUP/Jellyfin.Plugin.Plus.deps.json" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.deps.json.new"
+    cp -a "$BACKUP/Jellyfin.Plugin.Plus.Patcher.dll" "$PATCH_DIR/Jellyfin.Plugin.Plus.Patcher.dll.new"
+    cp -a "$BACKUP/0Harmony.dll" "$PATCH_DIR/0Harmony.dll.new"
+    mv "$PLUGIN_DIR/Jellyfin.Plugin.Plus.dll.new" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.dll"
+    mv "$PLUGIN_DIR/Jellyfin.Plugin.Plus.deps.json.new" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.deps.json"
+    mv "$PATCH_DIR/Jellyfin.Plugin.Plus.Patcher.dll.new" "$PATCH_DIR/Jellyfin.Plugin.Plus.Patcher.dll"
+    mv "$PATCH_DIR/0Harmony.dll.new" "$PATCH_DIR/0Harmony.dll"
+    chown -R jellyfin:jellyfin "$PLUGIN_DIR"
+    systemctl restart jellyfin
+    echo "rolled back to the previous build"
+    exit 0
+fi
+
+[ -d "$STAGE" ] || { echo "nothing staged in $STAGE"; exit 1; }
+
+mkdir -p "$BACKUP"
+cp -a "$PLUGIN_DIR/Jellyfin.Plugin.Plus.dll" "$BACKUP/Jellyfin.Plugin.Plus.dll.new"
+cp -a "$PLUGIN_DIR/Jellyfin.Plugin.Plus.deps.json" "$BACKUP/Jellyfin.Plugin.Plus.deps.json.new"
+cp -a "$PATCH_DIR/Jellyfin.Plugin.Plus.Patcher.dll" "$BACKUP/Jellyfin.Plugin.Plus.Patcher.dll.new"
+cp -a "$PATCH_DIR/0Harmony.dll" "$BACKUP/0Harmony.dll.new"
+mv "$BACKUP/Jellyfin.Plugin.Plus.dll.new" "$BACKUP/Jellyfin.Plugin.Plus.dll"
+mv "$BACKUP/Jellyfin.Plugin.Plus.deps.json.new" "$BACKUP/Jellyfin.Plugin.Plus.deps.json"
+mv "$BACKUP/Jellyfin.Plugin.Plus.Patcher.dll.new" "$BACKUP/Jellyfin.Plugin.Plus.Patcher.dll"
+mv "$BACKUP/0Harmony.dll.new" "$BACKUP/0Harmony.dll"
+
+cp -a "$STAGE/Jellyfin.Plugin.Plus.dll" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.dll.new"
+cp -a "$STAGE/Jellyfin.Plugin.Plus.deps.json" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.deps.json.new"
+cp -a "$STAGE/Jellyfin.Plugin.Plus.Patcher.dll" "$PATCH_DIR/Jellyfin.Plugin.Plus.Patcher.dll.new"
+cp -a "$STAGE/0Harmony.dll" "$PATCH_DIR/0Harmony.dll.new"
+mv "$PLUGIN_DIR/Jellyfin.Plugin.Plus.dll.new" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.dll"
+mv "$PLUGIN_DIR/Jellyfin.Plugin.Plus.deps.json.new" "$PLUGIN_DIR/Jellyfin.Plugin.Plus.deps.json"
+mv "$PATCH_DIR/Jellyfin.Plugin.Plus.Patcher.dll.new" "$PATCH_DIR/Jellyfin.Plugin.Plus.Patcher.dll"
+mv "$PATCH_DIR/0Harmony.dll.new" "$PATCH_DIR/0Harmony.dll"
+chown -R jellyfin:jellyfin "$PLUGIN_DIR"
+chmod 644 "$PATCH_DIR"/*.dll
+
+mkdir -p /var/cache/jellyfin/jellyfin-plus-shaders
+chown jellyfin:jellyfin /var/cache/jellyfin/jellyfin-plus-shaders
+
+echo "activating - restarting jellyfin (this cancels any running library scan)"
+systemctl restart jellyfin
+sleep 20
+journalctl -u jellyfin --since "-1 min" --no-pager | grep -i jellyfinplus | tail -5

@@ -1,0 +1,4 @@
+// Re-apply the Jellyfin Plus jellyfin-web hook after any package operation, so a jellyfin-web
+// upgrade does not silently drop the Jellyfin Plus client script (the "Upscaled" quality-menu
+// entries, the library filter additions and the other client-side patches).
+DPkg::Post-Invoke { "if [ -x /usr/local/sbin/jellyfin-plus-webinject ]; then /usr/local/sbin/jellyfin-plus-webinject >/dev/null 2>&1 || true; fi"; };
