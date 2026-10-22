@@ -4,10 +4,10 @@ using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Jellyfin.Plugin.GpuUpscale.Configuration;
+using Jellyfin.Plugin.Plus.Configuration;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.GpuUpscale
+namespace Jellyfin.Plugin.Plus
 {
     /// <summary>
     /// Loads the Harmony patch assembly into the default (non-collectible) assembly load context
@@ -16,12 +16,12 @@ namespace Jellyfin.Plugin.GpuUpscale
     /// Jellyfin loads plugins into a collectible <see cref="AssemblyLoadContext"/>, and Harmony
     /// cannot emit its detour stubs against a collectible assembly ("Resolving to a collectible
     /// assembly is not supported"). The patch code therefore lives outside the plugin directory,
-    /// in <c>/usr/lib/jellyfin-gpuupscale</c>, so Jellyfin's plugin loader never sees it and it is
+    /// in <c>/usr/lib/jellyfin-plus</c>, so Jellyfin's plugin loader never sees it and it is
     /// loaded into the default context instead.
     /// </summary>
     internal static class PatcherLoader
     {
-        public const string PatcherDirectory = "/usr/lib/jellyfin-gpuupscale";
+        public const string PatcherDirectory = "/usr/lib/jellyfin-plus";
 
         private static Type _host;
 
@@ -58,17 +58,17 @@ namespace Jellyfin.Plugin.GpuUpscale
             try
             {
                 string harmony = Path.Combine(PatcherDirectory, "0Harmony.dll");
-                string patcher = Path.Combine(PatcherDirectory, "Jellyfin.Plugin.GpuUpscale.Patcher.dll");
+                string patcher = Path.Combine(PatcherDirectory, "Jellyfin.Plugin.Plus.Patcher.dll");
                 if (!File.Exists(harmony) || !File.Exists(patcher))
                 {
                     Status = "patcher assembly missing from " + PatcherDirectory;
-                    logger?.LogError("GpuUpscale: {Status}", Status);
+                    logger?.LogError("JellyfinPlus: {Status}", Status);
                     return;
                 }
 
                 AssemblyLoadContext.Default.LoadFromAssemblyPath(harmony);
                 Assembly asm = AssemblyLoadContext.Default.LoadFromAssemblyPath(patcher);
-                _host = asm.GetType("Jellyfin.Plugin.GpuUpscale.Patcher.PatcherHost");
+                _host = asm.GetType("Jellyfin.Plugin.Plus.Patcher.PatcherHost");
                 if (_host == null)
                 {
                     Status = "PatcherHost type not found";
@@ -84,7 +84,7 @@ namespace Jellyfin.Plugin.GpuUpscale
                 Status = "patcher load failed: " + (ex.InnerException ?? ex).Message;
                 Active = false;
                 _host = null;
-                logger?.LogError(ex, "GpuUpscale: loading the patch assembly failed; Jellyfin will transcode normally.");
+                logger?.LogError(ex, "JellyfinPlus: loading the patch assembly failed; Jellyfin will transcode normally.");
             }
         }
 
@@ -100,7 +100,7 @@ namespace Jellyfin.Plugin.GpuUpscale
                 // The running patches keep their previous settings, which means the dashboard is
                 // now reporting settings the patcher never received. Say so rather than leaving
                 // that divergence invisible.
-                _logger?.LogWarning(ex, "GpuUpscale: pushing the configuration to the patcher failed; the running patches keep their previous settings.");
+                _logger?.LogWarning(ex, "JellyfinPlus: pushing the configuration to the patcher failed; the running patches keep their previous settings.");
             }
         }
 

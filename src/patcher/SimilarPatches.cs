@@ -15,7 +15,7 @@ using MediaBrowser.Model.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.GpuUpscale.Patcher
+namespace Jellyfin.Plugin.Plus.Patcher
 {
     /// <summary>
     /// "More Like This" for plain Video items (clips).
@@ -123,7 +123,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 Available = false;
                 logger?.LogWarning(
-                    "GpuUpscale: could not resolve SimilarItemsManager member(s) {Missing}; More Like This for "
+                    "JellyfinPlus: could not resolve SimilarItemsManager member(s) {Missing}; More Like This for "
                     + "Video items is unavailable on this Jellyfin build. Stock behaviour is unaffected.",
                     string.Join(", ", missing));
                 return;
@@ -134,7 +134,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 prefix: new HarmonyMethod(typeof(SimilarPatches).GetMethod(nameof(GetSimilarItemsAsyncPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
 
             Available = true;
-            logger?.LogInformation("GpuUpscale: patched SimilarItemsManager.GetSimilarItemsAsync (More Like This for Video items, ranked by shared tags and people)");
+            logger?.LogInformation("JellyfinPlus: patched SimilarItemsManager.GetSimilarItemsAsync (More Like This for Video items, ranked by shared tags and people)");
         }
 
         /// <summary>
@@ -166,7 +166,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning(ex, "GpuUpscale: Video similar-items prefix failed; using the stock result.");
+                _logger?.LogWarning(ex, "JellyfinPlus: Video similar-items prefix failed; using the stock result.");
                 return true;
             }
         }
@@ -233,7 +233,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 ranked = await checkedTask.ConfigureAwait(false);
 
                 _logger?.LogDebug(
-                    "GpuUpscale: More Like This for Video {ItemId}: {Candidates} candidates, {Returned} returned",
+                    "JellyfinPlus: More Like This for Video {ItemId}: {Candidates} candidates, {Returned} returned",
                     item.Id,
                     scores.Count,
                     ranked.Count);
@@ -246,7 +246,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             catch (Exception ex)
             {
                 // The stock answer for a Video is an empty list, so that is the safe failure.
-                _logger?.LogWarning(ex, "GpuUpscale: Video similar-items ranking failed; returning nothing.");
+                _logger?.LogWarning(ex, "JellyfinPlus: Video similar-items ranking failed; returning nothing.");
                 return Array.Empty<BaseItem>();
             }
         }

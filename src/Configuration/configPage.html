@@ -2,15 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <title>GPU Upscale</title>
+    <title>Jellyfin Plus</title>
 </head>
 <body>
-<div id="GpuUpscaleConfigPage" data-role="page" class="page type-interior pluginConfigurationPage">
+<div id="JellyfinPlusConfigPage" data-role="page" class="page type-interior pluginConfigurationPage">
     <div data-role="content">
         <div class="content-primary">
-            <form id="GpuUpscaleConfigForm">
+            <form id="JellyfinPlusConfigForm">
                 <div class="verticalSection">
-                    <h2 class="sectionTitle">GPU Upscale</h2>
+                    <h2 class="sectionTitle">Jellyfin Plus</h2>
                     <p id="patchStatus" class="fieldDescription"></p>
                 </div>
 
@@ -607,7 +607,7 @@
                     <input is="emby-input" type="text" id="ShaderCacheDirectory" label="Shader cache directory" />
                     <div class="fieldDescription">
                         Where composed shaders are cached. Default:
-                        <code>/var/cache/jellyfin/gpu-upscale-shaders</code>. It must be writable by the
+                        <code>/var/cache/jellyfin/jellyfin-plus-shaders</code>. It must be writable by the
                         user the Jellyfin service runs as.
                     </div>
                 </div>
@@ -738,7 +738,7 @@
                 }
                 ApiClient.ajax({
                     type: 'GET',
-                    url: ApiClient.getUrl('GpuUpscale/Session/dashboard'),
+                    url: ApiClient.getUrl('JellyfinPlus/Session/dashboard'),
                     dataType: 'json'
                 }).then(function (s) {
                     render(s && s.Levels ? s.Levels.Upscalers : null);
@@ -794,7 +794,7 @@
             function loadStatus(page) {
                 ApiClient.ajax({
                     type: 'GET',
-                    url: ApiClient.getUrl('GpuUpscale/Status'),
+                    url: ApiClient.getUrl('JellyfinPlus/Status'),
                     dataType: 'json'
                 }).then(function (s) {
                     page.querySelector('#patchStatus').textContent =
@@ -819,7 +819,7 @@
                 });
             }
 
-            document.querySelector('#GpuUpscaleConfigPage').addEventListener('pageshow', function () {
+            document.querySelector('#JellyfinPlusConfigPage').addEventListener('pageshow', function () {
                 var page = this;
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
@@ -869,7 +869,7 @@
                     page.querySelector('#ShaderDirectory').value =
                         config.ShaderDirectory || '/usr/share/jellyfin-shaders';
                     page.querySelector('#ShaderCacheDirectory').value =
-                        config.ShaderCacheDirectory || '/var/cache/jellyfin/gpu-upscale-shaders';
+                        config.ShaderCacheDirectory || '/var/cache/jellyfin/jellyfin-plus-shaders';
                     page.querySelector('#NeuralModelDirectory').value =
                         config.NeuralModelDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/models';
                     page.querySelector('#DlssRuntimeDirectory').value =
@@ -897,9 +897,9 @@
                 loadStatus(page);
             });
 
-            document.querySelector('#GpuUpscaleConfigForm').addEventListener('submit', function (e) {
+            document.querySelector('#JellyfinPlusConfigForm').addEventListener('submit', function (e) {
                 e.preventDefault();
-                var page = document.querySelector('#GpuUpscaleConfigPage');
+                var page = document.querySelector('#JellyfinPlusConfigPage');
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
                     config.Enabled = page.querySelector('#Enabled').checked;

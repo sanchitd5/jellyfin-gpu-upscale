@@ -1,6 +1,6 @@
 using MediaBrowser.Model.Plugins;
 
-namespace Jellyfin.Plugin.GpuUpscale.Configuration
+namespace Jellyfin.Plugin.Plus.Configuration
 {
     /// <summary>
     /// Server-side defaults for the GPU enhancement chain.
@@ -178,7 +178,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Configuration
         public string ShaderDirectory { get; set; } = "/usr/share/jellyfin-shaders";
 
         /// <summary>Where composed (super-resolution + unblur) shader files are cached.</summary>
-        public string ShaderCacheDirectory { get; set; } = "/var/cache/jellyfin/gpu-upscale-shaders";
+        public string ShaderCacheDirectory { get; set; } = "/var/cache/jellyfin/jellyfin-plus-shaders";
 
         /// <summary>
         /// Where the Real-ESRGAN ONNX weights live. They are not shipped with this plugin; a

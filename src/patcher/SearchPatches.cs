@@ -14,7 +14,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.GpuUpscale.Patcher
+namespace Jellyfin.Plugin.Plus.Patcher
 {
     /// <summary>
     /// Makes library search match item tags as well as names, and lets a search EXCLUDE items by
@@ -149,7 +149,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 Available = false;
                 logger?.LogWarning(
-                    "GpuUpscale: could not resolve SqlSearchProvider member(s) {Missing}; tag search is "
+                    "JellyfinPlus: could not resolve SqlSearchProvider member(s) {Missing}; tag search is "
                     + "unavailable on this Jellyfin build. Stock name search is unaffected.",
                     string.Join(", ", missing));
                 return;
@@ -160,7 +160,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 postfix: new HarmonyMethod(typeof(SearchPatches).GetMethod(nameof(SearchAsyncPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
 
             Available = true;
-            logger?.LogInformation("GpuUpscale: patched SqlSearchProvider.SearchAsync (search also matches tags; excludeTags honoured)");
+            logger?.LogInformation("JellyfinPlus: patched SqlSearchProvider.SearchAsync (search also matches tags; excludeTags honoured)");
         }
 
         /// <summary>
@@ -186,7 +186,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning(ex, "GpuUpscale: could not read {Param}; searching without exclusions.", ExcludeParam);
+                _logger?.LogWarning(ex, "JellyfinPlus: could not read {Param}; searching without exclusions.", ExcludeParam);
                 excludes = Array.Empty<string>();
             }
 
@@ -389,7 +389,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogWarning(ex, "GpuUpscale: tag search failed; returning name matches only, without exclusions.");
+                _logger?.LogWarning(ex, "JellyfinPlus: tag search failed; returning name matches only, without exclusions.");
                 return nameResults;
             }
         }
