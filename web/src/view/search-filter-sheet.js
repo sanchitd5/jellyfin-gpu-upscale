@@ -748,7 +748,7 @@ function openSheet(opener) {
         return b;
     });
     resSec.appendChild(resBox);
-    resSec.appendChild(el('div', 'jfp-hint', 'SD is under 1260 px wide, HD 1260 to 3799, 4K 3800 and up. Pick any of them.'));
+    resSec.appendChild(el('div', 'jfp-hint', 'SD is under 1200 px wide, HD 1200 and up, 4K 3800 wide or 2100 tall and up. Pick any of them.'));
     refreshers.push(function () {
         RESOLUTIONS.forEach(function (r, i) { setPressed(resBtns[i], draft.res.indexOf(r.value) !== -1); });
     });

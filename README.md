@@ -579,9 +579,9 @@ Dashboard → Plugins → Jellyfin Plus. Defaults suit a single busy GPU:
 | `Deband` | true | with `grain=0` |
 | `MinScaleFactor` | 1.15 | skip near-identity upscales entirely |
 | `MaxSourceHeight` | 1440 | never upscale sources taller than this |
-| `MaxConcurrent` | 2 | beyond this, stock transcoding is used |
+| `MaxConcurrent` | 4 | beyond this, stock transcoding is used |
 | `Encoder` | `hevc_nvenc` | falls back to the client's codec when unsupported; `av1_nvenc` requires compute 8.9+ (Ada Lovelace), guarded automatically |
-| `RequireClientOptIn` | true | off = enhance every eligible transcode |
+| `RequireClientOptIn` | false | off (default) = enhance every eligible transcode |
 | `ForceTranscode` | false | turn a would-be stream copy into a real transcode |
 | `ForceTranscodeForDirectPlay` | false | see below — stops clients direct playing eligible material |
 
@@ -612,11 +612,11 @@ them. Installing a subset would emit ffmpeg command lines that fail outright, wh
 leaving playback unenhanced. So they stay all-or-nothing: if any core method cannot be resolved,
 none are patched, Jellyfin is left alone, and the log **names the missing methods**.
 
-Optional patches (currently just the direct-play override) install separately, after the core set is
+Optional patches (A/B live-apply swap, tag search, search sort, library tag filters, filter key cache, video similar items, direct-play override - see ENHANCEMENTS.md) install separately, after the core set is
 live, each in its own try/catch. One failing degrades that feature alone:
 
 ```
-active (5 EncodingHelper methods patched); optional: direct-play override
+active (5 EncodingHelper methods patched); optional: A/B live-apply swap (cap 2), tag search, search sort, library tag exclude / match-all, filter key cache, video similar items, direct-play override
 active (5 EncodingHelper methods patched); optional UNAVAILABLE: MediaInfoHelper.SetDeviceSpecificData
 ```
 
