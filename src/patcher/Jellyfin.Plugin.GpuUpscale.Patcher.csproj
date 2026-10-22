@@ -39,6 +39,25 @@
       <HintPath>$(JellyfinBin)/MediaBrowser.MediaEncoding.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Tag search (SearchPatches.cs): the EF entities/DbContext the tag query is built from, the
+         term normalisation (GetCleanValue/RemoveDiacritics), and EF Core itself. All taken from
+         the server's own bin so the types are the ones Jellyfin loaded, never a NuGet copy. -->
+    <Reference Include="Jellyfin.Database.Implementations">
+      <HintPath>$(JellyfinBin)/Jellyfin.Database.Implementations.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Jellyfin.Extensions">
+      <HintPath>$(JellyfinBin)/Jellyfin.Extensions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.EntityFrameworkCore">
+      <HintPath>$(JellyfinBin)/Microsoft.EntityFrameworkCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.EntityFrameworkCore.Abstractions">
+      <HintPath>$(JellyfinBin)/Microsoft.EntityFrameworkCore.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>

@@ -2,6 +2,7 @@ import { state } from '../model/state.js';
 import { log } from '../lib/log.js';
 import { wrapActionSheet } from './action-sheet.js';
 import { notePlaybackManager } from './live-apply.js';
+import { noteQueryClient } from './search-exclude.js';
 
 function wrapChunkModules(chunk) {
     try {
@@ -30,6 +31,7 @@ function wrapChunkModules(chunk) {
                         wrapActionSheet(exports.default);
                         wrapActionSheet(exports);
                         notePlaybackManager(exports);
+                        noteQueryClient(exports);
                     }
                 } catch (err) {
                     log('module wrap failed', err);

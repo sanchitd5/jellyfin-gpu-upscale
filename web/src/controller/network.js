@@ -2,6 +2,7 @@ import { state } from '../model/state.js';
 import { GAME_OPTION_KEYS } from '../model/controls-data.js';
 import { effective, anyEnhancement } from '../model/effective.js';
 import { resetUpscaleForNewSource } from './playback-hooks.js';
+import { markSearchUrl } from './search-exclude.js';
 import { log } from '../lib/log.js';
 
 /*
@@ -369,6 +370,20 @@ export function hookFetch() {
 
         var args = arguments;
 
+        // The search page's exclude-tags box (search-exclude.js): only a string url is rewritten;
+        // the search page sends its requests through axios, i.e. XHR, below.
+        if (typeof input === 'string') {
+            try {
+                var searchUrl = markSearchUrl(url);
+                if (searchUrl !== url) {
+                    args = [searchUrl, init];
+                    url = searchUrl;
+                }
+            } catch (err) {
+                log('could not mark the search request', err);
+            }
+        }
+
         // Any HLS request for this session, not only the one this script handed over.
         if (url && IS_HLS_MEDIA.test(url) && !IS_PLAYBACK_INFO.test(url)) {
             log('hookFetch: matched HLS media url ' + url);
@@ -486,6 +501,17 @@ export function hookXhr() {
     proto.open = function (method, url) {
         try {
             this.__gpuUpscaleUrl = url;
+
+            // The search page's exclude-tags box (search-exclude.js). Search requests are never
+            // HLS or PlaybackInfo, so this returns before either of the branches below.
+            var searchUrl = markSearchUrl(url);
+            if (searchUrl !== url) {
+                this.__gpuUpscaleUrl = searchUrl;
+                var searchArgs = Array.prototype.slice.call(arguments);
+                searchArgs[1] = searchUrl;
+                return originalOpen.apply(this, searchArgs);
+            }
+
             // Case-insensitive: the endpoint is spelled PlaybackInfo today, and a match that
             // depends on that spelling fails silently and completely, which is the worst shape
             // a failure can take here.

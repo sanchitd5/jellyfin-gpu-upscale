@@ -184,6 +184,26 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 logger?.LogWarning(ex, "GpuUpscale: the A/B live-apply swap patches could not be installed. Live-apply still works, via today's tear-down-and-restart.");
             }
 
+            // Tag search: SqlSearchProvider.SearchAsync also matches item tags. Own try/catch, and
+            // ahead of the MediaInfoHelper block for the same early-return reason as the swap.
+            try
+            {
+                SearchPatches.Apply(harmony, logger);
+                if (SearchPatches.Available)
+                {
+                    applied.Add("tag search");
+                }
+                else
+                {
+                    failed.Add("tag search (name search unaffected)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("tag search (name search unaffected)");
+                logger?.LogWarning(ex, "GpuUpscale: the tag search patch could not be installed. Stock name search is unaffected.");
+            }
+
             // MediaInfoHelper lives in Jellyfin.Api, a different assembly from the core targets, and
             // is resolved BY NAME so that the patcher does not need a compile-time reference to a
             // web-API assembly it would then be version-pinned to.

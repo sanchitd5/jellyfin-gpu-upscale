@@ -6,6 +6,7 @@ import { hookFetch, hookXhr } from './controller/network.js';
 import { watchPlaybackInfoDialog } from './controller/playback-hooks.js';
 import { probeServer } from './controller/probe.js';
 import { tryRequireShim } from './controller/live-apply.js';
+import { watchSearchPage } from './controller/search-exclude.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -20,6 +21,7 @@ import { tryRequireShim } from './controller/live-apply.js';
         hookXhr();
         tryRequireShim();
         watchPlaybackInfoDialog();
+        watchSearchPage();
         probeServer();
         state.installed = true;
         log('bootstrap install: end, installed on', state.globals.join(', '));

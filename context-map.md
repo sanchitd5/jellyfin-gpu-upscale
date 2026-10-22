@@ -40,12 +40,13 @@ esbuild) support natively.
 | module | exports | imports |
 |---|---|---|
 | `controller/probe.js` | `probeServer()`, `axisControls()`, `controlNote()` | `model/state.js`, `model/controls-data.js` (`CONTROLS`), `model/costing.js` (`eligibleTargets`, `srWouldRun`), `model/effective.js` (`shownPrefs`), `lib/log.js`, `lib/utils.js` (`isOff`) |
-| `controller/network.js` | `wireParams()`, `paramSig()`, `addParams()`, `markHlsUrl()`, `hookFetch()`, `hookXhr()` | `model/state.js`, `model/controls-data.js` (`GAME_OPTION_KEYS`), `model/effective.js` (`effective`, `anyEnhancement`) `<->`, `playback-hooks.js` (`resetUpscaleForNewSource`) `<->`, `lib/log.js` |
+| `controller/network.js` | `wireParams()`, `paramSig()`, `addParams()`, `markHlsUrl()`, `hookFetch()`, `hookXhr()` | `model/state.js`, `model/controls-data.js` (`GAME_OPTION_KEYS`), `model/effective.js` (`effective`, `anyEnhancement`) `<->`, `playback-hooks.js` (`resetUpscaleForNewSource`) `<->`, `search-exclude.js` (`markSearchUrl`), `lib/log.js` |
+| `controller/search-exclude.js` | `excludeText()`, `markSearchUrl()`, `noteQueryClient()`, `watchSearchPage()` | `lib/log.js`, `lib/dom.js` (`el`) |
 | `controller/live-apply.js` | `repaintPanel()`, `isPlaybackManager()`, `notePlaybackManager()`, `player()`, `playerPresent()`, `watchApplied()`, `replayHere()`, `directPlaying()`, `requestRestream()`, `activeState()`, `APPLY_LABEL`, `APPLY_FAILED_TEXT` | `model/state.js`, `lib/utils.js` (`isOff`), `lib/log.js`, `view/panel-dom.js` (`renderPanel`, `panelEl`) `<->`, `live-block.js` (`LIVE_ROWS`) `<->` |
 | `controller/live-block.js` | `LIVE_ROWS`, `staleNote()`, `liveLines()`, `fetchServerState()` | `model/state.js`, `lib/utils.js` (`isOff`), `network.js` (`wireParams`, `paramSig`), `live-apply.js` (`activeState`) `<->` |
 | `controller/action-sheet.js` | `isPlayerSettingsSheet()`, `wrapActionSheet()` | `model/state.js`, `model/effective.js` (`summaryText`), `playback-hooks.js` (`openEnhancePanel`) `<->`, `lib/log.js` |
 | `controller/playback-hooks.js` | `hookPlaybackEvents()`, `resetUpscaleForNewSource()`, `openEnhancePanel()`, `watchPlaybackInfoDialog()` | `model/state.js`, `model/controls-data.js` (`DEFAULT_PREFS`), `model/prefs-store.js` (`savePrefs`), `lib/log.js`, `lib/dom.js` (`el`), `live-apply.js` (`player`), `probe.js` (`probeServer`), `live-block.js` (`fetchServerState`), `view/panel-dom.js` (`closePanel`, `ensureStyle`, `renderPanel`, `panelEl`, `applyPanelPos`, `liveRows`, `FOCUSABLE`, `PANEL_ID`) |
-| `controller/webpack-hook.js` | `hookWebpack()` | `model/state.js`, `lib/log.js`, `action-sheet.js` (`wrapActionSheet`), `live-apply.js` (`notePlaybackManager`) |
+| `controller/webpack-hook.js` | `hookWebpack()` | `model/state.js`, `lib/log.js`, `action-sheet.js` (`wrapActionSheet`), `live-apply.js` (`notePlaybackManager`), `search-exclude.js` (`noteQueryClient`) |
 
 ## view/ - DOM rendering
 
@@ -57,7 +58,7 @@ esbuild) support natively.
 
 | module | exports | imports |
 |---|---|---|
-| `bootstrap.js` | none (runs the install try/catch as a side effect) | `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`) |
+| `bootstrap.js` | none (runs the install try/catch as a side effect) | `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`), `controller/search-exclude.js` (`watchSearchPage`) |
 | `banner.txt` | n/a - not a module, injected as the bundle's leading comment via esbuild's `--banner:js` | none |
 
 ## Build
