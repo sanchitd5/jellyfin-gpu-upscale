@@ -1,4 +1,4 @@
-namespace Jellyfin.Plugin.GpuUpscale.Patcher
+namespace Jellyfin.Plugin.Plus.Patcher
 {
     /// <summary>
     /// The plugin's settings as the patcher sees them. The plugin lives in Jellyfin's collectible
@@ -229,7 +229,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
         public string ShaderDirectory { get; set; } = "/usr/share/jellyfin-shaders";
 
         /// <summary>Where composed shader files (super-resolution + sharpening) are cached.</summary>
-        public string ShaderCacheDirectory { get; set; } = "/var/cache/jellyfin/gpu-upscale-shaders";
+        public string ShaderCacheDirectory { get; set; } = "/var/cache/jellyfin/jellyfin-plus-shaders";
 
         /// <summary>
         /// Where the Real-ESRGAN ONNX weights live. They belong to the patched binary, not to the

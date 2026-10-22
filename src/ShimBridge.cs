@@ -2,10 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
-using Jellyfin.Plugin.GpuUpscale.Configuration;
+using Jellyfin.Plugin.Plus.Configuration;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.GpuUpscale
+namespace Jellyfin.Plugin.Plus
 {
     /// <summary>
     /// Keeps the pre-existing ffmpeg shim (/usr/local/bin/jellyfin-ffmpeg-upscale) in step with the
@@ -114,7 +114,7 @@ namespace Jellyfin.Plugin.GpuUpscale
             catch (Exception ex)
             {
                 LastResult = "sync failed: " + ex.Message;
-                logger?.LogWarning(ex, "GpuUpscale: could not sync the ffmpeg shim config at {Path}", ConfigPath);
+                logger?.LogWarning(ex, "JellyfinPlus: could not sync the ffmpeg shim config at {Path}", ConfigPath);
             }
         }
     }

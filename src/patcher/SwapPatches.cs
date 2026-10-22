@@ -6,7 +6,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.MediaEncoding.Transcoding;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.GpuUpscale.Patcher
+namespace Jellyfin.Plugin.Plus.Patcher
 {
     /// <summary>
     /// The A/B live-apply swap, built for real per .agent-briefs/ab-swap-implement.md.
@@ -56,7 +56,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 Available = false;
                 logger?.LogWarning(
-                    "GpuUpscale: could not resolve TranscodeManager.{Missing}; the A/B live-apply "
+                    "JellyfinPlus: could not resolve TranscodeManager.{Missing}; the A/B live-apply "
                     + "swap is unavailable on this Jellyfin build. Live-apply still works, via "
                     + "today's tear-down-and-restart.",
                     killMethod == null && startMethod == null
@@ -73,7 +73,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 postfix: new HarmonyMethod(typeof(SwapPatches).GetMethod(nameof(StartFfMpegPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
 
             Available = true;
-            logger?.LogInformation("GpuUpscale: patched TranscodeManager.KillTranscodingJobs/StartFfMpeg for the A/B live-apply swap");
+            logger?.LogInformation("JellyfinPlus: patched TranscodeManager.KillTranscodingJobs/StartFfMpeg for the A/B live-apply swap");
         }
 
         /// <summary>
@@ -95,7 +95,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 if (__instance is TranscodeManager manager
                     && UpscaleEngine.TryDeferKill(manager, playSessionId, deviceId, deleteFiles))
                 {
-                    _logger?.LogInformation("GpuUpscale: deferring teardown of {PlaySessionId} for a live A/B swap", playSessionId);
+                    _logger?.LogInformation("JellyfinPlus: deferring teardown of {PlaySessionId} for a live A/B swap", playSessionId);
                     __result = Task.CompletedTask;
                     return false;
                 }
@@ -104,7 +104,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: swap-kill prefix failed; falling back to the normal kill");
+                _logger?.LogError(ex, "JellyfinPlus: swap-kill prefix failed; falling back to the normal kill");
                 return true;
             }
         }
@@ -129,7 +129,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: swap cutover failed after the new ffmpeg process was ready");
+                _logger?.LogError(ex, "JellyfinPlus: swap cutover failed after the new ffmpeg process was ready");
             }
 
             return job;

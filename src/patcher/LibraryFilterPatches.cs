@@ -10,7 +10,7 @@ using MediaBrowser.Controller.Entities;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.GpuUpscale.Patcher
+namespace Jellyfin.Plugin.Plus.Patcher
 {
     /// <summary>
     /// Two extra tag filters for /Items library listings, driven by request parameters the stock
@@ -76,7 +76,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 Available = false;
                 logger?.LogWarning(
-                    "GpuUpscale: could not resolve BaseItemRepository.TranslateQuery(IQueryable<BaseItemEntity>, "
+                    "JellyfinPlus: could not resolve BaseItemRepository.TranslateQuery(IQueryable<BaseItemEntity>, "
                     + "JellyfinDbContext, InternalItemsQuery); the library tag exclude / match-all filters are "
                     + "unavailable on this Jellyfin build. Stock library listing is unaffected.");
                 return;
@@ -88,7 +88,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 postfix: new HarmonyMethod(typeof(LibraryFilterPatches).GetMethod(nameof(TranslateQueryPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
 
             Available = true;
-            logger?.LogInformation("GpuUpscale: patched BaseItemRepository.TranslateQuery (/Items honours {Exclude} and {Match}=all)", ExcludeParam, MatchParam);
+            logger?.LogInformation("JellyfinPlus: patched BaseItemRepository.TranslateQuery (/Items honours {Exclude} and {Match}=all)", ExcludeParam, MatchParam);
         }
 
         // The exact shape, so a future overload or a changed signature fails soft instead of
@@ -222,7 +222,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
 
             _warned = true;
-            _logger?.LogWarning(ex, "GpuUpscale: library tag filter ({Exclude} / {Match}) failed; the listing is returned as stock built it.", ExcludeParam, MatchParam);
+            _logger?.LogWarning(ex, "JellyfinPlus: library tag filter ({Exclude} / {Match}) failed; the listing is returned as stock built it.", ExcludeParam, MatchParam);
         }
     }
 }

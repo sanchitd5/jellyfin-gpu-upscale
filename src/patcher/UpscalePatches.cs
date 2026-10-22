@@ -11,7 +11,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Plugin.GpuUpscale.Patcher
+namespace Jellyfin.Plugin.Plus.Patcher
 {
     /// <summary>
     /// Runtime patches over MediaBrowser.Controller.MediaEncoding.EncodingHelper.
@@ -22,7 +22,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
     /// </summary>
     internal static class UpscalePatches
     {
-        private const string HarmonyId = "jellyfin.plugin.gpuupscale";
+        private const string HarmonyId = "jellyfin.plugin.jellyfinplus";
 
         private static ILogger _logger;
         private static Harmony _harmony;
@@ -92,7 +92,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     Status = "failed: EncodingHelper method(s) not found on this Jellyfin build: "
                         + string.Join(", ", missing);
                     logger?.LogError(
-                        "GpuUpscale: could not resolve EncodingHelper method(s) {Missing}; not patching. "
+                        "JellyfinPlus: could not resolve EncodingHelper method(s) {Missing}; not patching. "
                         + "The core patches are interdependent, so a partial install would break transcoding.",
                         string.Join(", ", missing));
                     return;
@@ -107,7 +107,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 foreach (var (name, target, postfix) in core)
                 {
                     harmony.Patch(target, postfix: new HarmonyMethod(typeof(UpscalePatches).GetMethod(postfix, BindingFlags.Static | BindingFlags.NonPublic)));
-                    logger?.LogInformation("GpuUpscale: patched {Method}", name);
+                    logger?.LogInformation("JellyfinPlus: patched {Method}", name);
                 }
 
                 _active = true;
@@ -131,13 +131,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     Status += "; optional UNAVAILABLE: " + string.Join(", ", optionalFailed);
                 }
 
-                logger?.LogInformation("GpuUpscale: Harmony patches installed, plugin owns the transcode filter chain. {Status}", Status);
+                logger?.LogInformation("JellyfinPlus: Harmony patches installed, plugin owns the transcode filter chain. {Status}", Status);
             }
             catch (Exception ex)
             {
                 Status = "failed: " + ex.Message;
                 _active = false;
-                logger?.LogError(ex, "GpuUpscale: Harmony patching failed; Jellyfin will transcode normally.");
+                logger?.LogError(ex, "JellyfinPlus: Harmony patching failed; Jellyfin will transcode normally.");
                 try
                 {
                     _harmony?.UnpatchAll(HarmonyId);
@@ -181,7 +181,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             catch (Exception ex)
             {
                 failed.Add("A/B live-apply swap (falls back to tear-down-and-restart)");
-                logger?.LogWarning(ex, "GpuUpscale: the A/B live-apply swap patches could not be installed. Live-apply still works, via today's tear-down-and-restart.");
+                logger?.LogWarning(ex, "JellyfinPlus: the A/B live-apply swap patches could not be installed. Live-apply still works, via today's tear-down-and-restart.");
             }
 
             // Tag search: SqlSearchProvider.SearchAsync also matches item tags. Own try/catch, and
@@ -201,7 +201,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             catch (Exception ex)
             {
                 failed.Add("tag search (name search unaffected)");
-                logger?.LogWarning(ex, "GpuUpscale: the tag search patch could not be installed. Stock name search is unaffected.");
+                logger?.LogWarning(ex, "JellyfinPlus: the tag search patch could not be installed. Stock name search is unaffected.");
             }
 
             // Library tag filters: BaseItemRepository.TranslateQuery honours excludeTagNames /
@@ -221,7 +221,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             catch (Exception ex)
             {
                 failed.Add("library tag exclude / match-all (stock listing unaffected)");
-                logger?.LogWarning(ex, "GpuUpscale: the library tag filter patch could not be installed. Stock library listing is unaffected.");
+                logger?.LogWarning(ex, "JellyfinPlus: the library tag filter patch could not be installed. Stock library listing is unaffected.");
             }
 
             // More Like This for Video items (no stock provider covers Video). Own try/catch.
@@ -240,7 +240,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             catch (Exception ex)
             {
                 failed.Add("video similar items (stock behaviour unaffected)");
-                logger?.LogWarning(ex, "GpuUpscale: the Video similar-items patch could not be installed. Stock behaviour is unaffected.");
+                logger?.LogWarning(ex, "JellyfinPlus: the Video similar-items patch could not be installed. Stock behaviour is unaffected.");
             }
 
             // MediaInfoHelper lives in Jellyfin.Api, a different assembly from the core targets, and
@@ -254,7 +254,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 {
                     failed.Add("MediaInfoHelper.SetDeviceSpecificData (direct-play override)");
                     logger?.LogWarning(
-                        "GpuUpscale: could not resolve Jellyfin.Api.Helpers.MediaInfoHelper.SetDeviceSpecificData. "
+                        "JellyfinPlus: could not resolve Jellyfin.Api.Helpers.MediaInfoHelper.SetDeviceSpecificData. "
                         + "ForceTranscodeForDirectPlay will do nothing; everything else is unaffected.");
                     return;
                 }
@@ -264,14 +264,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
                 DirectPlayOverrideAvailable = true;
                 applied.Add("direct-play override");
-                logger?.LogInformation("GpuUpscale: patched MediaInfoHelper.SetDeviceSpecificData (direct-play override available)");
+                logger?.LogInformation("JellyfinPlus: patched MediaInfoHelper.SetDeviceSpecificData (direct-play override available)");
             }
             catch (Exception ex)
             {
                 failed.Add("MediaInfoHelper.SetDeviceSpecificData (direct-play override)");
                 logger?.LogWarning(
                     ex,
-                    "GpuUpscale: the optional direct-play override could not be installed. "
+                    "JellyfinPlus: the optional direct-play override could not be installed. "
                     + "Upscaling itself is unaffected.");
             }
         }
@@ -332,7 +332,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     enableDirectPlay = false;
                     enableDirectStream = false;
                     _logger?.LogInformation(
-                        "GpuUpscale: direct play disabled for {Width}x{Height} source so it can be enhanced",
+                        "JellyfinPlus: direct play disabled for {Width}x{Height} source so it can be enhanced",
                         stream.Width,
                         stream.Height);
                     return;
@@ -340,7 +340,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: direct-play override failed; leaving Jellyfin's decision alone");
+                _logger?.LogError(ex, "JellyfinPlus: direct-play override failed; leaving Jellyfin's decision alone");
             }
         }
 
@@ -452,7 +452,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: decision failed");
+                _logger?.LogError(ex, "JellyfinPlus: decision failed");
                 verdict.Act = false;
                 return verdict;
             }
@@ -551,7 +551,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 {
                     if (verdict.Status == "concurrency-cap")
                     {
-                        _logger?.LogInformation("GpuUpscale: concurrency cap reached, leaving stock chain for {Path}", state.MediaPath);
+                        _logger?.LogInformation("JellyfinPlus: concurrency cap reached, leaving stock chain for {Path}", state.MediaPath);
                     }
 
                     if (verdict.Status != "ineligible")
@@ -580,11 +580,11 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 __result = " -vf \"" + (kept.Count > 0 ? string.Join(",", kept) + "," + chain : chain) + "\"";
 
                 var record = RecordFor(state, verdict, plan, "applied", "filter chain injected");
-                _logger?.LogInformation("GpuUpscale: {Summary} for {Path}", record.Summary, state.MediaPath);
+                _logger?.LogInformation("JellyfinPlus: {Summary} for {Path}", record.Summary, state.MediaPath);
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: filter injection failed, keeping Jellyfin's chain");
+                _logger?.LogError(ex, "JellyfinPlus: filter injection failed, keeping Jellyfin's chain");
             }
         }
 
@@ -617,7 +617,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: hwaccel arg injection failed");
+                _logger?.LogError(ex, "JellyfinPlus: hwaccel arg injection failed");
             }
         }
 
@@ -637,7 +637,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: hwaccel type suppression failed");
+                _logger?.LogError(ex, "JellyfinPlus: hwaccel type suppression failed");
             }
         }
 
@@ -656,7 +656,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: decoder suppression failed");
+                _logger?.LogError(ex, "JellyfinPlus: decoder suppression failed");
             }
         }
 
@@ -726,7 +726,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 string encoder = UpscaleEngine.EncoderFor(state, out string encoderReason);
                 UpscaleEngine.NoteEncoder(UpscaleEngine.SessionKey(state), encoder, encoderReason);
                 _logger?.LogInformation(
-                    "GpuUpscale: replacing stream copy with {Encoder} for {Path} ({Reason})",
+                    "JellyfinPlus: replacing stream copy with {Encoder} for {Path} ({Reason})",
                     encoder,
                     state.MediaPath,
                     encoderReason);
@@ -734,7 +734,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             }
             catch (Exception ex)
             {
-                _logger?.LogError(ex, "GpuUpscale: encoder substitution failed");
+                _logger?.LogError(ex, "JellyfinPlus: encoder substitution failed");
             }
         }
 
@@ -751,7 +751,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 UpscaleEngine.NoteEncoder(UpscaleEngine.SessionKey(state), swapped, av1Reason);
                 _logger?.LogInformation(
-                    "GpuUpscale: encoder {Was} -> {Now} for {Path} ({Reason})",
+                    "JellyfinPlus: encoder {Was} -> {Now} for {Path} ({Reason})",
                     __result,
                     swapped,
                     state.MediaPath,
@@ -784,7 +784,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
             {
                 UpscaleEngine.NoteEncoder(sessionKey, __result, reason + "; kept Jellyfin's " + __result);
                 _logger?.LogInformation(
-                    "GpuUpscale: keeping Jellyfin's encoder {Encoder} for {Path} ({Reason})",
+                    "JellyfinPlus: keeping Jellyfin's encoder {Encoder} for {Path} ({Reason})",
                     __result,
                     state.MediaPath,
                     reason);
@@ -793,7 +793,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
             UpscaleEngine.NoteEncoder(sessionKey, chosen, reason + " (replacing Jellyfin's " + __result + ")");
             _logger?.LogInformation(
-                "GpuUpscale: encoder {Was} -> {Now} for {Path} ({Reason})",
+                "JellyfinPlus: encoder {Was} -> {Now} for {Path} ({Reason})",
                 __result,
                 chosen,
                 state.MediaPath,

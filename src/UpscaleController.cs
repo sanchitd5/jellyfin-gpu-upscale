@@ -4,12 +4,12 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
-namespace Jellyfin.Plugin.GpuUpscale
+namespace Jellyfin.Plugin.Plus
 {
     /// <summary>Status and recent-activity endpoint backing the dashboard page.</summary>
     [ApiController]
     [Authorize]
-    [Route("GpuUpscale")]
+    [Route("JellyfinPlus")]
     public class UpscaleController : ControllerBase
     {
         /// <summary>Gets the patch status and the recent sessions.</summary>
