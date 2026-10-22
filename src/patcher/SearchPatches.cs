@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,8 +22,9 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
     ///
     /// - include: an item whose tag CONTAINS the search term (tag.includes(term)) is returned
     ///   alongside the stock name matches;
-    /// - exclude: an item with any tag containing any of the request's excludeTags terms is dropped
-    ///   from the results, name matches and tag matches alike.
+    /// - exclude: the request's excludeTags terms. A tag match counts only through a tag that
+    ///   contains the search term and none of the exclude terms (TagMatch); a name match is dropped
+    ///   if any of its tags contains an exclude term (WithoutAnyExcludedTag).
     ///
     /// Both are case- and diacritic-insensitive: terms go through the same GetCleanValue() that
     /// Jellyfin stores in ItemValues.CleanValue (lowercase, diacritics stripped, punctuation to
@@ -215,8 +217,51 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 .ToArray();
         }
 
-        /// <summary>Drops every item with a tag containing any of the terms.</summary>
-        private static IQueryable<BaseItemEntity> WithoutExcludedTags(IQueryable<BaseItemEntity> query, string[] excludes)
+        /// <summary>Holds a value so EF Core sends it as a SQL parameter rather than an inlined literal.</summary>
+        private sealed class Param
+        {
+            public Param(string value) => Value = value;
+
+            public string Value { get; }
+        }
+
+        private static readonly MethodInfo _stringContains = typeof(string).GetMethod(nameof(string.Contains), new[] { typeof(string) });
+
+        /// <summary>
+        /// The per-TAG test for a tag match: the tag contains the search term and none of the
+        /// exclude terms. Exclusion therefore applies to the tag that matched, not the whole item:
+        /// searching "cat" with "red" excluded drops a match on the tag "red cat" but keeps one on
+        /// "black cat", even when that same item also carries some other tag containing "red".
+        /// Built as one expression so it stays a single EXISTS in SQL, with one NOT LIKE per term.
+        /// </summary>
+        private static Expression<Func<ItemValueMap, bool>> TagMatch(string search, string[] excludes)
+        {
+            var v = Expression.Parameter(typeof(ItemValueMap), "v");
+            var itemValue = Expression.Property(v, nameof(ItemValueMap.ItemValue));
+            var cleanValue = Expression.Property(itemValue, nameof(ItemValue.CleanValue));
+
+            Expression ContainsParam(string s) => Expression.Call(
+                cleanValue,
+                _stringContains,
+                Expression.Property(Expression.Constant(new Param(s)), nameof(Param.Value)));
+
+            Expression body = Expression.AndAlso(
+                Expression.Equal(Expression.Property(itemValue, nameof(ItemValue.Type)), Expression.Constant(ItemValueType.Tags)),
+                ContainsParam(search));
+            foreach (var term in excludes)
+            {
+                body = Expression.AndAlso(body, Expression.Not(ContainsParam(term)));
+            }
+
+            return Expression.Lambda<Func<ItemValueMap, bool>>(body, v);
+        }
+
+        /// <summary>
+        /// For NAME matches, which have no matching tag to judge: drops an item with any tag
+        /// containing any of the exclude terms. (If the item also has a tag passing TagMatch it is
+        /// still returned, via the tag query.)
+        /// </summary>
+        private static IQueryable<BaseItemEntity> WithoutAnyExcludedTag(IQueryable<BaseItemEntity> query, string[] excludes)
         {
             foreach (var term in excludes)
             {
@@ -261,13 +306,12 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 var dbContext = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
                 await using (dbContext.ConfigureAwait(false))
                 {
+                    var tagMatch = TagMatch(clean, excludes);
                     IQueryable<BaseItemEntity> dbQuery = dbContext.BaseItems
                         .AsNoTracking()
                         .Where(e => e.Id != _placeholderId)
                         .Where(e => !e.IsVirtualItem)
-                        .Where(e => e.ItemValues.Any(v => v.ItemValue.Type == ItemValueType.Tags
-                            && v.ItemValue.CleanValue.Contains(clean)));
-                    dbQuery = WithoutExcludedTags(dbQuery, excludes);
+                        .Where(e => e.ItemValues!.AsQueryable().Any(tagMatch));
 
                     dbQuery = (IQueryable<BaseItemEntity>)_applyTypeFilter.Invoke(provider, new object[] { dbQuery, query.IncludeItemTypes, query.ExcludeItemTypes });
                     dbQuery = (IQueryable<BaseItemEntity>)_applyMediaTypeFilter.Invoke(null, new object[] { dbQuery, query.MediaTypes });
@@ -282,12 +326,13 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                         .ToArrayAsync(cancellationToken)
                         .ConfigureAwait(false);
 
-                    // The stock name matches go through the same exclusion. They were already
-                    // access-filtered by the stock query, so only the tag test is applied here.
+                    // The stock name matches are excluded by any tag containing an exclude term.
+                    // They were already access-filtered by the stock query, so only the tag test
+                    // is applied here.
                     if (excludes.Length > 0 && nameResults.Count > 0)
                     {
                         var nameIds = nameResults.Select(r => r.ItemId).ToArray();
-                        var keep = (await WithoutExcludedTags(
+                        var keep = (await WithoutAnyExcludedTag(
                                 dbContext.BaseItems.AsNoTracking().Where(e => nameIds.Contains(e.Id)),
                                 excludes)
                             .Select(e => e.Id)
@@ -298,7 +343,14 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                     }
                 }
 
-                // A name match keeps its own (higher) score; a tag-only match gets TagMatchScore.
+                // A name match keeps its own (higher) score - also when it was excluded as a name
+                // match but came back through a qualifying tag; a tag-only match gets TagMatchScore.
+                var nameScores = new Dictionary<Guid, float>();
+                foreach (var r in nameResults)
+                {
+                    nameScores[r.ItemId] = r.Score;
+                }
+
                 var scores = new Dictionary<Guid, float>();
                 foreach (var r in keptNames)
                 {
@@ -307,7 +359,7 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
 
                 foreach (var id in tagIds)
                 {
-                    scores.TryAdd(id, TagMatchScore);
+                    scores.TryAdd(id, nameScores.TryGetValue(id, out var s) ? s : TagMatchScore);
                 }
 
                 if (scores.Count == 0 && excludes.Length > 0 && nameResults.Count > 0)

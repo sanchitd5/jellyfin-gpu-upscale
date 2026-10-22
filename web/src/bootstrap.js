@@ -7,6 +7,7 @@ import { watchPlaybackInfoDialog } from './controller/playback-hooks.js';
 import { probeServer } from './controller/probe.js';
 import { tryRequireShim } from './controller/live-apply.js';
 import { watchSearchPage } from './controller/search-exclude.js';
+import { installSearchScopeFix } from './controller/search-scope.js';
 import { installSearchGrid } from './view/search-grid.js';
 import { installImageZoom } from './view/image-zoom.js';
 
@@ -24,6 +25,7 @@ import { installImageZoom } from './view/image-zoom.js';
         tryRequireShim();
         watchPlaybackInfoDialog();
         watchSearchPage();
+        installSearchScopeFix();
         installSearchGrid();
         installImageZoom();
         probeServer();
