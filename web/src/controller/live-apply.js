@@ -55,7 +55,7 @@ export function isPlaybackManager(o) {
  * of naming which player is active; pass it through when the method carries it, but keep the
  * no-arg call available as a fallback for a build old enough not to need it.
  */
-function activePlayer(pm) {
+export function activePlayer(pm) {
     try {
         var pl = typeof pm.getCurrentPlayer === 'function' ? pm.getCurrentPlayer() : undefined;
         log('activePlayer: end, ' + (typeof pm.getCurrentPlayer === 'function'
