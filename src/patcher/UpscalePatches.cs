@@ -283,6 +283,25 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 logger?.LogWarning(ex, "JellyfinPlus: the Video similar-items patch could not be installed. Stock behaviour is unaffected.");
             }
 
+            // Library scan timing (measurement only, no behaviour change). Own try/catch.
+            try
+            {
+                ScanTimingPatches.Apply(harmony, logger);
+                if (ScanTimingPatches.Available)
+                {
+                    applied.Add("scan timing");
+                }
+                else
+                {
+                    failed.Add("scan timing (measurement only)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("scan timing (measurement only)");
+                logger?.LogWarning(ex, "JellyfinPlus: the scan timing patch could not be installed. Stock behaviour is unaffected.");
+            }
+
             // MediaInfoHelper lives in Jellyfin.Api, a different assembly from the core targets, and
             // is resolved BY NAME so that the patcher does not need a compile-time reference to a
             // web-API assembly it would then be version-pinned to.
