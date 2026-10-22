@@ -4,6 +4,8 @@ Realtime GPU super-resolution, sharpening and denoising for Jellyfin transcodes.
 quality level from the player's **Enhance** panel and the stream is upscaled on the fly: a 540p
 capture served at 1080p, reconstructed rather than stretched.
 
+**Everything this plugin changes in Jellyfin, server and client: see [ENHANCEMENTS.md](ENHANCEMENTS.md).**
+
 Two engines sit behind that panel. **libplacebo GLSL user shaders on Vulkan** carry the super
 resolution, sharpening, refine and chroma passes. **Five custom ffmpeg video filters**, in a
 separately built binary beside the stock one, carry Intel Open Image Denoise, NVIDIA OptiX, ONNX
