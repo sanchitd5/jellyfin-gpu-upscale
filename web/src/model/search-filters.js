@@ -573,3 +573,116 @@ export function rewriteSearchUrl(url, state, now) {
     }));
     return base + '?' + pieces.join('&') + hash;
 }
+
+/* ---- the Cast & Crew facet list: who appears in THESE search results ---- */
+
+var FACET_TYPE = { videos: 'Video', movies: 'Movie', episodes: 'Episode' };
+
+/*
+ * The query string pairs for GET /JellyfinPlus/Search/Facets (src/SearchFacetsController.cs), apart
+ * from userId, kind, q and limit. It is the committed search term plus the committed filters,
+ * EXCEPT the cast filter itself (people, roles, any/all) and the sort: a facet ignores its own
+ * filter, or picking one person would shrink the list to that person's co-stars, and sort changes
+ * nothing about who appears. `exclude` is the search page's exclude-tags text.
+ */
+export function facetPairs(state, term, parentId, exclude, now) {
+    var s = normalizeState(state);
+    s.sort = 'relevance';
+    s.seed = 0;
+    s.people = [];
+    s.roles = [];
+    s.peopleAll = false;
+    var p = [['searchTerm', String(term || '')]];
+    if (parentId) {
+        p.push(['parentId', parentId]);
+    }
+
+    if (FACET_TYPE[s.type]) {
+        p.push(['includeItemTypes', FACET_TYPE[s.type]]);
+    }
+
+    filterPairs(s, now).forEach(function (kv) { p.push(kv); });
+    var ex = typeof exclude === 'string' ? exclude.trim() : '';
+    if (ex) {
+        p.push(['excludeTags', ex]);
+    }
+
+    return p;
+}
+
+/* A cache key for one facet request: identical for identical term + filters, and only then. */
+export function facetKey(pairs, q) {
+    return pairs.map(function (kv) { return kv[0] + '=' + kv[1]; }).join('&') + '|' + (q || '');
+}
+
+/* Case-insensitive substring filter of a facet list by name (empty needle keeps everything). */
+export function filterFacets(list, needle) {
+    var n = String(needle || '').trim().toLowerCase();
+    if (!n) {
+        return list.slice();
+    }
+
+    return list.filter(function (f) { return f.name.toLowerCase().indexOf(n) !== -1; });
+}
+
+/*
+ * The rows of the Cast & Crew checklist: [{ id, name, count, picked }]. People already picked stay
+ * visible even when they are not in the facet list (count null), listed first; the rest follow in
+ * the server's order (count descending, then name). `needle` narrows both.
+ */
+export function facetRows(list, picked, needle) {
+    var inList = {};
+    list.forEach(function (f) { inList[f.id] = true; });
+    var pickedIds = {};
+    picked.forEach(function (p) { pickedIds[p.id] = true; });
+    var extra = filterFacets(picked.filter(function (p) { return !inList[p.id]; }).map(function (p) {
+        return { id: p.id, name: p.name, count: null, roles: [] };
+    }), needle);
+    return extra.concat(filterFacets(list, needle)).map(function (f) {
+        return { id: f.id, name: f.name, count: typeof f.count === 'number' ? f.count : null, picked: !!pickedIds[f.id] };
+    });
+}
+
+/* "Name · 12", or just the name when the count is unknown. */
+export function facetText(row) {
+    return typeof row.count === 'number' ? row.name + ' · ' + row.count : row.name;
+}
+
+/*
+ * The role values to offer as pills: those that occur among the listed people, in ROLES order, plus
+ * any already selected (so a saved choice never vanishes). With no list (nothing loaded, or no
+ * search term) there is no information, so every role is offered.
+ */
+export function offeredRoles(list, selected) {
+    if (!list) {
+        return ROLES.map(function (r) { return r.value; });
+    }
+
+    var seen = {};
+    list.forEach(function (f) { (f.roles || []).forEach(function (r) { seen[r] = true; }); });
+    return ROLES.map(function (r) { return r.value; }).filter(function (v) {
+        return seen[v] || (selected || []).indexOf(v) !== -1;
+    });
+}
+
+/* A response row (lower- or Pascal-case, per whichever serialiser answered) as { id, name, roles, count }, or null. */
+export function normalizeFacet(raw) {
+    if (!raw || typeof raw !== 'object') {
+        return null;
+    }
+
+    var id = raw.id !== undefined ? raw.id : raw.Id;
+    var name = raw.name !== undefined ? raw.name : raw.Name;
+    var roles = raw.roles !== undefined ? raw.roles : raw.Roles;
+    var count = raw.count !== undefined ? raw.count : raw.Count;
+    if (typeof id !== 'string' || !GUID_RE.test(id) || typeof name !== 'string' || !name) {
+        return null;
+    }
+
+    return {
+        id: id,
+        name: name,
+        roles: Array.isArray(roles) ? roles.filter(function (r) { return typeof r === 'string'; }) : [],
+        count: typeof count === 'number' && isFinite(count) ? count : 0
+    };
+}

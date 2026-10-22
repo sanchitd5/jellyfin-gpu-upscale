@@ -1,5 +1,15 @@
 import { log } from '../lib/log.js';
-import { loadState, saveState, rewriteSearchUrl, normalizeState, activeGroups } from '../model/search-filters.js';
+import {
+    loadState,
+    saveState,
+    rewriteSearchUrl,
+    normalizeState,
+    activeGroups,
+    facetPairs,
+    facetKey,
+    filterFacets,
+    normalizeFacet
+} from '../model/search-filters.js';
 import { refetchSearch, excludeText } from './search-exclude.js';
 
 /*
@@ -35,6 +45,17 @@ export function searchParentId() {
         var hash = window.location.hash || '';
         var q = hash.indexOf('?');
         return q === -1 ? '' : (new URLSearchParams(hash.slice(q + 1)).get('parentId') || '');
+    } catch (e) {
+        return '';
+    }
+}
+
+/* The search term the page has committed (?query= in the hash), or ''. */
+export function committedTerm() {
+    try {
+        var hash = window.location.hash || '';
+        var q = hash.indexOf('?');
+        return q === -1 ? '' : (new URLSearchParams(hash.slice(q + 1)).get('query') || '');
     } catch (e) {
         return '';
     }
@@ -120,5 +141,74 @@ export function fetchTags(parentId) {
         tagCache[parentId] = { at: Date.now(), tags: tags };
         log('search filters: ' + tags.length + ' tags loaded');
         return tags;
+    });
+}
+
+/* ---- the Cast & Crew list: people credited on THIS search's results ---- */
+
+// One entry per (committed term + committed filters + typeahead needle), for the page session.
+var facetCache = {};
+var FACET_CACHE_MAX = 40;
+var FACET_FULL = 200;
+var FACET_NEEDLE = 100;
+
+function loadFacets(pairs, needle, limit) {
+    var key = facetKey(pairs, needle) + '|' + limit;
+    if (facetCache[key]) {
+        return facetCache[key];
+    }
+
+    var client = window.ApiClient;
+    if (!client || typeof client.getUrl !== 'function' || typeof client.ajax !== 'function') {
+        return Promise.reject(new Error('no ApiClient'));
+    }
+
+    var params = { userId: client.getCurrentUserId(), kind: 'people', limit: limit };
+    pairs.forEach(function (kv) { params[kv[0]] = kv[1]; });
+    if (needle) {
+        params.q = needle;
+    }
+
+    var p = client.ajax({
+        type: 'GET',
+        url: client.getUrl('JellyfinPlus/Search/Facets', params),
+        dataType: 'json'
+    }).then(function (res) {
+        var list = (Array.isArray(res) ? res : []).map(normalizeFacet).filter(function (f) { return !!f; });
+        log('search filters: ' + list.length + ' cast & crew for "' + params.searchTerm + '"' + (needle ? ' matching "' + needle + '"' : ''));
+        // Fewer rows than asked for means the server had no more: the list is the whole facet.
+        return { list: list, complete: list.length < limit };
+    });
+
+    if (Object.keys(facetCache).length >= FACET_CACHE_MAX) {
+        facetCache = {};
+    }
+
+    facetCache[key] = p;
+    p.catch(function () { delete facetCache[key]; });
+    return p;
+}
+
+/*
+ * Promise of { list: [{ id, name, roles, count }], complete } for the committed search term and
+ * filters (never the draft in the sheet), or of null when no term has been searched yet. `needle`
+ * is the typeahead text: answered from the full list when that was complete, else by the server.
+ */
+export function fetchPeopleFacets(needle) {
+    var term = committedTerm().trim();
+    if (!term) {
+        return Promise.resolve(null);
+    }
+
+    var pairs = facetPairs(committed, term, searchParentId(), excludeText(), new Date());
+    var q = (needle || '').trim();
+    return loadFacets(pairs, '', FACET_FULL).then(function (full) {
+        if (!q) {
+            return full;
+        }
+
+        return full.complete
+            ? { list: filterFacets(full.list, q), complete: true }
+            : loadFacets(pairs, q, FACET_NEEDLE);
     });
 }
