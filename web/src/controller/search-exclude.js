@@ -123,7 +123,7 @@ function isSectionsQuery(q) {
  * search query except Items, let React re-render with the new data (which hands Items a fresh
  * queryFn), and only then refetch Items. A newer keystroke abandons an older run's second phase.
  */
-function refetchSearch() {
+export function refetchSearch() {
     if (!queryClient) {
         log('refetchSearch: no React Query client found; results refresh on the next search');
         return;

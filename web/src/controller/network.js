@@ -3,7 +3,14 @@ import { GAME_OPTION_KEYS } from '../model/controls-data.js';
 import { effective, anyEnhancement } from '../model/effective.js';
 import { resetUpscaleForNewSource } from './playback-hooks.js';
 import { markSearchUrl } from './search-exclude.js';
+import { markSearchFilters } from './search-filters.js';
 import { log } from '../lib/log.js';
+
+/* The search page's own markings, in order: the exclude box, then Sort & filter. Both leave any
+ * url that is not a search request exactly as it came. */
+function markSearch(url) {
+    return markSearchFilters(markSearchUrl(url));
+}
 
 /*
  * WHAT THIS SESSION WOULD SEND, as a plain object and with no URL involved. Split out so that the
@@ -374,7 +381,7 @@ export function hookFetch() {
         // the search page sends its requests through axios, i.e. XHR, below.
         if (typeof input === 'string') {
             try {
-                var searchUrl = markSearchUrl(url);
+                var searchUrl = markSearch(url);
                 if (searchUrl !== url) {
                     args = [searchUrl, init];
                     url = searchUrl;
@@ -504,7 +511,7 @@ export function hookXhr() {
 
             // The search page's exclude-tags box (search-exclude.js). Search requests are never
             // HLS or PlaybackInfo, so this returns before either of the branches below.
-            var searchUrl = markSearchUrl(url);
+            var searchUrl = markSearch(url);
             if (searchUrl !== url) {
                 this.__jellyfinPlusUrl = searchUrl;
                 var searchArgs = Array.prototype.slice.call(arguments);

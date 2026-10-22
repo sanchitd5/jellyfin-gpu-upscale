@@ -456,7 +456,11 @@ export function searchEntities(kind, ctx, term) {
     }
 
     if (kind === 'studio') {
-        params.parentId = ctx.parentId;
+        // A global search has no library: an empty parentId would be sent as a malformed Guid.
+        if (ctx.parentId) {
+            params.parentId = ctx.parentId;
+        }
+
         if (ctx.itemType && ctx.itemType.length) {
             params.includeItemTypes = ctx.itemType.join(',');
         }
