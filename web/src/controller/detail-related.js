@@ -56,6 +56,11 @@ function isCardBuilder(o) {
         && typeof o.buildCards === 'function';
 }
 
+/* The cardBuilder noteCardBuilder found (null until webpack has loaded it), for other modules that draw cards. */
+export function getCardBuilder() {
+    return cardBuilder;
+}
+
 /* Called with every module's exports; keeps the first cardBuilder it sees. */
 export function noteCardBuilder(exports) {
     if (cardBuilder || !exports || (typeof exports !== 'object' && typeof exports !== 'function')) {
