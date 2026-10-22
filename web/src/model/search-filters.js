@@ -10,6 +10,10 @@
  *   isPlayed / isFavorite         stock
  *   tags=a|b + tagMatch=all       stock (pipe-separated exact names) + ours
  *   personIds / studioIds         stock, comma-separated Guids
+ *   personTypes                   stock, comma-separated PersonKind names (Actor, Director, ...). Stock
+ *                                 applies it only together with personIds: one credit row must match
+ *                                 BOTH the person and the role, so it is a role filter on the picked people
+ *   jpPersonMatch=all             ours: every picked person must be credited (stock personIds is any-of)
  *   jpMinRuntime / jpMaxRuntime   whole minutes, inclusive
  *   jpMinDateAdded / jpMaxDateAdded  YYYY-MM-DD, UTC, inclusive by day
  *   jpResolution                  comma list of sd,hd,4k
@@ -40,6 +44,20 @@ export var TYPES = [
     { value: 'videos', label: 'Videos' },
     { value: 'movies', label: 'Movies' },
     { value: 'episodes', label: 'Episodes' }
+];
+
+/* Credit roles, value = the PersonKind name stock stores and matches (personTypes is case-sensitive). */
+export var ROLES = [
+    { value: 'Actor', label: 'Actor' },
+    { value: 'Director', label: 'Director' },
+    { value: 'Writer', label: 'Writer' },
+    { value: 'Producer', label: 'Producer' },
+    { value: 'GuestStar', label: 'Guest star' },
+    { value: 'Composer', label: 'Composer' },
+    { value: 'Conductor', label: 'Conductor' },
+    { value: 'Lyricist', label: 'Lyricist' },
+    { value: 'Arranger', label: 'Arranger' },
+    { value: 'Creator', label: 'Creator' }
 ];
 
 export var RESOLUTIONS = [
@@ -77,6 +95,8 @@ export function defaultState() {
         tags: [],
         tagAll: false,
         people: [],
+        roles: [],
+        peopleAll: false,
         studios: [],
         minRuntime: null,
         maxRuntime: null,
@@ -148,6 +168,11 @@ export function normalizeState(raw) {
     });
     s.tagAll = raw.tagAll === true;
     s.people = entities(raw.people);
+    // Canonical ROLES order, unknown names dropped: nothing but a PersonKind name reaches a URL.
+    s.roles = ROLES.map(function (x) { return x.value; }).filter(function (v) {
+        return Array.isArray(raw.roles) && raw.roles.indexOf(v) !== -1;
+    });
+    s.peopleAll = raw.peopleAll === true;
     s.studios = entities(raw.studios);
 
     s.minRuntime = minutes(raw.minRuntime);
@@ -227,6 +252,22 @@ export function activeRes(s) {
     return s.res.length > 0 && s.res.length < RESOLUTIONS.length ? s.res : [];
 }
 
+/* Roles only mean something next to picked people (stock ignores personTypes without personIds). */
+export function activeRoles(s) {
+    return s.people.length ? s.roles : [];
+}
+
+/* "All of" is only a choice, and only sent, with two or more people. */
+export function matchAllPeople(s) {
+    return s.peopleAll && s.people.length > 1;
+}
+
+function roleLabels(s) {
+    return activeRoles(s).map(function (v) {
+        return ROLES.filter(function (x) { return x.value === v; })[0].label;
+    }).join(' / ');
+}
+
 function runtimeText(s) {
     if (s.minRuntime !== null && s.maxRuntime !== null) {
         return s.minRuntime + '-' + s.maxRuntime + ' min';
@@ -268,7 +309,14 @@ export function chipsOf(s) {
         out.push({ group: 'tags', id: 'tagAll', label: 'Match all tags' });
     }
 
-    s.people.forEach(function (p) { out.push({ group: 'people', id: 'person:' + p.id, label: p.name }); });
+    var roleText = roleLabels(s);
+    s.people.forEach(function (p) {
+        out.push({ group: 'people', id: 'person:' + p.id, label: 'Cast: ' + p.name + (roleText ? ' (' + roleText + ')' : '') });
+    });
+    if (matchAllPeople(s)) {
+        out.push({ group: 'people', id: 'peopleAll', label: 'Match all people' });
+    }
+
     s.studios.forEach(function (p) { out.push({ group: 'studios', id: 'studio:' + p.id, label: p.name }); });
     if (s.minRuntime !== null || s.maxRuntime !== null) {
         out.push({ group: 'runtime', id: 'runtime', label: runtimeText(s) });
@@ -339,6 +387,12 @@ export function removeChip(s, id) {
         n.tagAll = false;
     } else if (kind === 'person') {
         n.people = n.people.filter(function (p) { return p.id !== arg; });
+        if (!n.people.length) {
+            n.roles = [];
+            n.peopleAll = false;
+        }
+    } else if (kind === 'peopleAll') {
+        n.peopleAll = false;
     } else if (kind === 'studio') {
         n.studios = n.studios.filter(function (p) { return p.id !== arg; });
     } else if (kind === 'runtime') {
@@ -418,6 +472,13 @@ export function filterPairs(s, now) {
 
     if (s.people.length) {
         p.push(['personIds', s.people.map(function (x) { return x.id; }).join(',')]);
+        if (activeRoles(s).length) {
+            p.push(['personTypes', s.roles.join(',')]);
+        }
+
+        if (matchAllPeople(s)) {
+            p.push(['jpPersonMatch', 'all']);
+        }
     }
 
     if (s.studios.length) {
@@ -452,7 +513,7 @@ export function filterPairs(s, now) {
 // Every parameter this module may write: removed from the URL first so a value is never doubled.
 var OWNED = [
     'sortby', 'sortorder', 'jpseed', 'isplayed', 'isfavorite', 'tags', 'tagmatch', 'personids',
-    'studioids', 'jpminruntime', 'jpmaxruntime', 'jpmindateadded', 'jpmaxdateadded', 'jpresolution'
+    'persontypes', 'jppersonmatch', 'studioids', 'jpminruntime', 'jpmaxruntime', 'jpmindateadded', 'jpmaxdateadded', 'jpresolution'
 ];
 
 function keyOf(piece) {
