@@ -204,6 +204,26 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 logger?.LogWarning(ex, "JellyfinPlus: the tag search patch could not be installed. Stock name search is unaffected.");
             }
 
+            // Search sort + wide candidate pool: SearchManager.GetSearchResultsAsync honours sortBy
+            // on /Items searches. Own try/catch; no parameters means stock search.
+            try
+            {
+                SearchSortPatches.Apply(harmony, logger);
+                if (SearchSortPatches.Available)
+                {
+                    applied.Add("search sort");
+                }
+                else
+                {
+                    failed.Add("search sort (relevance order unaffected)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("search sort (relevance order unaffected)");
+                logger?.LogWarning(ex, "JellyfinPlus: the search sort patch could not be installed. Stock search order is unaffected.");
+            }
+
             // Library tag filters: BaseItemRepository.TranslateQuery honours excludeTagNames /
             // tagMatch=all on /Items. Only ever narrows a listing. Own try/catch.
             try

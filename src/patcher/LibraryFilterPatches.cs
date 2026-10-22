@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Reflection;
 using HarmonyLib;
 using Jellyfin.Database.Implementations;
@@ -36,6 +38,17 @@ namespace Jellyfin.Plugin.Plus.Patcher
     ///   query, and each tag is then required additionally. (OR AND each-tag) equals AND, so the
     ///   postfix can only narrow what the stock query returned. The stock query is not rewritten.
     ///
+    /// THREE MORE NARROWING FILTERS, same postfix, same request scoping (any /Items request, only when
+    /// the parameter is present): jpMinRuntime/jpMaxRuntime (whole minutes, inclusive, on
+    /// RunTimeTicks; an item with no runtime matches neither), jpMinDateAdded/jpMaxDateAdded
+    /// (YYYY-MM-DD, inclusive by UTC day, on DateCreated) and jpResolution (comma list of sd, hd, 4k;
+    /// an item matches if it falls in ANY listed bucket). The resolution buckets are the stock
+    /// isHd/is4K ones, copied from BaseItemRepository.TranslateQuery on 12.1 so that this filter and
+    /// the stock one agree: sd = width in (0, 1200), hd = width >= 1200 and not 4K, 4k = width >= 3800
+    /// or height >= 2100, where an item's resolution is the best any of its versions offers and a
+    /// folder (series, box set) answers on its children. A malformed value is ignored (never
+    /// widens, never errors).
+    ///
     /// NEITHER CAN WIDEN A RESULT, and neither touches user-access filtering: that is a separate
     /// step (ApplyAccessFiltering) on the same query. Both only ever add Where clauses.
     ///
@@ -47,6 +60,17 @@ namespace Jellyfin.Plugin.Plus.Patcher
     {
         public const string ExcludeParam = "excludeTagNames";
         public const string MatchParam = "tagMatch";
+        public const string MinRuntimeParam = "jpMinRuntime";
+        public const string MaxRuntimeParam = "jpMaxRuntime";
+        public const string MinAddedParam = "jpMinDateAdded";
+        public const string MaxAddedParam = "jpMaxDateAdded";
+        public const string ResolutionParam = "jpResolution";
+
+        // Stock TranslateQuery's isHd / is4K thresholds (12.1).
+        private const int HDWidth = 1200;
+        private const int UHDWidth = 3800;
+        private const int UHDHeight = 2100;
+        private const long TicksPerMinute = TimeSpan.TicksPerMinute;
 
         // Each term is one more NOT EXISTS / EXISTS in the SQL, so what a request can ask is bounded.
         private const int MaxTerms = 100;
@@ -171,46 +195,212 @@ namespace Jellyfin.Plugin.Plus.Patcher
         }
 
         /// <summary>
-        /// After the stock translation: with tagMatch=all and two or more tags, require every one
-        /// of filter.Tags on top of the stock "any of them". The stock "tags" list the controller
-        /// parsed is used as-is (not the locals TranslateQuery may add for IsSports / IsNews /
-        /// IsKids), compared by the same clean value the stock filter uses.
+        /// After the stock translation, narrow further: with tagMatch=all and two or more tags,
+        /// require every one of filter.Tags on top of the stock "any of them" (the stock "tags" list the
+        /// controller parsed is used as-is, not the locals TranslateQuery may add for IsSports / IsNews /
+        /// IsKids, compared by the same clean value the stock filter uses); then the jp* runtime,
+        /// date-added and resolution ranges. Each is a Where on the stock query, nothing else.
         /// </summary>
-        private static void TranslateQueryPostfix(InternalItemsQuery filter, ref IQueryable<BaseItemEntity> __result)
+        private static void TranslateQueryPostfix(JellyfinDbContext context, InternalItemsQuery filter, ref IQueryable<BaseItemEntity> __result)
         {
             try
             {
-                if (__result == null || filter == null || filter.Tags == null || filter.Tags.Length < 2)
+                if (__result == null || filter == null)
                 {
                     return;
                 }
 
                 var request = ItemsRequest();
-                if (request == null || !ReadMatchAll(request))
+                if (request == null)
                 {
                     return;
                 }
 
                 var query = __result;
-                foreach (var tag in filter.Tags
-                    .Where(t => !string.IsNullOrWhiteSpace(t))
-                    .Select(t => t.GetCleanValue())
-                    .Where(t => !string.IsNullOrEmpty(t))
-                    .Distinct(StringComparer.Ordinal)
-                    .Take(MaxTerms))
-                {
-                    // A fresh local per iteration: the expression captures the variable, not its value.
-                    var t = tag;
-                    query = query.Where(e => e.ItemValues!.Any(v => v.ItemValue.Type == ItemValueType.Tags
-                        && v.ItemValue.CleanValue == t));
-                }
-
+                query = MatchAll(query, filter, request);
+                query = RuntimeRange(query, request);
+                query = DateAddedRange(query, request);
+                query = Resolution(query, context, request);
                 __result = query;
             }
             catch (Exception ex)
             {
                 Warn(ex);
             }
+        }
+
+        private static IQueryable<BaseItemEntity> MatchAll(IQueryable<BaseItemEntity> query, InternalItemsQuery filter, HttpRequest request)
+        {
+            if (filter.Tags == null || filter.Tags.Length < 2 || !ReadMatchAll(request))
+            {
+                return query;
+            }
+
+            foreach (var tag in filter.Tags
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Select(t => t.GetCleanValue())
+                .Where(t => !string.IsNullOrEmpty(t))
+                .Distinct(StringComparer.Ordinal)
+                .Take(MaxTerms))
+            {
+                // A fresh local per iteration: the expression captures the variable, not its value.
+                var t = tag;
+                query = query.Where(e => e.ItemValues!.Any(v => v.ItemValue.Type == ItemValueType.Tags
+                    && v.ItemValue.CleanValue == t));
+            }
+
+            return query;
+        }
+
+        /// <summary>A whole non-negative number of minutes as ticks, or null when absent or malformed.</summary>
+        internal static long? ParseMinutes(HttpRequest request, string name)
+        {
+            if (!request.Query.TryGetValue(name, out var values)
+                || !int.TryParse(values.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out var minutes))
+            {
+                return null;
+            }
+
+            return minutes * TicksPerMinute;
+        }
+
+        private static IQueryable<BaseItemEntity> RuntimeRange(IQueryable<BaseItemEntity> query, HttpRequest request)
+        {
+            var min = ParseMinutes(request, MinRuntimeParam);
+            var max = ParseMinutes(request, MaxRuntimeParam);
+            if (min.HasValue)
+            {
+                var lo = min.Value;
+                query = query.Where(e => e.RunTimeTicks != null && e.RunTimeTicks >= lo);
+            }
+
+            if (max.HasValue)
+            {
+                var hi = max.Value;
+                query = query.Where(e => e.RunTimeTicks != null && e.RunTimeTicks <= hi);
+            }
+
+            return query;
+        }
+
+        /// <summary>A UTC midnight from YYYY-MM-DD, or null when absent or malformed.</summary>
+        internal static DateTime? ParseDay(HttpRequest request, string name)
+        {
+            if (request.Query.TryGetValue(name, out var values)
+                && DateTime.TryParseExact(values.FirstOrDefault(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+            {
+                return DateTime.SpecifyKind(day.Date, DateTimeKind.Utc);
+            }
+
+            return null;
+        }
+
+        private static IQueryable<BaseItemEntity> DateAddedRange(IQueryable<BaseItemEntity> query, HttpRequest request)
+        {
+            var min = ParseDay(request, MinAddedParam);
+            var max = ParseDay(request, MaxAddedParam);
+            if (min.HasValue)
+            {
+                var lo = min.Value;
+                query = query.Where(e => e.DateCreated != null && e.DateCreated >= lo);
+            }
+
+            // Inclusive by day: strictly before the next midnight. The last representable day has no
+            // next one, so it only requires a known date.
+            if (max.HasValue)
+            {
+                if (max.Value.Date < DateTime.MaxValue.Date)
+                {
+                    var hiExclusive = max.Value.AddDays(1);
+                    query = query.Where(e => e.DateCreated != null && e.DateCreated < hiExclusive);
+                }
+                else
+                {
+                    query = query.Where(e => e.DateCreated != null);
+                }
+            }
+
+            return query;
+        }
+
+        /// <summary>Which of sd / hd / 4k the request lists; all false when absent or nothing valid.</summary>
+        internal static (bool Sd, bool Hd, bool Uhd) ParseResolution(HttpRequest request)
+        {
+            bool sd = false, hd = false, uhd = false;
+            if (request.Query.TryGetValue(ResolutionParam, out var values))
+            {
+                foreach (var token in values
+                    .Where(v => !string.IsNullOrEmpty(v))
+                    .SelectMany(v => v.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)))
+                {
+                    sd |= string.Equals(token, "sd", StringComparison.OrdinalIgnoreCase);
+                    hd |= string.Equals(token, "hd", StringComparison.OrdinalIgnoreCase);
+                    uhd |= string.Equals(token, "4k", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            return (sd, hd, uhd);
+        }
+
+        private static IQueryable<Guid> VersionsMatching(JellyfinDbContext context, Expression<Func<BaseItemEntity, bool>> bound)
+            => context.BaseItems
+                .Where(v => v.PrimaryVersionId != null)
+                .Where(bound)
+                .Select(v => v.PrimaryVersionId!.Value);
+
+        /// <summary>
+        /// The stock isHd / is4K predicate (BaseItemRepository.TranslateQuery, 12.1) with the three
+        /// buckets OR-ed instead of limited to what the two nullable flags can express. Kept in the
+        /// stock shape on purpose, so the two cannot drift apart without it being obvious.
+        /// </summary>
+        private static IQueryable<BaseItemEntity> Resolution(IQueryable<BaseItemEntity> query, JellyfinDbContext context, HttpRequest request)
+        {
+            var (includeSD, includeHD, include4K) = ParseResolution(request);
+            if (!includeSD && !includeHD && !include4K)
+            {
+                return query;
+            }
+
+            var versionsSd = VersionsMatching(context, v => v.Width > 0 && v.Width < HDWidth);
+            var versionsHd = VersionsMatching(context, v => v.Width >= HDWidth);
+            var versions4K = VersionsMatching(context, v => v.Width >= UHDWidth || v.Height >= UHDHeight);
+
+            return query.Where(e =>
+                (!e.IsFolder
+                    && ((includeSD
+                            && ((e.Width > 0 && e.Width < HDWidth) || versionsSd.Contains(e.Id))
+                            && !versionsHd.Contains(e.Id)
+                            && !versions4K.Contains(e.Id))
+                        || (includeHD
+                            && (e.Width >= HDWidth || versionsHd.Contains(e.Id))
+                            && !(e.Width >= UHDWidth || e.Height >= UHDHeight)
+                            && !versions4K.Contains(e.Id))
+                        || (include4K
+                            && (e.Width >= UHDWidth || e.Height >= UHDHeight || versions4K.Contains(e.Id)))))
+                || (e.IsFolder
+                    && (e.Children!.Any(a =>
+                            (includeSD
+                                && ((a.Item.Width > 0 && a.Item.Width < HDWidth) || versionsSd.Contains(a.ItemId))
+                                && !versionsHd.Contains(a.ItemId)
+                                && !versions4K.Contains(a.ItemId))
+                            || (includeHD
+                                && (a.Item.Width >= HDWidth || versionsHd.Contains(a.ItemId))
+                                && !(a.Item.Width >= UHDWidth || a.Item.Height >= UHDHeight)
+                                && !versions4K.Contains(a.ItemId))
+                            || (include4K
+                                && (a.Item.Width >= UHDWidth || a.Item.Height >= UHDHeight || versions4K.Contains(a.ItemId))))
+                        || context.LinkedChildren.Any(lc =>
+                            lc.ParentId == e.Id
+                            && ((includeSD
+                                    && ((lc.Child!.Width > 0 && lc.Child!.Width < HDWidth) || versionsSd.Contains(lc.ChildId))
+                                    && !versionsHd.Contains(lc.ChildId)
+                                    && !versions4K.Contains(lc.ChildId))
+                                || (includeHD
+                                    && (lc.Child!.Width >= HDWidth || versionsHd.Contains(lc.ChildId))
+                                    && !(lc.Child!.Width >= UHDWidth || lc.Child!.Height >= UHDHeight)
+                                    && !versions4K.Contains(lc.ChildId))
+                                || (include4K
+                                    && (lc.Child!.Width >= UHDWidth || lc.Child!.Height >= UHDHeight || versions4K.Contains(lc.ChildId))))))));
         }
 
         private static void Warn(Exception ex)
