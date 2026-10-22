@@ -303,12 +303,23 @@ export function reachedEnd(loaded, size, total, lastCount) {
 }
 
 /* "101-200 of 342". */
+/*
+ * The server's search candidate pool cap (SearchSortPatches.MaxPagedCandidates). A total equal to it
+ * is a lower bound - "matches among the first N relevance candidates" - not an exact count, so it
+ * is shown as "N+". Keep in step with the server constant.
+ */
+export var POOL_CAP = 5000;
+
+export function totalText(total) {
+    return total >= POOL_CAP ? POOL_CAP + '+' : String(total);
+}
+
 export function rangeText(s) {
     if (!s || s.count === 0) {
-        return '0 of ' + (s ? s.total : 0);
+        return '0 of ' + totalText(s ? s.total : 0);
     }
 
-    return (s.start + 1) + '-' + (s.start + s.count) + ' of ' + s.total;
+    return (s.start + 1) + '-' + (s.start + s.count) + ' of ' + totalText(s.total);
 }
 
 /* The page to land on after an empty response past the end: the last one that can have items. */

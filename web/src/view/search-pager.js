@@ -1,6 +1,6 @@
 import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
-import { worthShowing, rangeText, KINDS } from '../model/search-paging.js';
+import { worthShowing, rangeText, KINDS, POOL_CAP } from '../model/search-paging.js';
 import {
     pagerOf, hasItem, takeUserNav, goTo, setSize, setMode, isInfinite, onPagerChanged
 } from '../controller/search-pager.js';
@@ -82,7 +82,8 @@ function build(kind, m) {
     var nav = el('div', 'jpPager-nav');
     nav.appendChild(btn('‹ Prev', 'Previous page', function () { goTo(kind, m.page - 1); },
         m.busy || m.page <= 1));
-    nav.appendChild(el('span', 'jpPager-page', 'Page ' + m.page + ' of ' + m.pages));
+    nav.appendChild(el('span', 'jpPager-page', 'Page ' + m.page + ' of ' + m.pages
+        + (m.total >= POOL_CAP ? '+' : '')));
     nav.appendChild(btn('Next ›', 'Next page', function () { goTo(kind, m.page + 1); },
         m.busy || m.page >= m.pages));
     box.appendChild(nav);
