@@ -244,6 +244,26 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 logger?.LogWarning(ex, "JellyfinPlus: the library tag filter patch could not be installed. Stock library listing is unaffected.");
             }
 
+            // Filter key cache: /Items/Filters and /Items/Filters2 answered from a table in jellyfin.db when
+            // that is safe, stock otherwise. Own try/catch; with the cache layer off Jellyfin serves stock.
+            try
+            {
+                FilterCachePatches.Apply(harmony, logger);
+                if (FilterCachePatches.Available)
+                {
+                    applied.Add("filter key cache");
+                }
+                else
+                {
+                    failed.Add("filter key cache (stock /Items/Filters unaffected)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("filter key cache (stock /Items/Filters unaffected)");
+                logger?.LogWarning(ex, "JellyfinPlus: the filter key cache patch could not be installed. Stock /Items/Filters is unaffected.");
+            }
+
             // More Like This for Video items (no stock provider covers Video). Own try/catch.
             try
             {

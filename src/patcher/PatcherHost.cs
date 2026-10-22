@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Plus.Patcher
@@ -41,6 +43,29 @@ namespace Jellyfin.Plugin.Plus.Patcher
         }
 
         public static bool IsActive() => UpscalePatches.Active;
+
+        // ---- Filter key cache (FilterCacheEngine). The plugin calls these by reflection; the service
+        // provider and logger are Jellyfin/BCL types, which both load contexts resolve to the same
+        // default-context assemblies, so passing them as object does not share a plugin or patcher type.
+
+        /// <summary>Resolves the server services the cache needs, creates its tables, starts watching the library.</summary>
+        public static void FilterCacheStart(object serviceProvider, object logger)
+            => FilterCacheEngine.Start((IServiceProvider)serviceProvider, logger as ILogger);
+
+        public static void FilterCacheStop() => FilterCacheEngine.Stop();
+
+        /// <summary>
+        /// Rebuilds stale libraries (all of them when <paramref name="force"/>) and completes when done.
+        /// <paramref name="progress"/> is an IProgress of double (0-100) or null.
+        /// </summary>
+        public static Task FilterCacheRebuild(bool force, object progress, CancellationToken cancellationToken)
+            => FilterCacheEngine.RebuildAsync(force, progress as IProgress<double>, cancellationToken);
+
+        /// <summary>Starts a rebuild without waiting. False when the cache is off or one is already running.</summary>
+        public static bool FilterCacheRebuildInBackground(bool force) => FilterCacheEngine.StartBackground(force);
+
+        /// <summary>Per-library state of the cache (built at, key counts, dirty) and the run in flight, as JSON.</summary>
+        public static string FilterCacheStatusJson() => FilterCacheEngine.StatusJson();
 
         /// <summary>
         /// The levels this server can actually deliver right now, so the injected player menu can

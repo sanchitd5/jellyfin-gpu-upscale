@@ -4,6 +4,8 @@ using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
 using Jellyfin.Plugin.Plus.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -130,6 +132,80 @@ namespace Jellyfin.Plugin.Plus
             }
 
             return JsonSerializer.Serialize(new { PatchActive = false, Known = false, UpscaleApplied = false, DeblurApplied = false, Status = "patches-inactive", Summary = "Enhancement unavailable" });
+        }
+
+        // ---- Filter key cache. The engine is in the patcher; every call degrades to "off" when the
+        // patcher is not loaded or predates the cache (a half-applied deploy), never to an exception.
+
+        public static void FilterCacheStart(IServiceProvider services, ILogger logger)
+        {
+            try
+            {
+                _host?.GetMethod("FilterCacheStart")?.Invoke(null, new object[] { services, logger });
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "JellyfinPlus: starting the filter key cache failed; stock /Items/Filters is unaffected.");
+            }
+        }
+
+        public static void FilterCacheStop()
+        {
+            try
+            {
+                _host?.GetMethod("FilterCacheStop")?.Invoke(null, null);
+            }
+            catch (Exception)
+            {
+                // shutting down
+            }
+        }
+
+        public static Task FilterCacheRebuild(bool force, IProgress<double> progress, CancellationToken cancellationToken)
+        {
+            MethodInfo method = _host?.GetMethod("FilterCacheRebuild");
+            if (method == null)
+            {
+                return Task.CompletedTask;
+            }
+
+            try
+            {
+                return (Task)method.Invoke(null, new object[] { force, progress, cancellationToken });
+            }
+            catch (TargetInvocationException ex)
+            {
+                return Task.FromException(ex.InnerException ?? ex);
+            }
+        }
+
+        public static bool FilterCacheRebuildInBackground(bool force)
+        {
+            try
+            {
+                return _host?.GetMethod("FilterCacheRebuildInBackground")?.Invoke(null, new object[] { force }) is true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        public static string FilterCacheStatusJson()
+        {
+            try
+            {
+                if (_host?.GetMethod("FilterCacheStatusJson")?.Invoke(null, null) is string json)
+                {
+                    return json;
+                }
+            }
+            catch (Exception)
+            {
+                // fall through
+            }
+
+            return JsonSerializer.Serialize(new { Ready = false, State = "unavailable", Libraries = Array.Empty<object>() });
         }
 
         public static string StatusJson()
