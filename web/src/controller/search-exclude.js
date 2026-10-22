@@ -101,6 +101,11 @@ export function noteQueryClient(exports) {
     } catch (err) { /* an exotic export is not a reason to break module loading */ }
 }
 
+/* The client noteQueryClient found, for other modules that need to refetch or edit the cache. */
+export function getQueryClient() {
+    return queryClient;
+}
+
 var refetchGeneration = 0;
 
 function isSectionsQuery(q) {
