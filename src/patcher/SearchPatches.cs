@@ -274,14 +274,13 @@ namespace Jellyfin.Plugin.Plus.Patcher
             return query;
         }
 
-        // Above this many matching tag values an IN list stops being cheaper than the correlated form.
-        private const int MaxTagValueIds = 20000;
+        // How many tag values / ItemValuesMap rows a "small match set" may have. Above either, the tag
+        // matches are too broad to enumerate up front and BroadTagMatchedIds walks the candidates instead.
+        private const int MaxTagValueIds = 5000;
+        private const int MaxTagMapRows = 100000;
 
-        /// <summary>
-        /// The ItemValueIds of the tag values <see cref="TagMatch"/> accepts (a tag containing the term and
-        /// none of the exclude terms), or null when there are too many for an IN list.
-        /// </summary>
-        private static async Task<List<Guid>> MatchingTagValues(JellyfinDbContext db, string search, string[] excludes, CancellationToken ct)
+        /// <summary>The ItemValueIds of the tag values <see cref="TagMatch"/> accepts (term in, no exclude term in).</summary>
+        private static IQueryable<Guid> MatchingTagValueIds(JellyfinDbContext db, string search, string[] excludes)
         {
             // Locals, not constants, so EF sends them as parameters.
             var needle = search;
@@ -294,8 +293,228 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 values = values.Where(v => !v.CleanValue.Contains(t));
             }
 
-            var ids = await values.Select(v => v.ItemValueId).Take(MaxTagValueIds + 1).ToListAsync(ct).ConfigureAwait(false);
-            return ids.Count > MaxTagValueIds ? null : ids;
+            return values.Select(v => v.ItemValueId);
+        }
+
+        /// <summary>
+        /// The ids of the items carrying a tag that <see cref="TagMatch"/> accepts (a tag containing the term
+        /// and none of the exclude terms), found WITHOUT touching BaseItems: the matching tag VALUES from
+        /// ItemValues, then their ItemValuesMap rows through its (ItemValueId, ItemId) primary key.
+        /// Returns an empty array when nothing matches (the caller then skips the item query altogether), or
+        /// null when the matches are too many to enumerate. The ids come back distinct and in the database's own
+        /// Id order.
+        /// </summary>
+        /// <remarks>
+        /// Why: one correlated EXISTS per BaseItems row makes SQLite scan the whole item table and probe the
+        /// map for every row (~1.3 s on 80k items with 2.3M map rows) whenever the term matches few or no tags.
+        /// </remarks>
+        private static async Task<Guid[]> MatchingTagItemIds(JellyfinDbContext db, string search, string[] excludes, CancellationToken ct)
+        {
+            var valueIds = await MatchingTagValueIds(db, search, excludes).Take(MaxTagValueIds + 1).ToListAsync(ct).ConfigureAwait(false);
+            if (valueIds.Count == 0)
+            {
+                return Array.Empty<Guid>();
+            }
+
+            if (valueIds.Count > MaxTagValueIds)
+            {
+                return null;
+            }
+
+            var itemIds = await db.ItemValuesMap
+                .AsNoTracking()
+                .Where(m => EF.Parameter(valueIds).Contains(m.ItemValueId))
+                .Select(m => m.ItemId)
+                .Distinct()
+                .OrderBy(id => id)
+                .Take(MaxTagMapRows + 1)
+                .ToArrayAsync(ct)
+                .ConfigureAwait(false);
+            return itemIds.Length > MaxTagMapRows ? null : itemIds;
+        }
+
+        /// <summary>The provider's own type, media-type, parent and user-access filters, in the stock order.</summary>
+        private static IQueryable<BaseItemEntity> ApplyProviderFilters(
+            object provider,
+            JellyfinDbContext db,
+            SearchProviderQuery query,
+            IQueryable<BaseItemEntity> dbQuery)
+        {
+            dbQuery = (IQueryable<BaseItemEntity>)_applyTypeFilter.Invoke(provider, new object[] { dbQuery, query.IncludeItemTypes, query.ExcludeItemTypes });
+            dbQuery = (IQueryable<BaseItemEntity>)_applyMediaTypeFilter.Invoke(null, new object[] { dbQuery, query.MediaTypes });
+            dbQuery = (IQueryable<BaseItemEntity>)_applyParentFilter.Invoke(null, new object[] { dbQuery, query.ParentId });
+            return (IQueryable<BaseItemEntity>)_applyUserAccessFilter.Invoke(provider, new object[] { db, dbQuery, query });
+        }
+
+        private static IQueryable<BaseItemEntity> SearchableItems(JellyfinDbContext db)
+            => db.BaseItems.AsNoTracking().Where(e => e.Id != _placeholderId).Where(e => !e.IsVirtualItem);
+
+        /// <summary>
+        /// The first <paramref name="limit"/> ids (in Id order) of the items that carry a qualifying tag and pass
+        /// the provider's filters - what the name search's own query does for names.
+        /// </summary>
+        private static async Task<Guid[]> TagMatchedIds(
+            object provider,
+            JellyfinDbContext db,
+            SearchProviderQuery query,
+            string clean,
+            string[] excludes,
+            int limit,
+            CancellationToken ct)
+        {
+            var tagItemIds = await MatchingTagItemIds(db, clean, excludes, ct).ConfigureAwait(false);
+            if (tagItemIds == null)
+            {
+                return await BroadTagMatchedIds(provider, db, query, clean, excludes, limit, ct).ConfigureAwait(false);
+            }
+
+            if (tagItemIds.Length == 0)
+            {
+                return Array.Empty<Guid>();
+            }
+
+            // tagItemIds is already in the database's own Id order (SQLite's, not Guid.CompareTo's).
+            var pos = new Dictionary<Guid, int>(tagItemIds.Length);
+            foreach (var id in tagItemIds)
+            {
+                pos[id] = pos.Count;
+            }
+
+            return await FilterOrderedHits(provider, db, query, TagMatch(clean, excludes), tagItemIds, pos, limit, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// The provider's filters (type, media type, parent, user access, then the version exclusion) over
+        /// tag-matching ids that are already in Id order, taken from the front so the work stays proportional to
+        /// the page asked for rather than to the number of matches: the first <paramref name="limit"/> hits are
+        /// filtered, and the prefix doubles only if filters (or the version exclusion) ate too many.
+        /// ExcludeVersionsOfMatchedPrimaries stays exact: it runs over the prefix plus the primary versions of
+        /// its items, so a hit is dropped exactly when its primary also qualifies. <paramref name="pos"/> gives
+        /// each id's place in the walk; an id beyond the prefix (a primary pulled in for that check) sorts after
+        /// every id inside it, so removing it afterwards can only remove what would not have been in the first
+        /// <paramref name="limit"/> anyway.
+        /// </summary>
+        private static async Task<Guid[]> FilterOrderedHits(
+            object provider,
+            JellyfinDbContext db,
+            SearchProviderQuery query,
+            Expression<Func<ItemValueMap, bool>> tag,
+            IReadOnlyList<Guid> hits,
+            Dictionary<Guid, int> pos,
+            int limit,
+            CancellationToken ct)
+        {
+            var result = Array.Empty<Guid>();
+            var take = limit;
+            while (hits.Count > 0)
+            {
+                var prefix = hits.Take(take).ToArray();
+                var bound = pos[prefix[prefix.Length - 1]];
+                var primaries = await db.BaseItems
+                    .AsNoTracking()
+                    .Where(e => EF.Parameter(prefix).Contains(e.Id) && e.PrimaryVersionId != null)
+                    .Select(e => e.PrimaryVersionId.Value)
+                    .Distinct()
+                    .ToListAsync(ct)
+                    .ConfigureAwait(false);
+                var scope = prefix.Concat(primaries).Distinct().ToArray();
+                var scoped = ApplyProviderFilters(
+                    provider,
+                    db,
+                    query,
+                    SearchableItems(db).Where(e => EF.Parameter(scope).Contains(e.Id)).Where(e => e.ItemValues!.AsQueryable().Any(tag)));
+                scoped = (IQueryable<BaseItemEntity>)_excludeVersions.Invoke(null, new object[] { scoped });
+                result = (await scoped
+                        .OrderBy(e => e.Id)
+                        .Select(e => e.Id)
+                        .Take(limit)
+                        .ToArrayAsync(ct)
+                        .ConfigureAwait(false))
+                    .Where(id => pos.TryGetValue(id, out var p) && p <= bound)
+                    .ToArray();
+                if (result.Length >= limit || take >= hits.Count)
+                {
+                    break;
+                }
+
+                take *= 2;
+            }
+
+            return result;
+        }
+
+        // Items examined per round by BroadTagMatchedIds.
+        private const int BroadChunk = 2000;
+
+        /// <summary>
+        /// The same answer as the one-query form (<c>tag EXISTS</c> + filters + ExcludeVersions, ORDER BY Id,
+        /// LIMIT), for terms matching too many tags to enumerate. SQLite plans that one query either as a
+        /// primary-key walk that stops after <paramref name="limit"/> rows (when only the access filter applies) or,
+        /// as soon as a type filter offers an index, as a scan of every filtered item with a map probe each
+        /// followed by a sort - the full cost even though only the first rows are wanted. Here BaseItems is walked
+        /// in Id order in chunks of ids (primary-key index only), the ItemValuesMap (by its ItemId index) says
+        /// which of each chunk carry a qualifying tag, and <see cref="FilterOrderedHits"/> runs the provider's
+        /// filters on those hits until enough have passed.
+        /// </summary>
+        private static async Task<Guid[]> BroadTagMatchedIds(
+            object provider,
+            JellyfinDbContext db,
+            SearchProviderQuery query,
+            string clean,
+            string[] excludes,
+            int limit,
+            CancellationToken ct)
+        {
+            var tag = TagMatch(clean, excludes);
+            var tagValues = MatchingTagValueIds(db, clean, excludes);
+            var hits = new List<Guid>();
+            var pos = new Dictionary<Guid, int>(); // Id -> its place in the walk
+            var result = Array.Empty<Guid>();
+            for (var start = 0; ; start += BroadChunk)
+            {
+                var skip = start;
+                var chunk = await db.BaseItems
+                    .AsNoTracking()
+                    .OrderBy(e => e.Id)
+                    .Select(e => e.Id)
+                    .Skip(skip)
+                    .Take(BroadChunk)
+                    .ToArrayAsync(ct)
+                    .ConfigureAwait(false);
+                if (chunk.Length == 0)
+                {
+                    return result;
+                }
+
+                // The matching tag values are an uncorrelated subquery, so SQLite builds that set once per round and
+                // each of the chunk's map rows is a lookup in it (no ItemValues probe and LIKE per row).
+                var found = (await db.ItemValuesMap
+                        .AsNoTracking()
+                        .Where(m => EF.Parameter(chunk).Contains(m.ItemId) && tagValues.Contains(m.ItemValueId))
+                        .Select(m => m.ItemId)
+                        .Distinct()
+                        .ToListAsync(ct)
+                        .ConfigureAwait(false))
+                    .ToHashSet();
+                foreach (var id in chunk)
+                {
+                    pos[id] = pos.Count;
+                }
+
+                hits.AddRange(chunk.Where(found.Contains)); // chunk (SQL Id) order, not Guid order
+
+                var last = chunk.Length < BroadChunk;
+                if (hits.Count < limit && !last)
+                {
+                    continue;
+                }
+
+                result = await FilterOrderedHits(provider, db, query, tag, hits, pos, limit, ct).ConfigureAwait(false);
+                if (result.Length >= limit || last)
+                {
+                    return result;
+                }
+            }
         }
 
         private static async Task<IReadOnlyList<SearchResult>> WithTagMatches(
@@ -330,30 +549,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 var dbContext = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
                 await using (dbContext.ConfigureAwait(false))
                 {
-                    // Two steps instead of one correlated EXISTS per BaseItems row: first the (few thousand at
-                    // most) tag VALUES that match, from ItemValues alone; then the items that carry one of
-                    // them, found through the ItemValuesMap index. Same predicate, same result.
-                    var tagValueIds = await MatchingTagValues(dbContext, clean, excludes, cancellationToken).ConfigureAwait(false);
-                    IQueryable<BaseItemEntity> dbQuery = dbContext.BaseItems
-                        .AsNoTracking()
-                        .Where(e => e.Id != _placeholderId)
-                        .Where(e => !e.IsVirtualItem);
-                    dbQuery = tagValueIds != null
-                        ? dbQuery.Where(e => e.ItemValues!.Any(m => tagValueIds.Contains(m.ItemValueId)))
-                        : dbQuery.Where(e => e.ItemValues!.AsQueryable().Any(TagMatch(clean, excludes)));
-
-                    dbQuery = (IQueryable<BaseItemEntity>)_applyTypeFilter.Invoke(provider, new object[] { dbQuery, query.IncludeItemTypes, query.ExcludeItemTypes });
-                    dbQuery = (IQueryable<BaseItemEntity>)_applyMediaTypeFilter.Invoke(null, new object[] { dbQuery, query.MediaTypes });
-                    dbQuery = (IQueryable<BaseItemEntity>)_applyParentFilter.Invoke(null, new object[] { dbQuery, query.ParentId });
-                    dbQuery = (IQueryable<BaseItemEntity>)_applyUserAccessFilter.Invoke(provider, new object[] { dbContext, dbQuery, query });
-                    dbQuery = (IQueryable<BaseItemEntity>)_excludeVersions.Invoke(null, new object[] { dbQuery });
-
-                    tagIds = await dbQuery
-                        .OrderBy(e => e.Id)
-                        .Select(e => e.Id)
-                        .Take(limit)
-                        .ToArrayAsync(cancellationToken)
-                        .ConfigureAwait(false);
+                    tagIds = await TagMatchedIds(provider, dbContext, query, clean, excludes, limit, cancellationToken).ConfigureAwait(false);
 
                     // The stock name matches are excluded by any tag containing an exclude term.
                     // They were already access-filtered by the stock query, so only the tag test
@@ -362,7 +558,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     {
                         var nameIds = nameResults.Select(r => r.ItemId).ToArray();
                         var keep = (await WithoutAnyExcludedTag(
-                                dbContext.BaseItems.AsNoTracking().Where(e => nameIds.Contains(e.Id)),
+                                dbContext.BaseItems.AsNoTracking().Where(e => EF.Parameter(nameIds).Contains(e.Id)),
                                 excludes)
                             .Select(e => e.Id)
                             .ToArrayAsync(cancellationToken)
