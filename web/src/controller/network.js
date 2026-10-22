@@ -4,12 +4,14 @@ import { effective, anyEnhancement } from '../model/effective.js';
 import { resetUpscaleForNewSource } from './playback-hooks.js';
 import { markSearchUrl } from './search-exclude.js';
 import { markSearchFilters } from './search-filters.js';
+import { markSearchPaging, watchPagedXhr, watchPagedFetch } from './search-pager.js';
 import { log } from '../lib/log.js';
 
-/* The search page's own markings, in order: the exclude box, then Sort & filter. Both leave any
- * url that is not a search request exactly as it came. */
+/* The search page's own markings, in order: the exclude box, Sort & filter, then paging (last, so
+ * it can see which queries the filters cut down to a discarded one-item request). All of them
+ * leave any url that is not a search request exactly as it came. */
 function markSearch(url) {
-    return markSearchFilters(markSearchUrl(url));
+    return markSearchPaging(markSearchFilters(markSearchUrl(url)));
 }
 
 /*
@@ -450,6 +452,7 @@ export function hookFetch() {
         }
 
         var promise = originalFetch.apply(this, args);
+        watchPagedFetch(url, promise);
         if (!url || !IS_PLAYBACK_INFO.test(url)) {
             return promise;
         }
@@ -516,6 +519,7 @@ export function hookXhr() {
                 this.__jellyfinPlusUrl = searchUrl;
                 var searchArgs = Array.prototype.slice.call(arguments);
                 searchArgs[1] = searchUrl;
+                watchPagedXhr(this, searchUrl);
                 return originalOpen.apply(this, searchArgs);
             }
 
