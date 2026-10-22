@@ -7,6 +7,7 @@ import {
     onFiltersChanged,
     searchParentId,
     fetchTags,
+    fetchPeopleFacets,
     refreshIfActive
 } from '../controller/search-filters.js';
 import {
@@ -21,7 +22,10 @@ import {
     sortInfo,
     chipsOf,
     activeGroups,
-    removeChip
+    removeChip,
+    facetRows,
+    facetText,
+    offeredRoles
 } from '../model/search-filters.js';
 
 /*
@@ -461,7 +465,8 @@ function openSheet(opener) {
     }
 
     /* ---- people and studios ---- */
-    function entityPicker(kind, title, key) {
+    function entityPicker(kind, title, key, useFacets) {
+        var facet = useFacets ? { all: null } : null;
         var sec = disclosure(title, function () { return draft[key].length; });
         var chips = el('div', 'jfp-chips');
         chips.style.marginBottom = '0.5em';
@@ -475,7 +480,7 @@ function openSheet(opener) {
         });
         var input = el('input', 'jfp-input');
         input.type = 'search';
-        input.placeholder = kind === 'studio' ? 'Search studios' : 'Search cast & crew';
+        input.placeholder = kind === 'studio' ? 'Search studios' : (facet ? 'Filter cast & crew in these results' : 'Search cast & crew');
         input.autocomplete = 'off';
         input.setAttribute('aria-label', input.placeholder);
         stopKeys(input);
@@ -496,28 +501,76 @@ function openSheet(opener) {
 
         var token = 0;
         var loaded = false;
+        var addRow = function (id, name, text) {
+            var box = el('input');
+            box.type = 'checkbox';
+            box.value = id;
+            box.setAttribute('data-name', name);
+            box.checked = draft[key].some(function (v) { return v.id === id; });
+            var row = el('label', 'jfp-row');
+            row.appendChild(box);
+            row.appendChild(el('span', null, text));
+            list.appendChild(row);
+        };
+        var showEntities = function (items) {
+            list.textContent = '';
+            setText(status, items.length ? '' : 'Nothing found.');
+            items.forEach(function (it) { addRow(it.Id, it.Name, it.Name); });
+        };
+
+        /*
+         * The facet checklist: only people credited on the CURRENT search's results (the committed
+         * term and filters), "Name · count". People already picked stay listed even if they fell out.
+         */
+        var showFacets = function (res, needle) {
+            list.textContent = '';
+            if (!res) {
+                facet.all = null;
+                setText(status, 'Search first to see who appears in the results.');
+            } else {
+                if (!needle) {
+                    facet.all = res.list;
+                }
+
+                setText(status, '');
+            }
+
+            var rows = facetRows(res ? res.list : [], draft[key], needle);
+            rows.forEach(function (r) { addRow(r.id, r.name, facetText(r)); });
+            if (res && !rows.length) {
+                setText(status, needle ? 'Nobody in these results matches.' : 'No cast or crew are listed for these results.');
+            }
+
+            refreshAll();
+        };
+
         var run = function () {
             var mine = ++token;
             loaded = true;
             setText(status, 'Searching...');
-            searchEntities(kind, { parentId: searchParentId(), itemType: [] }, input.value.trim()).then(function (items) {
-                if (mine !== token) {
-                    return;
-                }
-
-                list.textContent = '';
-                setText(status, items.length ? '' : 'Nothing found.');
-                items.forEach(function (it) {
-                    var box = el('input');
-                    box.type = 'checkbox';
-                    box.value = it.Id;
-                    box.setAttribute('data-name', it.Name);
-                    box.checked = draft[key].some(function (v) { return v.id === it.Id; });
-                    var row = el('label', 'jfp-row');
-                    row.appendChild(box);
-                    row.appendChild(el('span', null, it.Name));
-                    list.appendChild(row);
+            if (facet) {
+                var needle = input.value.trim();
+                fetchPeopleFacets(needle).then(function (res) {
+                    if (mine === token) {
+                        showFacets(res, needle);
+                    }
+                }, function (err) {
+                    // An older server without the facets route: fall back to the global people search.
+                    log('search filters: facets unavailable, using the global people search', err);
+                    searchEntities(kind, { parentId: searchParentId(), itemType: [] }, needle).then(function (items) {
+                        if (mine === token) {
+                            showEntities(items);
+                            setText(status, 'Showing everyone in the library (the results list is unavailable).');
+                        }
+                    });
                 });
+                return;
+            }
+
+            searchEntities(kind, { parentId: searchParentId(), itemType: [] }, input.value.trim()).then(function (items) {
+                if (mine === token) {
+                    showEntities(items);
+                }
             });
         };
         input.addEventListener('input', debounce(run, 250));
@@ -543,11 +596,11 @@ function openSheet(opener) {
             sec.open = true;
         }
 
-        return { sec: sec, input: input };
+        return { sec: sec, input: input, facet: facet };
     }
 
     /* ---- cast & crew: people + role + any/all ---- */
-    var cast = entityPicker('person', 'Cast & Crew', 'people');
+    var cast = entityPicker('person', 'Cast & Crew', 'people', true);
     var castExtras = el('div', 'jfp-sub');
     var matchBox = el('div', 'jfp-pills');
     var matchBtns = [['Any of', false], ['All of', true]].map(function (m) {
@@ -596,7 +649,12 @@ function openSheet(opener) {
         setPressed(matchBtns[0], !draft.peopleAll);
         setPressed(matchBtns[1], draft.peopleAll);
         setPressed(anyRole, draft.roles.length === 0);
-        ROLES.forEach(function (r, i) { setPressed(roleBtns[i], draft.roles.indexOf(r.value) !== -1); });
+        // Only the roles that occur among the people listed for these results (and any already chosen).
+        var offered = offeredRoles(cast.facet.all, draft.roles);
+        ROLES.forEach(function (r, i) {
+            roleBtns[i].hidden = offered.indexOf(r.value) === -1;
+            setPressed(roleBtns[i], draft.roles.indexOf(r.value) !== -1);
+        });
     });
     entityPicker('studio', 'Studio', 'studios');
 

@@ -136,7 +136,11 @@ namespace Jellyfin.Plugin.Plus.Patcher
         private static HttpRequest ItemsRequest()
         {
             var request = _http.HttpContext?.Request;
-            if (request == null || !request.Path.HasValue || !request.Path.Value.EndsWith("/Items", StringComparison.OrdinalIgnoreCase))
+            if (request == null || !request.Path.HasValue
+                || !(request.Path.Value.EndsWith("/Items", StringComparison.OrdinalIgnoreCase)
+                    // The search page's facet lists (SearchFacetsController) are computed over the same
+                    // filtered result set, so the same narrowing filters must apply to them.
+                    || request.Path.Value.EndsWith("/Search/Facets", StringComparison.OrdinalIgnoreCase)))
             {
                 return null;
             }

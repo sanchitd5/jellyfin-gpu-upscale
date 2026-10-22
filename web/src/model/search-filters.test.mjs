@@ -1,7 +1,8 @@
 // Run: node web/src/model/search-filters.test.mjs   (no framework; exits non-zero on failure)
 import assert from 'node:assert/strict';
 import {
-    defaultState, normalizeState, rewriteSearchUrl, chipsOf, activeGroups, removeChip, filterPairs
+    defaultState, normalizeState, rewriteSearchUrl, chipsOf, activeGroups, removeChip, filterPairs,
+    facetPairs, facetKey, filterFacets, facetRows, facetText, offeredRoles, normalizeFacet
 } from './search-filters.js';
 
 var passed = 0;
@@ -262,6 +263,91 @@ t('garbage state normalises to defaults', function () {
     assert.deepEqual(normalizeState('x'), defaultState());
     assert.deepEqual(normalizeState({ sort: 'Bogus', played: 5, res: 'hd', tags: 'x', type: '<script>' }), defaultState());
     assert.deepEqual(filterPairs(defaultState(), NOW), []);
+});
+
+/* ---- Cast & Crew facets ---- */
+
+function obj(pairs) {
+    var o = {};
+    pairs.forEach(function (kv) { o[kv[0]] = kv[1]; });
+    return o;
+}
+
+t('facetPairs: term only', function () {
+    assert.deepEqual(facetPairs(defaultState(), 'cat', '', '', NOW), [['searchTerm', 'cat']]);
+});
+
+t('facetPairs: carries the filters but not the cast filter, sort or seed', function () {
+    var s = st({
+        sort: 'Random', seed: 5, played: 'unplayed', favorites: true, tags: ['a', 'b'], tagAll: true, studios: [{ id: G2, name: 'S' }],
+        people: [{ id: G1, name: 'P' }], roles: ['Actor'], peopleAll: true, minRuntime: 5, res: ['hd'], type: 'movies'
+    });
+    var o = obj(facetPairs(s, 'cat', G2, 'red, blue ', NOW));
+    assert.deepEqual(o, {
+        searchTerm: 'cat', parentId: G2, includeItemTypes: 'Movie', isPlayed: 'false', isFavorite: 'true', tags: 'a|b',
+        tagMatch: 'all', studioIds: G2, jpMinRuntime: '5', jpResolution: 'hd', excludeTags: 'red, blue'
+    });
+    ['sortBy', 'jpSeed', 'personIds', 'personTypes', 'jpPersonMatch'].forEach(function (k) {
+        assert.equal(o[k], undefined, k);
+    });
+});
+
+t('facetPairs: type mapping', function () {
+    assert.equal(obj(facetPairs(st({ type: 'videos' }), 'x', '', '', NOW)).includeItemTypes, 'Video');
+    assert.equal(obj(facetPairs(st({ type: 'episodes' }), 'x', '', '', NOW)).includeItemTypes, 'Episode');
+    assert.equal(obj(facetPairs(st({ type: 'all' }), 'x', '', '', NOW)).includeItemTypes, undefined);
+});
+
+t('facetKey: changes with the term, a filter or q, and with nothing else', function () {
+    var a = facetKey(facetPairs(defaultState(), 'cat', '', '', NOW), '');
+    assert.equal(a, facetKey(facetPairs(defaultState(), 'cat', '', '', NOW), ''));
+    assert.notEqual(a, facetKey(facetPairs(defaultState(), 'dog', '', '', NOW), ''));
+    assert.notEqual(a, facetKey(facetPairs(st({ favorites: true }), 'cat', '', '', NOW), ''));
+    assert.notEqual(a, facetKey(facetPairs(defaultState(), 'cat', '', '', NOW), 'al'));
+    // Picking people or changing the sort does not change who appears.
+    assert.equal(a, facetKey(facetPairs(st({ people: [{ id: G1, name: 'P' }], sort: 'Runtime' }), 'cat', '', '', NOW), ''));
+});
+
+var LIST = [
+    { id: G1, name: 'Alice Ames', roles: ['Actor', 'Director'], count: 12 },
+    { id: G2, name: 'Bob Bell', roles: ['Writer'], count: 3 }
+];
+var G3 = '33333333-3333-3333-3333-333333333333';
+
+t('filterFacets: case-insensitive substring, empty keeps all', function () {
+    assert.deepEqual(filterFacets(LIST, 'BELL').map(function (f) { return f.name; }), ['Bob Bell']);
+    assert.equal(filterFacets(LIST, '  ').length, 2);
+    assert.equal(filterFacets(LIST, 'zzz').length, 0);
+});
+
+t('facetRows: picked people missing from the list stay, first, with no count', function () {
+    var rows = facetRows(LIST, [{ id: G3, name: 'Carol Cole' }, { id: G2, name: 'Bob Bell' }], '');
+    assert.deepEqual(rows.map(function (r) { return [r.name, r.count, r.picked]; }), [
+        ['Carol Cole', null, true], ['Alice Ames', 12, false], ['Bob Bell', 3, true]
+    ]);
+    // A needle narrows the picked extras too.
+    assert.deepEqual(facetRows(LIST, [{ id: G3, name: 'Carol Cole' }], 'alice').map(function (r) { return r.name; }), ['Alice Ames']);
+});
+
+t('facetText', function () {
+    assert.equal(facetText({ name: 'Alice', count: 12 }), 'Alice · 12');
+    assert.equal(facetText({ name: 'Carol', count: null }), 'Carol');
+});
+
+t('offeredRoles: only roles that occur, plus selected ones, in ROLES order; all when unknown', function () {
+    assert.deepEqual(offeredRoles(LIST, []), ['Actor', 'Director', 'Writer']);
+    assert.deepEqual(offeredRoles(LIST, ['Composer']), ['Actor', 'Director', 'Writer', 'Composer']);
+    assert.equal(offeredRoles(null, []).length, 10);
+    assert.deepEqual(offeredRoles([], []), []);
+});
+
+t('normalizeFacet: both casings, junk dropped', function () {
+    assert.deepEqual(normalizeFacet({ id: G1, name: 'A', roles: ['Actor'], count: 2 }), { id: G1, name: 'A', roles: ['Actor'], count: 2 });
+    assert.deepEqual(normalizeFacet({ Id: G1, Name: 'A', Roles: ['Actor', 5], Count: 2 }), { id: G1, name: 'A', roles: ['Actor'], count: 2 });
+    assert.equal(normalizeFacet({ id: 'nope', name: 'A' }), null);
+    assert.equal(normalizeFacet({ id: G1, name: '' }), null);
+    assert.equal(normalizeFacet(null), null);
+    assert.equal(normalizeFacet({ id: G1, name: 'A' }).count, 0);
 });
 
 console.log(passed + ' passed');

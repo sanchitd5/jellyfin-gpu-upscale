@@ -38,6 +38,19 @@
       <HintPath>$(JellyfinBin)/Jellyfin.Data.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- SearchFacetsController: the credits aggregate runs on the server's own DbContext. -->
+    <Reference Include="Jellyfin.Database.Implementations">
+      <HintPath>$(JellyfinBin)/Jellyfin.Database.Implementations.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.EntityFrameworkCore">
+      <HintPath>$(JellyfinBin)/Microsoft.EntityFrameworkCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.EntityFrameworkCore.Abstractions">
+      <HintPath>$(JellyfinBin)/Microsoft.EntityFrameworkCore.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>
