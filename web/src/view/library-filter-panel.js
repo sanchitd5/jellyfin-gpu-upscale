@@ -266,7 +266,7 @@ function syncTagsRegion(region, ctx) {
 
     var status = '';
     if (windowed) {
-        status = 'Showing ' + list.shown + ' of ' + list.full.length + ' tags'
+        status = 'Showing ' + list.shown + ' of ' + list.total + ' tags'
             + (q ? ' (' + list.matches + ' match)' : ' - type to search the rest');
     } else if (q) {
         status = visible + ' of ' + total + ' tags match';

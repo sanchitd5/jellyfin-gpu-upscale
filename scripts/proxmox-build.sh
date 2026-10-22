@@ -239,7 +239,7 @@ if [ ! -d "$PLUGIN_DIR" ]; then
   "version": "$PLUGIN_VERSION",
   "targetAbi": "12.1.0.0",
   "owner": "",
-  "overview": "Search fixes, library filters and other quality-of-life patches, plus realtime GPU super-resolution upscaling",
+  "overview": "GPU video enhancement plus search, filtering and library quality-of-life improvements for Jellyfin.",
   "category": "General"
 }
 META

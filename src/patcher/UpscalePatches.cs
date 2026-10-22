@@ -224,6 +224,45 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 logger?.LogWarning(ex, "JellyfinPlus: the search sort patch could not be installed. Stock search order is unaffected.");
             }
 
+            // Deep search paging: a paged /Items search loads only the page's entities, not the whole
+            // candidate pool. Stock path on any doubt. Own try/catch.
+            try
+            {
+                SearchDeepPagePatches.Apply(harmony, logger);
+                if (SearchDeepPagePatches.Available)
+                {
+                    applied.Add("deep search paging");
+                }
+                else
+                {
+                    failed.Add("deep search paging (every candidate is loaded, as stock does)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("deep search paging (every candidate is loaded, as stock does)");
+                logger?.LogWarning(ex, "JellyfinPlus: the deep search paging patch could not be installed. Stock search loading is unaffected.");
+            }
+
+            // Server-Timing header on /Items?searchTerm= (stage durations). Own try/catch.
+            try
+            {
+                ServerTimingPatches.Apply(harmony, logger);
+                if (ServerTimingPatches.Available)
+                {
+                    applied.Add("search Server-Timing");
+                }
+                else
+                {
+                    failed.Add("search Server-Timing (no header)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("search Server-Timing (no header)");
+                logger?.LogWarning(ex, "JellyfinPlus: the search Server-Timing patch could not be installed. Search is unaffected.");
+            }
+
             // Library tag filters: BaseItemRepository.TranslateQuery honours excludeTagNames /
             // tagMatch=all on /Items. Only ever narrows a listing. Own try/catch.
             try

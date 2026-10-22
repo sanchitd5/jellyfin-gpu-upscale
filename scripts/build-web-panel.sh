@@ -37,15 +37,23 @@ if [ ! -d "$WEB_DIR/node_modules/esbuild" ]; then
     exit 1
 fi
 
+# Minified by default (the banner comment survives: esbuild keeps --banner verbatim). JP_NO_MINIFY=1
+# builds the readable bundle for debugging.
+MINIFY=--minify
+if [ "${JP_NO_MINIFY:-}" = "1" ]; then
+    MINIFY=
+fi
+
 (
     cd "$WEB_DIR"
     ./node_modules/.bin/esbuild src/bootstrap.js \
         --bundle \
         --format=iife \
         --target=es2018 \
+        $MINIFY \
         --banner:js="$(cat src/banner.txt)" \
         --outfile=jellyfin-plus.js.tmp
 )
 
 mv "$OUT.tmp" "$OUT"
-echo "build-web-panel: wrote $OUT from $ENTRY (esbuild, bundled)"
+echo "build-web-panel: wrote $OUT from $ENTRY (esbuild, bundled${MINIFY:+, minified})"

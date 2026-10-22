@@ -250,8 +250,7 @@ import sys
 
 src, dst, version, guid = sys.argv[1:5]
 OLD_OVERVIEW = "Realtime GPU super-resolution upscaling"
-NEW_OVERVIEW = ("Search fixes, library filters and other quality-of-life patches, "
-                "plus realtime GPU super-resolution upscaling")
+NEW_OVERVIEW = "GPU video enhancement plus search, filtering and library quality-of-life improvements for Jellyfin."
 
 def fix(v):
     if isinstance(v, str):

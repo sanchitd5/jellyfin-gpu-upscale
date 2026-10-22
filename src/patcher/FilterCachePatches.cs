@@ -8,10 +8,12 @@ using System.Reflection;
 using HarmonyLib;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Plus.Patcher
@@ -90,6 +92,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
         public static void Apply(Harmony harmony, ILogger logger)
         {
             _logger = logger;
+            ApplyTagWindow(harmony, logger);
             var repository = AccessTools.TypeByName("Jellyfin.Server.Implementations.Item.BaseItemRepository");
             var legacy = repository == null ? null : AccessTools.Method(repository, "GetQueryFiltersLegacy", new[] { typeof(InternalItemsQuery) });
             var tags = repository == null ? null : AccessTools.Method(repository, "GetTagNames", new[] { typeof(InternalItemsQuery) });
@@ -109,6 +112,131 @@ namespace Jellyfin.Plugin.Plus.Patcher
             harmony.Patch(genres, prefix: new HarmonyMethod(typeof(FilterCachePatches).GetMethod(nameof(GenresPrefix), f)));
             Available = true;
             logger?.LogInformation("JellyfinPlus: patched BaseItemRepository.GetQueryFiltersLegacy / GetTagNames / GetGenres (/Items/Filters served from the filter key cache when safe)");
+        }
+
+        // ---------------------------------------------------------------- the tag window (jpTagLimit / jpTagQuery)
+
+        /// <summary>Response header carrying how many tags matched jpTagQuery (all of them, before jpTagLimit).</summary>
+        internal const string TagTotalHeader = "X-JellyfinPlus-TagTotal";
+
+        private const int MaxTagLimit = 5000;
+
+        /// <summary>
+        /// Postfix on the two FilterController actions, so it covers the cache-served AND the stock path alike
+        /// (both end in the same Tags array). With neither query parameter nothing changes, byte for byte.
+        /// The count rides in a header, not the JSON: the action's declared type is QueryFilters(Legacy), and
+        /// a subclass with an extra property would not be serialised by System.Text.Json (it uses the declared type).
+        /// </summary>
+        private static void ApplyTagWindow(Harmony harmony, ILogger logger)
+        {
+            try
+            {
+                var controller = AccessTools.TypeByName("Jellyfin.Api.Controllers.FilterController");
+                var legacy = controller == null ? null : AccessTools.Method(controller, "GetQueryFiltersLegacy");
+                var v2 = controller == null ? null : AccessTools.Method(controller, "GetQueryFilters");
+                if (legacy == null || v2 == null)
+                {
+                    logger?.LogWarning("JellyfinPlus: could not resolve FilterController actions; jpTagLimit/jpTagQuery are unavailable (the full tag list is served).");
+                    return;
+                }
+
+                const BindingFlags f = BindingFlags.Static | BindingFlags.NonPublic;
+                harmony.Patch(legacy, postfix: new HarmonyMethod(typeof(FilterCachePatches).GetMethod(nameof(LegacyWindowPostfix), f)));
+                harmony.Patch(v2, postfix: new HarmonyMethod(typeof(FilterCachePatches).GetMethod(nameof(FiltersWindowPostfix), f)));
+                logger?.LogInformation("JellyfinPlus: patched FilterController (jpTagLimit / jpTagQuery tag window on /Items/Filters and /Items/Filters2)");
+            }
+            catch (Exception ex)
+            {
+                logger?.LogWarning(ex, "JellyfinPlus: the tag window patch could not be installed; the full tag list is served.");
+            }
+        }
+
+        private static void LegacyWindowPostfix(ref ActionResult<QueryFiltersLegacy> __result)
+        {
+            try
+            {
+                var v = __result.Value;
+                if (v?.Tags != null && TryWindow(v.Tags, out var windowed))
+                {
+                    v.Tags = windowed;
+                }
+            }
+            catch (Exception ex)
+            {
+                Warn(ex);
+            }
+        }
+
+        private static void FiltersWindowPostfix(ref ActionResult<QueryFilters> __result)
+        {
+            try
+            {
+                var v = __result.Value;
+                if (v?.Tags != null && TryWindow(v.Tags, out var windowed))
+                {
+                    v.Tags = windowed;
+                }
+            }
+            catch (Exception ex)
+            {
+                Warn(ex);
+            }
+        }
+
+        /// <summary>
+        /// Applies jpTagQuery (case/diacritic-insensitive substring, same GetCleanValue as the stored clean
+        /// values) then jpTagLimit to a sorted tag list, and sets the total header. False when neither parameter
+        /// was given or they are unusable (the list is then left exactly as it was).
+        /// </summary>
+        internal static bool TryWindow(IReadOnlyList<string> tags, out string[] windowed)
+        {
+            windowed = null;
+            var http = _http.HttpContext;
+            var query = http?.Request?.Query;
+            if (query == null)
+            {
+                return false;
+            }
+
+            var hasLimit = int.TryParse(query["jpTagLimit"].ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var limit) && limit > 0;
+            var needle = query["jpTagQuery"].ToString();
+            var clean = string.IsNullOrWhiteSpace(needle) ? null : needle.GetCleanValue();
+            if (!hasLimit && clean == null)
+            {
+                return false;
+            }
+
+            limit = hasLimit ? Math.Min(limit, MaxTagLimit) : int.MaxValue;
+            windowed = Window(tags, clean, limit, out var total);
+            if (!http.Response.HasStarted)
+            {
+                http.Response.Headers[TagTotalHeader] = total.ToString(CultureInfo.InvariantCulture);
+            }
+
+            return true;
+        }
+
+        /// <summary>The first <paramref name="limit"/> tags whose clean value contains <paramref name="cleanNeedle"/> (all when null), in list order; <paramref name="total"/> counts every match.</summary>
+        internal static string[] Window(IReadOnlyList<string> tags, string cleanNeedle, int limit, out int total)
+        {
+            var result = new List<string>(Math.Min(limit, tags.Count));
+            total = 0;
+            for (var i = 0; i < tags.Count; i++)
+            {
+                var t = tags[i];
+                if (cleanNeedle != null && (t == null || t.GetCleanValue().IndexOf(cleanNeedle, StringComparison.Ordinal) < 0))
+                {
+                    continue;
+                }
+
+                total++;
+                if (result.Count < limit)
+                {
+                    result.Add(t);
+                }
+            }
+
+            return result.ToArray();
         }
 
         // ---------------------------------------------------------------- the three prefixes

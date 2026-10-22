@@ -11,6 +11,7 @@ import {
     normalizeFacet
 } from '../model/search-filters.js';
 import { refetchSearch, excludeText } from './search-exclude.js';
+import { fetchTagWindow } from './tag-window.js';
 
 /*
  * THE SEARCH PAGE'S SORT & FILTER, DATA SIDE (view/search-filter-sheet.js is the DOM side).
@@ -113,34 +114,28 @@ export function refreshIfActive() {
 
 var tagCache = {};
 var TAG_TTL = 5 * 60 * 1000;
+var TAG_CACHE_MAX = 60;
 
-/* Promise of the sorted tag names for a library ('' = everything the user can see). */
-export function fetchTags(parentId) {
-    var hit = tagCache[parentId];
+/*
+ * Promise of { tags, total } - the first `limit` tag names of a library ('' = everything the user can
+ * see) containing `query`, and how many matched in all. The server does the narrowing (jpTagQuery /
+ * jpTagLimit on /Items/Filters, see controller/tag-window.js), so the picker never downloads the whole
+ * list. One entry per (library, query, limit) for TAG_TTL.
+ */
+export function fetchTags(parentId, query, limit) {
+    var key = parentId + '|' + (query || '').trim().toLowerCase() + '|' + limit;
+    var hit = tagCache[key];
     if (hit && Date.now() - hit.at < TAG_TTL) {
-        return Promise.resolve(hit.tags);
+        return Promise.resolve(hit.value);
     }
 
-    var client = window.ApiClient;
-    if (!client || typeof client.getUrl !== 'function' || typeof client.ajax !== 'function') {
-        return Promise.reject(new Error('no ApiClient'));
-    }
+    return fetchTagWindow({ parentId: parentId, query: query, limit: limit }).then(function (w) {
+        if (Object.keys(tagCache).length >= TAG_CACHE_MAX) {
+            tagCache = {};
+        }
 
-    var params = { userId: client.getCurrentUserId() };
-    if (parentId) {
-        params.parentId = parentId;
-    }
-
-    return client.ajax({
-        type: 'GET',
-        url: client.getUrl('Items/Filters', params),
-        dataType: 'json'
-    }).then(function (res) {
-        var tags = ((res && res.Tags) || []).filter(function (t) { return typeof t === 'string' && t; });
-        tags.sort(function (a, b) { return a.localeCompare(b, undefined, { sensitivity: 'base' }); });
-        tagCache[parentId] = { at: Date.now(), tags: tags };
-        log('search filters: ' + tags.length + ' tags loaded');
-        return tags;
+        tagCache[key] = { at: Date.now(), value: w };
+        return w;
     });
 }
 

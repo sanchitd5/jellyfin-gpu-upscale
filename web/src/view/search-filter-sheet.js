@@ -386,58 +386,60 @@ function openSheet(opener) {
         });
     });
 
-    var allTags = null;
-    var allNorm = null;
-    var tagsLoading = false;
+    // The picker holds one window of the tag list at a time: the first WINDOW_SIZE tags containing
+    // the typed text, asked of the server on every change (fetchTags), never the whole list.
+    var tagRows = null; // { tags, total } for `tagQuery`
+    var tagQuery = '';
+    var tagSeq = 0;
     var renderTags = function () {
-        if (!allTags) {
+        if (!tagRows) {
             return;
         }
 
-        var q = normalize(tagInput.value).trim();
+        var q = tagQuery;
         tagList.textContent = '';
-        var shown = 0;
-        var matches = 0;
-        for (var i = 0; i < allTags.length; i++) {
-            if (q && allNorm[i].indexOf(q) === -1) {
-                continue;
-            }
+        tagRows.tags.forEach(function (name) {
+            var box = el('input');
+            box.type = 'checkbox';
+            box.value = name;
+            box.checked = draft.tags.indexOf(name) !== -1;
+            var row = el('label', 'jfp-row');
+            row.appendChild(box);
+            row.appendChild(el('span', null, name));
+            tagList.appendChild(row);
+        });
 
-            matches++;
-            if (shown < WINDOW_SIZE) {
-                shown++;
-                var box = el('input');
-                box.type = 'checkbox';
-                box.value = allTags[i];
-                box.checked = draft.tags.indexOf(allTags[i]) !== -1;
-                var row = el('label', 'jfp-row');
-                row.appendChild(box);
-                row.appendChild(el('span', null, allTags[i]));
-                tagList.appendChild(row);
-            }
-        }
-
-        setText(tagStatus, !allTags.length ? 'No tags in the library.'
+        var shown = tagRows.tags.length;
+        var matches = tagRows.total;
+        setText(tagStatus, !matches ? (q ? 'No tags match.' : 'No tags in the library.')
             : matches > shown ? 'Showing ' + shown + ' of ' + matches + (q ? ' matching' : '') + ' tags - type to narrow'
                 : matches + (q ? ' matching' : '') + ' tags');
     };
     var loadTags = function () {
-        if (allTags || tagsLoading) {
+        var query = tagInput.value.trim();
+        if (tagRows && query === tagQuery) {
             return;
         }
 
-        tagsLoading = true;
-        setText(tagStatus, 'Loading tags...');
-        fetchTags(searchParentId()).then(function (tags) {
+        var seq = ++tagSeq;
+        if (!tagRows) {
+            setText(tagStatus, 'Loading tags...');
+        }
+
+        fetchTags(searchParentId(), query, WINDOW_SIZE).then(function (w) {
+            if (seq !== tagSeq) {
+                return; // a newer keystroke is already on its way
+            }
+
             // A tag containing the wire's separator cannot be sent as an exact name.
-            allTags = tags.filter(function (t) { return t.indexOf('|') === -1; });
-            allNorm = allTags.map(normalize);
-            tagsLoading = false;
+            tagRows = { tags: w.tags.filter(function (t) { return t.indexOf('|') === -1; }), total: w.total };
+            tagQuery = query;
             renderTags();
         }, function (err) {
-            tagsLoading = false;
-            log('search filters: tag list failed', err);
-            setText(tagStatus, 'Could not load tags.');
+            if (seq === tagSeq) {
+                log('search filters: tag list failed', err);
+                setText(tagStatus, 'Could not load tags.');
+            }
         });
     };
     tagSec.addEventListener('toggle', function () {
@@ -445,7 +447,11 @@ function openSheet(opener) {
             loadTags();
         }
     });
-    tagInput.addEventListener('input', debounce(renderTags, 150));
+    tagInput.addEventListener('input', debounce(function () {
+        if (tagSec.open) {
+            loadTags();
+        }
+    }, 150));
     tagList.addEventListener('change', function (e) {
         var box = e.target;
         if (!box || box.type !== 'checkbox') {

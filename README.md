@@ -612,11 +612,11 @@ them. Installing a subset would emit ffmpeg command lines that fail outright, wh
 leaving playback unenhanced. So they stay all-or-nothing: if any core method cannot be resolved,
 none are patched, Jellyfin is left alone, and the log **names the missing methods**.
 
-Optional patches (A/B live-apply swap, tag search, search sort, library tag filters, filter key cache, video similar items, direct-play override - see ENHANCEMENTS.md) install separately, after the core set is
+Optional patches (A/B live-apply swap, tag search, search sort, deep search paging, search Server-Timing, library tag filters, filter key cache, video similar items, direct-play override - see ENHANCEMENTS.md) install separately, after the core set is
 live, each in its own try/catch. One failing degrades that feature alone:
 
 ```
-active (5 EncodingHelper methods patched); optional: A/B live-apply swap (cap 2), tag search, search sort, library tag exclude / match-all, filter key cache, video similar items, direct-play override
+active (5 EncodingHelper methods patched); optional: A/B live-apply swap (cap 2), tag search, search sort, deep search paging, search Server-Timing, library tag exclude / match-all, filter key cache, video similar items, direct-play override
 active (5 EncodingHelper methods patched); optional UNAVAILABLE: MediaInfoHelper.SetDeviceSpecificData
 ```
 

@@ -157,10 +157,270 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
             harmony.Patch(
                 target,
+                prefix: new HarmonyMethod(typeof(SearchPatches).GetMethod(nameof(SearchAsyncPrefix), BindingFlags.Static | BindingFlags.NonPublic)),
                 postfix: new HarmonyMethod(typeof(SearchPatches).GetMethod(nameof(SearchAsyncPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
 
             Available = true;
             logger?.LogInformation("JellyfinPlus: patched SqlSearchProvider.SearchAsync (search also matches tags; excludeTags honoured)");
+        }
+
+        // Mirrors SqlSearchProvider's score tiers on 12.1.
+        private const float ExactMatchScore = 100f;
+        private const float PrefixMatchScore = 80f;
+        private const float WordPrefixMatchScore = 75f;
+        private const float ContainsMatchScore = 50f;
+
+        /// <summary>
+        /// THE NAME MATCH THROUGH THE FTS INDEX. When <see cref="FtsIndexEngine"/> is usable (built, verified,
+        /// nothing pending) and the term is one a trigram index can answer, the stock query is replaced by the SAME
+        /// query with one extra condition: the id is among the index's candidates for the term. The candidates are
+        /// a superset of the stock predicate's matches (see FtsIndexEngine), and the stock predicate, the provider's
+        /// own filters, the version exclusion and the score are all kept, so the result is the stock result. The
+        /// extra condition sits directly after the name predicate, i.e. inside the set the version exclusion
+        /// compares against, which a superset leaves unchanged. Anything else (index off or stale, a short term,
+        /// a term with LIKE wildcards, too many candidates, any error) takes the unchanged stock path.
+        /// </summary>
+        private static bool SearchAsyncPrefix(
+            object __instance,
+            SearchProviderQuery query,
+            CancellationToken cancellationToken,
+            ref Task<IReadOnlyList<SearchResult>> __result)
+        {
+            try
+            {
+                if (__instance == null || query == null || string.IsNullOrWhiteSpace(query.SearchTerm))
+                {
+                    return true;
+                }
+
+                // Same normalisation the stock provider applies to the term.
+                var raw = query.SearchTerm.Trim().RemoveDiacritics();
+
+                // A wildcard term: the stock query would search the mangled literal; the postfix computes the real matches.
+                if (!string.IsNullOrEmpty(raw) && WildPattern.Parse(raw, out _) != null)
+                {
+                    __result = Task.FromResult<IReadOnlyList<SearchResult>>(Array.Empty<SearchResult>());
+                    return false;
+                }
+
+                if (!FtsIndexEngine.Usable)
+                {
+                    return true;
+                }
+
+                var clean = string.IsNullOrEmpty(raw) ? null : raw.GetCleanValue();
+                if (string.IsNullOrEmpty(clean) || !FtsIndexEngine.CanAnswer(clean, raw))
+                {
+                    return true;
+                }
+
+                __result = FtsNameSearch(__instance, query, raw, clean, cancellationToken);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "JellyfinPlus: FTS name search could not start; using the stock query.");
+                return true;
+            }
+        }
+
+        private static async Task<IReadOnlyList<SearchResult>> FtsNameSearch(
+            object provider,
+            SearchProviderQuery query,
+            string raw,
+            string clean,
+            CancellationToken ct)
+        {
+            var factory = (IDbContextFactory<JellyfinDbContext>)_dbProvider.GetValue(provider);
+            var db = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using (db.ConfigureAwait(false))
+            {
+                Guid[] candidates = null;
+                try
+                {
+                    await db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
+                    candidates = await FtsIndexEngine.NameCandidatesAsync(db.Database.GetDbConnection(), clean, raw, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "JellyfinPlus: FTS name candidates failed; using the stock query.");
+                }
+
+                FtsIndexEngine.Count(candidates == null ? "name:stock-query" : "name:fts");
+                if (candidates != null && candidates.Length == 0)
+                {
+                    return Array.Empty<SearchResult>();
+                }
+
+                try
+                {
+                    return await RunNameQuery(provider, db, query, raw, clean, candidates, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (candidates != null)
+                {
+                    // The constrained form failed: the unconstrained one IS the stock query.
+                    _logger?.LogWarning(ex, "JellyfinPlus: FTS-constrained name query failed; re-running the stock query.");
+                    FtsIndexEngine.Count("name:constrained-failed");
+                    return await RunNameQuery(provider, db, query, raw, clean, null, ct).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// The name matches of a wildcard term: SqlSearchProvider's query with its name predicate replaced by LIKE
+        /// patterns (CleanName with the cleaned pattern; OriginalTitle with the uncleaned one, as stock tests it),
+        /// the same filters, version exclusion, score tiers and ordering, and the FTS candidate condition when the
+        /// index is usable and every column has a segment of 3+ characters.
+        /// </summary>
+        private static async Task<IReadOnlyList<SearchResult>> WildNames(object provider, SearchProviderQuery query, WildPattern wild, CancellationToken ct)
+        {
+            var factory = (IDbContextFactory<JellyfinDbContext>)_dbProvider.GetValue(provider);
+            var db = await factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using (db.ConfigureAwait(false))
+            {
+                Guid[] candidates = null;
+                if (FtsIndexEngine.Usable)
+                {
+                    try
+                    {
+                        await db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
+                        candidates = await FtsIndexEngine.WildNameCandidatesAsync(db.Database.GetDbConnection(), wild, ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "JellyfinPlus: FTS wildcard candidates failed; using the plain LIKE query.");
+                    }
+
+                    FtsIndexEngine.Count(candidates == null ? "wild-name:like" : "wild-name:fts");
+                    if (candidates != null && candidates.Length == 0)
+                    {
+                        return Array.Empty<SearchResult>();
+                    }
+                }
+
+                try
+                {
+                    return await RunWildNameQuery(provider, db, query, wild, candidates, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (candidates != null)
+                {
+                    _logger?.LogWarning(ex, "JellyfinPlus: FTS-constrained wildcard query failed; re-running the plain LIKE query.");
+                    FtsIndexEngine.Count("wild-name:constrained-failed");
+                    return await RunWildNameQuery(provider, db, query, wild, null, ct).ConfigureAwait(false);
+                }
+            }
+        }
+
+        private static async Task<IReadOnlyList<SearchResult>> RunWildNameQuery(
+            object provider,
+            JellyfinDbContext db,
+            SearchProviderQuery query,
+            WildPattern wild,
+            Guid[] candidates,
+            CancellationToken ct)
+        {
+            // Locals, so EF sends them as parameters.
+            var contains = wild.Contains;
+            var exact = wild.Exact;
+            var start = wild.Start;
+            var word = wild.Word;
+            var title = wild.TitleContains;
+            var limit = query.Limit ?? DefaultSearchLimit;
+
+            var dbQuery = db.BaseItems
+                .AsNoTracking()
+                .Where(e => e.Id != _placeholderId)
+                .Where(e => !e.IsVirtualItem)
+                .Where(e => EF.Functions.Like(e.CleanName, contains, "\\")
+                    || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle, title, "\\")));
+            if (candidates != null)
+            {
+                dbQuery = dbQuery.Where(e => EF.Parameter(candidates).Contains(e.Id));
+            }
+
+            dbQuery = ApplyProviderFilters(provider, db, query, dbQuery);
+            dbQuery = (IQueryable<BaseItemEntity>)_excludeVersions.Invoke(null, new object[] { dbQuery });
+
+            var scored = dbQuery.Select(e => new
+            {
+                e.Id,
+                Score =
+                    EF.Functions.Like(e.CleanName, exact, "\\") ? ExactMatchScore
+                    : EF.Functions.Like(e.CleanName, start, "\\") ? PrefixMatchScore
+                    : EF.Functions.Like(e.CleanName, word, "\\") ? WordPrefixMatchScore
+                    : ContainsMatchScore,
+            });
+
+            return await scored
+                .OrderByDescending(x => x.Score)
+                .ThenBy(x => x.Id)
+                .Take(limit)
+                .Select(x => new SearchResult(x.Id, x.Score))
+                .ToArrayAsync(ct)
+                .ConfigureAwait(false);
+        }
+
+        /// <summary>SqlSearchProvider.SearchAsync's query, verbatim, plus the optional candidate-id condition.</summary>
+        private static async Task<IReadOnlyList<SearchResult>> RunNameQuery(
+            object provider,
+            JellyfinDbContext db,
+            SearchProviderQuery query,
+            string raw,
+            string clean,
+            Guid[] candidates,
+            CancellationToken ct)
+        {
+            var cleanPrefix = clean + " ";
+            var likeOriginal = $"%{raw}%";
+            var limit = query.Limit ?? DefaultSearchLimit;
+
+            var dbQuery = db.BaseItems
+                .AsNoTracking()
+                .Where(e => e.Id != _placeholderId)
+                .Where(e => !e.IsVirtualItem)
+                .Where(e => e.CleanName!.Contains(clean)
+                    || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle, likeOriginal)));
+            if (candidates != null)
+            {
+                dbQuery = dbQuery.Where(e => EF.Parameter(candidates).Contains(e.Id));
+            }
+
+            dbQuery = ApplyProviderFilters(provider, db, query, dbQuery);
+            dbQuery = (IQueryable<BaseItemEntity>)_excludeVersions.Invoke(null, new object[] { dbQuery });
+
+            var scored = dbQuery.Select(e => new
+            {
+                e.Id,
+                Score =
+                    (e.CleanName == clean) ? ExactMatchScore
+                    : e.CleanName!.StartsWith(clean) ? PrefixMatchScore
+                    : e.CleanName!.Contains(cleanPrefix) ? WordPrefixMatchScore
+                    : ContainsMatchScore,
+            });
+
+            return await scored
+                .OrderByDescending(x => x.Score)
+                .ThenBy(x => x.Id)
+                .Take(limit)
+                .Select(x => new SearchResult(x.Id, x.Score))
+                .ToArrayAsync(ct)
+                .ConfigureAwait(false);
         }
 
         /// <summary>
@@ -225,6 +485,10 @@ namespace Jellyfin.Plugin.Plus.Patcher
             public string Value { get; }
         }
 
+        private static readonly MethodInfo _efLike = typeof(DbFunctionsExtensions).GetMethod(
+            nameof(DbFunctionsExtensions.Like),
+            new[] { typeof(DbFunctions), typeof(string), typeof(string), typeof(string) });
+
         private static readonly MethodInfo _stringContains = typeof(string).GetMethod(nameof(string.Contains), new[] { typeof(string) });
 
         /// <summary>
@@ -234,7 +498,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// "black cat", even when that same item also carries some other tag containing "red".
         /// Built as one expression so it stays a single EXISTS in SQL, with one NOT LIKE per term.
         /// </summary>
-        private static Expression<Func<ItemValueMap, bool>> TagMatch(string search, string[] excludes)
+        private static Expression<Func<ItemValueMap, bool>> TagMatch(string search, string[] excludes, WildPattern wild = null)
         {
             var v = Expression.Parameter(typeof(ItemValueMap), "v");
             var itemValue = Expression.Property(v, nameof(ItemValueMap.ItemValue));
@@ -245,9 +509,18 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 _stringContains,
                 Expression.Property(Expression.Constant(new Param(s)), nameof(Param.Value)));
 
+            // A wildcard term matches the tag through LIKE ... ESCAPE (the pattern as a parameter), a plain one by contains.
+            Expression matches = wild == null
+                ? ContainsParam(search)
+                : Expression.Call(
+                    _efLike,
+                    Expression.Constant(EF.Functions),
+                    cleanValue,
+                    Expression.Property(Expression.Constant(new Param(wild.Contains)), nameof(Param.Value)),
+                    Expression.Constant(WildPattern.Escape));
             Expression body = Expression.AndAlso(
                 Expression.Equal(Expression.Property(itemValue, nameof(ItemValue.Type)), Expression.Constant(ItemValueType.Tags)),
-                ContainsParam(search));
+                matches);
             foreach (var term in excludes)
             {
                 body = Expression.AndAlso(body, Expression.Not(ContainsParam(term)));
@@ -280,13 +553,21 @@ namespace Jellyfin.Plugin.Plus.Patcher
         private const int MaxTagMapRows = 100000;
 
         /// <summary>The ItemValueIds of the tag values <see cref="TagMatch"/> accepts (term in, no exclude term in).</summary>
-        private static IQueryable<Guid> MatchingTagValueIds(JellyfinDbContext db, string search, string[] excludes)
+        private static IQueryable<Guid> MatchingTagValueIds(JellyfinDbContext db, string search, string[] excludes, Guid[] candidates = null, WildPattern wild = null)
         {
             // Locals, not constants, so EF sends them as parameters.
             var needle = search;
-            IQueryable<ItemValue> values = db.ItemValues
-                .AsNoTracking()
-                .Where(v => v.Type == ItemValueType.Tags && v.CleanValue.Contains(needle));
+            var like = wild?.Contains;
+            IQueryable<ItemValue> values = wild == null
+                ? db.ItemValues.AsNoTracking().Where(v => v.Type == ItemValueType.Tags && v.CleanValue.Contains(needle))
+                : db.ItemValues.AsNoTracking().Where(v => v.Type == ItemValueType.Tags && EF.Functions.Like(v.CleanValue, like, "\\"));
+            if (candidates != null)
+            {
+                // The FTS index's candidates (a superset of the values containing the term): the exact test above
+                // still decides, it just runs over a handful of primary-key lookups instead of every tag value.
+                values = values.Where(v => EF.Parameter(candidates).Contains(v.ItemValueId));
+            }
+
             foreach (var term in excludes)
             {
                 var t = term;
@@ -308,9 +589,35 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// Why: one correlated EXISTS per BaseItems row makes SQLite scan the whole item table and probe the
         /// map for every row (~1.3 s on 80k items with 2.3M map rows) whenever the term matches few or no tags.
         /// </remarks>
-        private static async Task<Guid[]> MatchingTagItemIds(JellyfinDbContext db, string search, string[] excludes, CancellationToken ct)
+        private static async Task<Guid[]> MatchingTagItemIds(JellyfinDbContext db, string search, string[] excludes, CancellationToken ct, WildPattern wild = null)
         {
-            var valueIds = await MatchingTagValueIds(db, search, excludes).Take(MaxTagValueIds + 1).ToListAsync(ct).ConfigureAwait(false);
+            Guid[] candidates = null;
+            if (FtsIndexEngine.Usable)
+            {
+                try
+                {
+                    await db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
+                    candidates = wild == null
+                        ? await FtsIndexEngine.TagValueCandidatesAsync(db.Database.GetDbConnection(), search, ct).ConfigureAwait(false)
+                        : await FtsIndexEngine.WildTagValueCandidatesAsync(db.Database.GetDbConnection(), wild, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "JellyfinPlus: FTS tag candidates failed; using the stock tag scan.");
+                }
+
+                FtsIndexEngine.Count(candidates == null ? "tag:stock-query" : "tag:fts");
+                if (candidates != null && candidates.Length == 0)
+                {
+                    return Array.Empty<Guid>();
+                }
+            }
+
+            var valueIds = await MatchingTagValueIds(db, search, excludes, candidates, wild).Take(MaxTagValueIds + 1).ToListAsync(ct).ConfigureAwait(false);
             if (valueIds.Count == 0)
             {
                 return Array.Empty<Guid>();
@@ -360,12 +667,13 @@ namespace Jellyfin.Plugin.Plus.Patcher
             string clean,
             string[] excludes,
             int limit,
-            CancellationToken ct)
+            CancellationToken ct,
+            WildPattern wild = null)
         {
-            var tagItemIds = await MatchingTagItemIds(db, clean, excludes, ct).ConfigureAwait(false);
+            var tagItemIds = await MatchingTagItemIds(db, clean, excludes, ct, wild).ConfigureAwait(false);
             if (tagItemIds == null)
             {
-                return await BroadTagMatchedIds(provider, db, query, clean, excludes, limit, ct).ConfigureAwait(false);
+                return await BroadTagMatchedIds(provider, db, query, clean, excludes, limit, ct, wild).ConfigureAwait(false);
             }
 
             if (tagItemIds.Length == 0)
@@ -380,7 +688,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 pos[id] = pos.Count;
             }
 
-            return await FilterOrderedHits(provider, db, query, TagMatch(clean, excludes), tagItemIds, pos, limit, ct).ConfigureAwait(false);
+            return await FilterOrderedHits(provider, db, query, TagMatch(clean, excludes, wild), tagItemIds, pos, limit, ct).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -463,10 +771,11 @@ namespace Jellyfin.Plugin.Plus.Patcher
             string clean,
             string[] excludes,
             int limit,
-            CancellationToken ct)
+            CancellationToken ct,
+            WildPattern wild = null)
         {
-            var tag = TagMatch(clean, excludes);
-            var tagValues = MatchingTagValueIds(db, clean, excludes);
+            var tag = TagMatch(clean, excludes, wild);
+            var tagValues = MatchingTagValueIds(db, clean, excludes, null, wild);
             var hits = new List<Guid>();
             var pos = new Dictionary<Guid, int>(); // Id -> its place in the walk
             var result = Array.Empty<Guid>();
@@ -532,6 +841,25 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 // Same normalisation the stock provider applies to the term.
                 var raw = query.SearchTerm?.Trim().RemoveDiacritics();
                 var clean = string.IsNullOrEmpty(raw) ? null : raw.GetCleanValue();
+
+                // A wildcard term (* any run, ? one character). Stock cannot do it: its cleaning turns the wildcard
+                // into a space and it searches for the literal mangled text. So the stock results are DROPPED for
+                // such a term (the prefix does not even run the stock query): they would be at best a subset of the
+                // real matches (a space is one thing a wildcard can stand for), at worst junk (the stock text with
+                // one space where "??" demands two). The name matches are computed here instead, by the provider's
+                // own filters and scoring tiers, and the tag matches below use the same pattern.
+                var wild = WildPattern.Parse(raw, out var wildKind);
+                if (wildKind == WildKind.NoSearch)
+                {
+                    return nameResults; // wildcards and punctuation only: no search, as stock
+                }
+
+                if (wild != null)
+                {
+                    nameResults = await WildNames(provider, query, wild, cancellationToken).ConfigureAwait(false);
+                    clean = wild.Contains;
+                }
+
                 if (string.IsNullOrEmpty(clean))
                 {
                     return nameResults;
@@ -549,7 +877,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 var dbContext = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
                 await using (dbContext.ConfigureAwait(false))
                 {
-                    tagIds = await TagMatchedIds(provider, dbContext, query, clean, excludes, limit, cancellationToken).ConfigureAwait(false);
+                    tagIds = await TagMatchedIds(provider, dbContext, query, clean, excludes, limit, cancellationToken, wild).ConfigureAwait(false);
 
                     // The stock name matches are excluded by any tag containing an exclude term.
                     // They were already access-filtered by the stock query, so only the tag test
@@ -587,8 +915,10 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     scores.TryAdd(id, nameScores.TryGetValue(id, out var s) ? s : TagMatchScore);
                 }
 
-                if (scores.Count == 0 && excludes.Length > 0 && nameResults.Count > 0)
+                if (scores.Count == 0 && (wild != null || (excludes.Length > 0 && nameResults.Count > 0)))
                 {
+                    // (A wildcard term with no match at all lands here too: the controller's own fallback would search
+                    // the stock-mangled literal text and bring back junk.)
                     // Every name match was excluded. An empty list here would make ItemsController fall
                     // back to its own name-only SearchTerm query, which knows nothing of the
                     // exclusion and would bring the excluded items straight back. One id that no

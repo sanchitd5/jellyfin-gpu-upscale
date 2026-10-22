@@ -227,7 +227,11 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// first unhandled change. Without the cap a library that is scanned continuously (an item every few
         /// seconds) would keep resetting the debounce and never rebuild.
         /// </summary>
-        private static void OnChanged(object sender, ItemChangeEventArgs e) => ScheduleDebounced();
+        private static void OnChanged(object sender, ItemChangeEventArgs e)
+        {
+            InvalidateFingerprints();
+            ScheduleDebounced();
+        }
 
         private static void ScheduleDebounced()
         {
@@ -386,6 +390,68 @@ namespace Jellyfin.Plugin.Plus.Patcher
             }
 
             return map;
+        }
+
+        // ---- fingerprint memo. The serving path used to recompute the per-library count/max on EVERY request
+        // (35-43 ms on the real DB). The value is now remembered until a library event, a rebuild, or
+        // FingerprintTtl passes (the TTL is the safety net for a missed event). Semantics are unchanged:
+        // what is remembered is exactly what Fingerprints/GenreFingerprint return. The generation is read
+        // BEFORE computing, so an event racing a computation stores an entry that is already invalid.
+        internal static readonly TimeSpan FingerprintTtl = TimeSpan.FromSeconds(60);
+        private static long _fpGeneration;
+        private static readonly ConcurrentDictionary<Guid, (string Fp, long Gen, long Tick)> _fpMemo = new ConcurrentDictionary<Guid, (string, long, long)>();
+        private static (string Fp, long Gen, long Tick) _genreMemo;
+
+        /// <summary>Forgets every remembered fingerprint (a library changed, or a rebuild finished).</summary>
+        internal static void InvalidateFingerprints() => Interlocked.Increment(ref _fpGeneration);
+
+        private static bool Live(long gen, long tick)
+            => gen == Interlocked.Read(ref _fpGeneration) && Environment.TickCount64 - tick < (long)FingerprintTtl.TotalMilliseconds;
+
+        /// <summary>Same answer as <see cref="Fingerprints"/>, remembered per library.</summary>
+        internal static Dictionary<Guid, string> FingerprintsMemo(JellyfinDbContext db, Guid[] libs)
+        {
+            var map = new Dictionary<Guid, string>(libs.Length);
+            var missing = new List<Guid>();
+            foreach (var l in libs)
+            {
+                if (_fpMemo.TryGetValue(l, out var m) && Live(m.Gen, m.Tick))
+                {
+                    map[l] = m.Fp;
+                }
+                else
+                {
+                    missing.Add(l);
+                }
+            }
+
+            if (missing.Count > 0)
+            {
+                var gen = Interlocked.Read(ref _fpGeneration);
+                var tick = Environment.TickCount64;
+                foreach (var kv in Fingerprints(db, missing.ToArray()))
+                {
+                    map[kv.Key] = kv.Value;
+                    _fpMemo[kv.Key] = (kv.Value, gen, tick);
+                }
+            }
+
+            return map;
+        }
+
+        private static string GenreFingerprintMemo(JellyfinDbContext db)
+        {
+            var m = _genreMemo;
+            if (m.Fp != null && Live(m.Gen, m.Tick))
+            {
+                return m.Fp;
+            }
+
+            var gen = Interlocked.Read(ref _fpGeneration);
+            var tick = Environment.TickCount64;
+            var fp = GenreFingerprint(db);
+            _genreMemo = (fp, gen, tick);
+            return fp;
         }
 
         /// <summary>The Genre entities' own fingerprint (they are not in any library, but /Items/Filters2 returns them).</summary>
@@ -547,6 +613,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
             var sourceCount = int.Parse(libFp.Split('|')[0], CultureInfo.InvariantCulture);
             WriteLibrary(conn, lib, rows, sourceCount, libFp, genreFp);
+            InvalidateFingerprints();
             _log?.LogInformation(
                 "JellyfinPlus: filter key cache: library '{Library}' rebuilt in {Ms} ms ({Keys} keys from {Items} items)",
                 name,
@@ -725,8 +792,8 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 return Freshness.Unusable;
             }
 
-            var fps = Fingerprints(db, libs);
-            var genreFp = kinds.Contains(Kind.GenreEntity) ? GenreFingerprint(db) : null;
+            var fps = FingerprintsMemo(db, libs);
+            var genreFp = kinds.Contains(Kind.GenreEntity) ? GenreFingerprintMemo(db) : null;
             var result = Freshness.Fresh;
             why = null;
             foreach (var kind in kinds)

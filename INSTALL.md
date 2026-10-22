@@ -136,7 +136,7 @@ Write `/var/lib/jellyfin/plugins/JellyfinPlus_$V/meta.json`:
   "version": "1.0.0.0",
   "targetAbi": "12.1.0.0",
   "owner": "",
-  "overview": "Realtime GPU super-resolution upscaling",
+  "overview": "GPU video enhancement plus search, filtering and library quality-of-life improvements for Jellyfin.",
   "category": "General"
 }
 ```

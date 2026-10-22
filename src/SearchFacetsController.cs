@@ -93,14 +93,17 @@ namespace Jellyfin.Plugin.Plus
         private readonly IUserManager _userManager;
         private readonly ISearchManager _searchManager;
         private readonly IDbContextFactory<JellyfinDbContext> _dbFactory;
+        private readonly IUserDataManager _userData;
 
         /// <summary>Initializes a new instance of the <see cref="SearchFacetsController"/> class.</summary>
         public SearchFacetsController(
             ILibraryManager libraryManager,
             IUserManager userManager,
             ISearchManager searchManager,
-            IDbContextFactory<JellyfinDbContext> dbFactory)
+            IDbContextFactory<JellyfinDbContext> dbFactory,
+            IUserDataManager userData)
         {
+            _userData = userData;
             _libraryManager = libraryManager;
             _userManager = userManager;
             _searchManager = searchManager;
@@ -127,6 +130,7 @@ namespace Jellyfin.Plugin.Plus
             CancellationToken cancellationToken)
         {
             var clock = Stopwatch.StartNew();
+            FacetResultCache.EnsureSubscribed(_libraryManager, _userData);
 
             var facetKind = ParseKind(kind);
             if (facetKind == null)
@@ -150,6 +154,15 @@ namespace Jellyfin.Plugin.Plus
             {
                 // Not found, or not visible to this user: the same refusal, so existence does not leak.
                 return NotFound();
+            }
+
+            // Cached answer for this user + every input + the library generation (see FacetResultCache).
+            var cacheKey = FacetResultCache.Key(user, Request.Query);
+            var generation = FacetResultCache.Generation;
+            if (FacetResultCache.TryGet(cacheKey, generation, out var cached))
+            {
+                Response.Headers["Server-Timing"] = "facets;dur=" + clock.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) + ", facets-cache;dur=0";
+                return Ok(cached);
             }
 
             var include = ParseEnums<BaseItemKind>(includeItemTypes);
@@ -231,6 +244,7 @@ namespace Jellyfin.Plugin.Plus
             await using (db.ConfigureAwait(false))
             {
                 var rows = await SearchFacetsCore.AggregateAsync(db, facetKind.Value, ids, needle, take, cancellationToken).ConfigureAwait(false);
+                FacetResultCache.Put(cacheKey, generation, rows);
                 Response.Headers["Server-Timing"] = "facets;dur=" + clock.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture);
                 return Ok(rows);
             }
@@ -322,6 +336,125 @@ namespace Jellyfin.Plugin.Plus
             => string.IsNullOrWhiteSpace(list)
                 ? Array.Empty<string>()
                 : list.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    /// <summary>
+    /// Server-side memory cache of finished facet answers. Key: the authenticated/target user id, a digest of that
+    /// user's access settings, and EVERY query parameter (sorted; credentials removed), because the candidate pool and
+    /// the filters are read from the request, including the jp* params the patches look at. The entry also carries
+    /// the generation counter, bumped on library item events and on user-data saves (played/favorite filters), so a
+    /// change makes every older entry a miss at once. A 5 minute TTL bounds what a missed event, or a permission
+    /// change (which fires no library event, and is covered by the access digest only for the settings listed in
+    /// <see cref="AccessDigest"/>), could keep alive; an LRU of <see cref="MaxEntries"/> bounds memory. The generation
+    /// is read BEFORE computing, so a change racing the computation stores an already-stale entry (safe direction).
+    /// </summary>
+    internal static class FacetResultCache
+    {
+        internal const int MaxEntries = 200;
+        internal static readonly TimeSpan Ttl = TimeSpan.FromMinutes(5);
+
+        private static readonly object Gate = new object();
+        private static readonly Dictionary<string, LinkedListNode<Entry>> Map = new Dictionary<string, LinkedListNode<Entry>>();
+        private static readonly LinkedList<Entry> Lru = new LinkedList<Entry>();
+        private static long generation;
+        private static int subscribed;
+
+        private sealed record Entry(string Key, long Generation, long Ticks, List<SearchFacet> Rows);
+
+        internal static long Generation => Interlocked.Read(ref generation);
+
+        internal static void Invalidate() => Interlocked.Increment(ref generation);
+
+        internal static void EnsureSubscribed(ILibraryManager libs, IUserDataManager userData)
+        {
+            if (Interlocked.Exchange(ref subscribed, 1) == 1)
+            {
+                return;
+            }
+
+            libs.ItemAdded += (_, _) => Invalidate();
+            libs.ItemUpdated += (_, _) => Invalidate();
+            libs.ItemRemoved += (_, _) => Invalidate();
+            userData.UserDataSaved += (_, _) => Invalidate();
+        }
+
+        private static readonly HashSet<string> Ignored = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "api_key", "apikey", "x-emby-token", "x-mediabrowser-token", "deviceid", "userid",
+        };
+
+        internal static string Key(DbUser user, IEnumerable<KeyValuePair<string, Microsoft.Extensions.Primitives.StringValues>> query)
+        {
+            var parts = query
+                .Where(kv => !Ignored.Contains(kv.Key))
+                .SelectMany(kv => kv.Value.Select(v => kv.Key.ToLowerInvariant() + "=" + v))
+                .OrderBy(x => x, StringComparer.Ordinal);
+            return user.Id.ToString("N", CultureInfo.InvariantCulture) + "|" + AccessDigest(user) + "|" + string.Join("&", parts);
+        }
+
+        // The settings that decide which items a user sees and that change without a library event.
+        private static string AccessDigest(DbUser user)
+        {
+            string Join<T>(PreferenceKind k) => string.Join(",", (user.GetPreferenceValues<T>(k) ?? Array.Empty<T>()).Select(x => x?.ToString()).OrderBy(x => x, StringComparer.Ordinal));
+            return string.Join(
+                ";",
+                user.HasPermission(PermissionKind.EnableAllFolders) ? "all" : "sel",
+                Join<Guid>(PreferenceKind.EnabledFolders),
+                Join<string>(PreferenceKind.BlockedTags),
+                Join<string>(PreferenceKind.AllowedTags),
+                Join<UnratedItem>(PreferenceKind.BlockUnratedItems),
+                user.MaxParentalRatingScore?.ToString(CultureInfo.InvariantCulture) ?? "-",
+                user.DisplayMissingEpisodes ? "m" : "-");
+        }
+
+        internal static bool TryGet(string key, long gen, out List<SearchFacet> rows)
+        {
+            rows = null;
+            lock (Gate)
+            {
+                if (!Map.TryGetValue(key, out var node))
+                {
+                    return false;
+                }
+
+                var e = node.Value;
+                if (e.Generation != gen || Environment.TickCount64 - e.Ticks > (long)Ttl.TotalMilliseconds)
+                {
+                    Lru.Remove(node);
+                    Map.Remove(key);
+                    return false;
+                }
+
+                Lru.Remove(node);
+                Lru.AddFirst(node);
+                rows = e.Rows;
+                return true;
+            }
+        }
+
+        internal static void Put(string key, long gen, List<SearchFacet> rows)
+        {
+            if (gen != Generation)
+            {
+                return; // a change raced the computation; do not store a possibly old answer
+            }
+
+            lock (Gate)
+            {
+                if (Map.TryGetValue(key, out var old))
+                {
+                    Lru.Remove(old);
+                    Map.Remove(key);
+                }
+
+                Map[key] = Lru.AddFirst(new Entry(key, gen, Environment.TickCount64, rows));
+                while (Map.Count > MaxEntries)
+                {
+                    Map.Remove(Lru.Last.Value.Key);
+                    Lru.RemoveLast();
+                }
+            }
+        }
     }
 
     internal enum FacetKind

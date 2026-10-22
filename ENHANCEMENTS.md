@@ -32,6 +32,8 @@ setting, a control in the page, or "remove the plugin or script".
 | Live apply and A/B swap | Both | Changing a setting mid-playback switches streams without a gap | On. If the swap patch cannot install, live apply falls back to tear-down-and-restart |
 | Direct-play override | Server patch | Eligible direct-play sessions become GPU transcodes on every client | Off. Setting `ForceTranscodeForDirectPlay` |
 | Tag search | Server patch | Search also matches item tags (substring) | On, no switch |
+| Wildcard search (`*` and `?`) | Server patch | `red*car` finds names and tags with "red" followed later by "car"; `?` is exactly one character | On, no switch; a term without `*` or `?` is searched as before |
+| Search index (FTS5 trigram) | Server patch + plugin services | Name and tag search answered from an index: provider step about 36 ms to 3 ms on an 80k-item library | On; falls back to the plain query whenever the index is missing, stale or unsupported; see section 7.6 |
 | Per-tag exclude on search | Both | "Exclude tags" box under the search field | On; clear the box to stop |
 | Search on submit | Client | Searching waits for Enter or the Search button | On, no switch (not on TV layouts) |
 | Search Sort and filter | Both | Sort by name, date, runtime, rating, random, play count, last played; filter by tag, cast and crew, studio, runtime, date added, resolution, watched, favourites, type | On; "Reset" in the sheet clears it |
@@ -128,6 +130,23 @@ match (50), so a title match ranks above a tag-only match. It runs through the s
 type, media, parent, user-access and alternate-version filters, so a tag match is limited to what a
 name match could return. It applies to both `/Items?searchTerm=` and `/Search/Hints`.
 
+**Wildcards.** In the search term `*` means any run of characters (none included) and `?` exactly one
+character; a term with neither is searched exactly as before. `red*car` is `LIKE '%red%car%'`: the
+pattern is unanchored at both ends, like the plain contains. Each literal piece between wildcards is
+cleaned like stored names (`GetCleanValue()`: lowercase, diacritics stripped, punctuation to spaces), so
+the match is case- and diacritic-insensitive, and the same pattern is matched against item names and
+OriginalTitle, and against tag values (with the per-tag exclude rule below). Stock search cannot do this (its cleaning turns `*` into a space and
+it searches the literal text), so for a wildcard term the stock results are dropped, not merged: they
+would be a subset of the real matches at best, and wrong (one space where `??` needs two) at worst. Name
+matches keep the stock score tiers (exact 100, prefix 80, word prefix 75, contains 50), tag-only
+matches 40. A term with no literal text (`*`, `**`, `?`, `*-*`) is no search, as stock; more than 8
+literal pieces is not treated as a pattern. A wildcard term with no match returns one empty-id result
+so the items controller does not fall back to the stock literal search. Matching uses `LIKE ... ESCAPE`,
+never `GLOB` (case-sensitive), with `%`, `_` and `\` escaped inside literals. OriginalTitle is matched as
+the stock provider does, with the diacritic-stripped but uncleaned literals through SQLite's
+ASCII-case-insensitive LIKE. When the search index (7.6) is fresh and a column has a literal piece of 3 or
+more characters, the index narrows the candidates first (about 37 ms to 1.5 ms median); otherwise the plain LIKE runs.
+
 **Per-tag exclude.** The "Exclude tags (comma-separated)" box
 (`web/src/controller/search-exclude.js`) sends `excludeTags`. The rule is per tag, not per item:
 searching "cat" with "red" excluded drops a match made through a tag such as "red cat" but keeps a
@@ -170,6 +189,10 @@ that person's co-stars. Role pills offer only roles that occur in the listed peo
 chosen). If the route is missing (an older server), the sheet falls back to a global people search and
 says so. The Studio picker is not scoped to the results: it lists studios from `/Studios` (40 at a
 time). The route also supports `kind=studios` and `kind=tags`; this client only asks for `people`.
+Finished answers are cached in server memory (`FacetResultCache`): key is the user, a digest of that
+user's access settings (folders, tag and rating limits) and every query parameter (sorted, credentials
+removed); invalidated by any item add/update/remove or user-data save; 5 minute TTL; LRU of 200 entries.
+A hit reports `facets-cache` in `Server-Timing`.
 
 **Pagination** (`web/src/controller/search-pager.js`, `web/src/model/search-paging.js`,
 `web/src/view/search-pager.js`). A pager under each result grid: Prev/Next, "Page X of Y", and a page
@@ -190,6 +213,24 @@ so memory stays bounded; it is rebuilt when it comes back.
 `auto-fill` above (wider minimum for landscape cards). CSS only; cards and scrollers stay jellyfin-web's
 own. TV layouts are left alone.
 
+**Tag picker window** (`web/src/controller/search-filters.js`, `web/src/controller/tag-window.js`). The
+Tags section of the sheet no longer downloads the library's whole tag list: it asks `/Items/Filters` for
+the first 100 tags containing the typed text (`jpTagLimit`, `jpTagQuery`, section 7.5) on opening and on
+every pause in typing, and shows "Showing N of M matching tags". Picked tags stay visible as chips.
+Without server support it falls back to filtering the full list in the browser.
+
+**Skipping searches that cannot match** (`web/src/controller/search-census.js`,
+`web/src/model/search-census.js`, `src/LibraryCensusController.cs`). The search page sends a request per
+result kind (artists, people, studios, programs, videos, all-types) whether or not the library has any.
+`GET /JellyfinPlus/Library/Census` says which item kinds the user has; a request whose kinds are all
+known to the census and all absent is rewritten to an `/Items?ids=<nil guid>` lookup, which returns the
+stock empty result for no real work. Examples: Artists with no music, Studios with none, Live TV
+programs and channels with none, the all-types list when none of its types exist. A kind the census
+does not cover is never assumed absent. The census is cached per user for 5 minutes in the browser
+and on the server (the server drops it on item add or remove). With no census yet, or on an error,
+nothing is skipped. It runs innermost in the fetch/XHR chain, so it judges the URL after Sort and
+filter and paging have rewritten it.
+
 **Library-scope fix** (`web/src/controller/search-scope.js`). Searching from inside a Home Videos
 (or music videos, mixed, photos) library puts `collectionType` in the search URL, which makes stock
 disable the Videos query and ask for a type list without `Video`, so clips can never match. The script
@@ -205,8 +246,12 @@ playlists, keeping `parentId`, so the search is scoped to that library and clips
   a "match ALL selected tags" switch (stock is "any"). Not offered on tabs served by their own endpoint
   (artists, album artists, authors, studios), where the parameters would be ignored.
 - Long tag lists are windowed: a list over 300 tags is shrunk to the selected and excluded tags plus
-  the first 100 that match the search text, so React does not render thousands of checkboxes. Typing
-  recomputes the window; the stock checkboxes and selection handling are used throughout.
+  the first 100 that match the search text, so React does not render thousands of checkboxes. The
+  window comes from the server (`jpTagLimit` / `jpTagQuery` on `/Items/Filters`, section 7.5): the
+  popover's request asks for at most 301 tags (a library with fewer gets its whole list), and typing
+  fetches the next 100 matching the text instead of filtering a downloaded list. A server without the
+  parameters answers in full and the old client-side windowing runs. The stock checkboxes and selection
+  handling are used throughout (`web/src/controller/tag-window.js`, `library-filters.js`).
 - Resolution (HD, 4K, SD), Studios and People on the tabs where stock hides them: Videos, Folders,
   Mixed and Music videos. Resolution uses the stock `IsHD`/`Is4K`/`IsSD` filters, labelled "HD (1200 px
   wide or more)".
@@ -229,7 +274,9 @@ about 47 000 items and 12 000 tags. The cache stores the keys in two tables insi
 
 - It is checked, not assumed: each library has a fingerprint (row count plus newest `DateLastSaved`),
   compared on every request that would be served from the cache. A mismatch means stale, and the
-  request goes to stock.
+  request goes to stock. The fingerprint itself is memoized in memory per library: recomputed only after
+  an item event, after a rebuild, or after 60 seconds (safety TTL), instead of per request (~35 ms on a
+  47k-item library, ~0.0002 ms when remembered). Same value, same semantics.
 - It builds at scan time (a post-scan task runs after every library scan and rebuilds libraries whose
   fingerprint changed), 30 seconds after any item is added, updated or removed (debounce), and about 3
   seconds after a request found it stale or missing (at most once a minute).
@@ -407,6 +454,60 @@ ends in `/Items`.
 - Fail-soft: any failure returns the stock candidates in stock order; the warning is logged once.
 - Access: only ids and scores change hands. The set returned is the stock set; user-access filtering
   still happens afterwards in stock `folder.GetItems`.
+- Postfix, also on a plain search: when the request has a `limit` and deep paging is installed, the final
+  candidates (ids, scores), `startIndex` and `limit` are remembered on the request (`HttpContext.Items`)
+  for the next patch. The returned list is not changed.
+
+**`Jellyfin.Server.Implementations.Item.BaseItemRepository.GetItemList(InternalItemsQuery)`**, prefix
+(`SearchDeepPagePatches.cs`, optional "deep search paging"). Stock `ItemsController` hands a search's
+candidate ids (up to 5000 with `jpPaged`, 2400 for the all-types query) to `folder.GetItems`, which loads
+EVERY one as a full entity, only for the controller to order by score, skip `startIndex`, take `limit` and
+build DTOs for those few. This patch makes the load page-sized. It acts only when the request recorded a
+candidate pool (see above) of at least 200 ids with a page smaller than the pool, and the query matches it
+exactly (same ids in the same order, no limit, start, search term or adjacency).
+- It asks the repository for the filtered ids (`GetItemIdsList`: the same query, every filter and
+  user-access rule applied, nothing materialised) and for `(Id, SortName, Type)` of those ids only; works
+  out the controller's own order (score descending, then SortName; preceded by `Folder`'s order-by-request
+  step when the query has no `OrderBy`); loads just the page's entities with the stock `GetItemList`
+  (query `ItemIds` narrowed to the page); and returns a list of the stock length and order in which only
+  the page positions are real entities, the rest are stubs carrying `Id` and `SortName`. The controller's
+  count, order, skip and take then land on exactly the stock page, and the total is the stock total. Stubs
+  never reach a DTO.
+- Falls back to the stock path (returns control to stock) when: no pool is recorded or it does not match;
+  the page covers the pool; a candidate row is missing, has a null `SortName` or a `Type` that does not
+  resolve (stock would drop or recompute those); the page load returns a different count; any exception
+  (logged once). `JELLYFINPLUS_NO_DEEP_PAGE=1` turns the patch off.
+- Measured on the real library (8 terms x 2 type filters x 5 sorts x 3 page sizes x 7 offsets, 1520 requests):
+  identical page digests, totals and counts to stock in all of them. Entity load for a 5000-id pool:
+  about 200 ms to about 42 ms (page 4 of 100); for the all-types 2400-id pool 117 ms to 58 ms. A page that
+  reaches the end of the pool (startIndex 4800, limit 200) has nothing to save and takes the stock path.
+
+**`MediaBrowser.Controller.Entities.Folder.SortItemsByRequest(InternalItemsQuery, IReadOnlyList<BaseItem>)`**
+(private static), prefix (same file). Stock orders the loaded items by `Array.IndexOf(query.ItemIds, id)`
+per item, quadratic in the id count (about 45 ms for 5000 ids). For 256 or more ids it is replaced by the
+same stable ordering from a first-index dictionary. Shorter lists keep the stock code.
+
+**Server-Timing** (`ServerTimingPatches.cs`, optional "search Server-Timing"). Every
+`/Items?searchTerm=...` response carries a `Server-Timing` header with the stage durations in
+milliseconds, visible in the browser's Network tab (Timing) and in `curl -i`: `search`
+(`SearchManager.GetSearchResultsAsync` end to end, includes `sort`), `name` (stock SQL name match), `tags`
+(what the tag-match postfix added to it), `sort` (sort / all-of-people re-score, only when one ran), `load`
+(`Folder.GetItems`), `dto` (`DtoService.GetBaseItemDtos`, summed over its calls), and `total` (from the start
+of the search stage to the header being sent; excludes routing, authentication and body serialisation).
+With deep paging, `deep-ids` (with `pool=` and `filtered=` counts), `deep-rows` and `deep-page` (with
+`loaded=`) break `load` down. Hooks: `SearchManager.GetSearchResultsAsync` (prefix First creates the
+per-request bag and registers `Response.OnStarting`; postfix Last), `SqlSearchProvider.SearchAsync`
+(postfixes First and Last, to split name from tags), `Folder.GetItems`, `DtoService.GetBaseItemDtos`. A
+request that is not a search never gets a bag, so every hook costs one dictionary lookup on it. Only
+durations and two counts are exposed. A stage whose target cannot be resolved is left out; the others
+still work.
+
+**Prefix on the same method** (`SearchPatches.SearchAsyncPrefix`). (1) A wildcard term skips the stock
+query (the postfix computes name and tag matches from the pattern). (2) Otherwise, when the FTS index (7.6)
+is usable and the term is one a trigram index can answer, the prefix replaces the stock query by the same
+query with one more condition, "id is among the index's candidates for the term", placed straight after the
+name predicate; the predicate, filters, version exclusion, score and ordering are the stock ones, so the
+result is identical. Any other case runs the stock method untouched.
 
 ### 7.4 Library filters: `Jellyfin.Server.Implementations.Item.BaseItemRepository.TranslateQuery(IQueryable<BaseItemEntity>, JellyfinDbContext, InternalItemsQuery)`
 
@@ -443,7 +544,40 @@ item-level restriction; every library in scope must be one the user can open
 request is answered for the libraries the user can open, never wider than stock. Fail-soft: the first
 failure is logged once, stock serves, and a stale or missing cache requests a background rebuild.
 
-### 7.6 Video similar items: `Emby.Server.Implementations.Library.SimilarItems.SimilarItemsManager.GetSimilarItemsAsync`
+Tag window: postfixes on `Jellyfin.Api.Controllers.FilterController.GetQueryFiltersLegacy` and
+`GetQueryFilters` (`FilterCachePatches.cs`), so they cover the cache-served and the stock path alike.
+Two optional query parameters: `jpTagLimit` (1 to 5000) and `jpTagQuery` (a substring, matched
+case- and diacritic-insensitively against each tag's `GetCleanValue()`, the same normalisation as the
+stored clean values). The response's `Tags` becomes the first `jpTagLimit` matching tags, in the usual
+order, and the header `X-JellyfinPlus-TagTotal` carries how many tags matched in all. The count is in a
+header because the actions are declared to return `QueryFilters(Legacy)`, whose serialiser would drop
+a subclass's extra property. With neither parameter, or an unusable one, the response is unchanged.
+Installed even when the cache is unavailable; if the controller cannot be resolved the full list is
+served.
+
+### 7.6 Search index: FTS5 trigram over names and tags (`FtsIndexEngine.cs`, `src/FtsIndex.cs`)
+
+Three plugin-owned tables in `jellyfin.db`, created with `IF NOT EXISTS` (Jellyfin's schema is never touched):
+`JellyfinPlus_FtsNames(ItemId UNINDEXED, CleanName, OriginalTitle)` (virtual, `fts5` trigram, one row per
+BaseItems row), `JellyfinPlus_FtsTags(ValueId UNINDEXED, CleanValue)` (one row per distinct tag VALUE, not per
+item-tag pair: 15k rows against 2.3M map rows; the item join stays on the ItemValuesMap primary key) and
+`JellyfinPlus_FtsMeta`. The index is only a PREFILTER: a trigram match returns a superset of the rows that
+contain the text, and the stock predicate still runs on the real columns, so results equal the stock
+results. Terms under 3 characters, and plain terms containing the LIKE wildcards `%` or `_`, are not
+answered by the index (stock path). The default `detail=full` is required: trigram phrase queries fail with
+`detail=column` or `none`.
+
+Freshness is checked, not assumed. The index is used only when it was built, its recorded signature
+(BaseItems row count, newest DateLastSaved, distinct tag-value count) was re-verified within the last 100 s
+(a background timer re-reads it every 30 s), no library change is waiting and no refresh is running. Item
+added/updated/removed events mark the item pending at once (index unused until applied); a 2 s debounced flush
+(15 s cap) deletes and re-inserts those items and rewrites the small tag table in one transaction. A signature
+mismatch while idle (a missed event, a change behind Jellyfin's back) schedules a full rebuild. Anything not
+fresh, or any index error, falls back to the stock query. Built at start-up when stale, at the end of each library
+scan (post-scan task) and by the scheduled task "Jellyfin Plus: rebuild search index". Measured on the 80k-item,
+15k-tag library: full build 0.4-1.0 s, index about 45 MB (about 5% of the database), incremental flush about 120 ms.
+
+### 7.7 Video similar items: `Emby.Server.Implementations.Library.SimilarItems.SimilarItemsManager.GetSimilarItemsAsync`
 
 Prefix (`SimilarPatches.cs`, optional "video similar items"). Handles only items whose exact type is
 `Video` (Movie, Episode, MusicVideo and Trailer keep their own providers); everything else runs stock.
@@ -467,7 +601,10 @@ All under the Jellyfin API root. "Administrator" is the `RequiresElevation` poli
 | `GET /JellyfinPlus/Session/{playSessionId}` | Any authenticated user | What the server actually did for one play session. The id `probe` returns the capability lists with no session (used by the client probe); `dashboard` is used by the config page. A session recorded for a different user is reported as unknown. If either side has no user id (for example an API key), it answers as before the check existed. |
 | `GET /JellyfinPlus/FilterCache/Status` | Administrator | Per-library, per-kind cache state: built time, key counts, dirty flag, run state, last error, and outcome counters. |
 | `POST /JellyfinPlus/FilterCache/Rebuild?force=true` | Administrator | Starts a background rebuild and returns 202 with the status JSON. `force` (default true) rebuilds every library, not only stale ones. 409 when a rebuild is running or the cache is not ready. |
+| `GET /JellyfinPlus/FtsIndex/Status` | Administrator | Search index state: usable now, verified, dirty, pending items, row counts, signature, built time, last refresh kind and duration, unsupported reason (no FTS5 trigram in this SQLite), outcome counters (`name:fts`, `tag:fts`, `wild-name:fts`, fallbacks). |
+| `POST /JellyfinPlus/FtsIndex/Rebuild?force=true` | Administrator | Rebuilds the search index in the background; 202 with the status JSON, 409 when a run is in flight or the index is off. |
 | `GET /JellyfinPlus/Search/Facets` | Any authenticated user | People, studios or tags credited on the items a search matches: `[{id, name, roles, count}]`, count descending then name. Parameters in section 9. 400 for a bad `kind` or no resolvable user; 403 if a non-administrator asks for another user's view; 404 for an unknown user or a `parentId` the user cannot see; an empty array when `searchTerm` is blank. Sets a `Server-Timing` header. |
+| `GET /JellyfinPlus/Library/Census[?userId=..]` | Any authenticated user | Which item kinds the user has: `{counts: {Movie: n, Person: n, ...}}`, absent kinds omitted. Library-resident kinds are counted under the libraries the user can open; kinds stored outside libraries (people, studios, genres, artists, playlists, collections, live TV) are counted library-wide, so they can overstate for a restricted user, never understate. Cached per user (5 minutes, dropped on item add or remove). 403 for another user's view unless administrator; 404 for an unknown user. |
 
 The plugin also serves its configuration page (Dashboard, Plugins, Jellyfin Plus) from an embedded
 resource (`src/Configuration/configPage.html`); changing it needs a rebuild and a Jellyfin restart.
@@ -484,6 +621,8 @@ server without the plugin sees no error.
 | `excludeTags` | Comma- or pipe-separated substrings. Drop tag matches whose tag contains one, and name matches with any such tag. At most 20 terms of 100 characters. | Search: `SqlSearchProvider.SearchAsync` (item search, `/Search/Hints`); `/JellyfinPlus/Search/Facets` | `search-exclude.js` (`markSearchUrl`), `model/search-filters.js` (`facetPairs`) |
 | `excludeTagNames` | Exact tag names (cleaned), one per parameter value, verbatim so a name may contain commas. Drop items carrying any. At most 100 of 200 characters. | `/Items` and `/Search/Facets` through `TranslateQuery`; also triggers search pool widening | `model/library-filter-marks.js` (library popover). The search sheet does not send it |
 | `tagMatch` | `all` makes stock's `tags` list an AND (needs 2+ tags) | Same as above | `library-filter-marks.js`, `model/search-filters.js` |
+| `jpTagLimit` | Return at most this many tags (1 to 5000) from `/Items/Filters` or `/Items/Filters2`; the match count comes back in header `X-JellyfinPlus-TagTotal` | `FilterController` postfixes (`FilterCachePatches.cs`) | `controller/tag-window.js`, `library-filters.js` |
+| `jpTagQuery` | Return only tags containing this text (case- and diacritic-insensitive) | Same | `controller/tag-window.js` |
 | `jpMinRuntime`, `jpMaxRuntime` | Whole minutes, inclusive, digits only | Same as above | `model/search-filters.js` (`filterPairs`) |
 | `jpMinDateAdded`, `jpMaxDateAdded` | `YYYY-MM-DD`, UTC day, inclusive | Same | `model/search-filters.js` |
 | `jpResolution` | Comma list of `sd`, `hd`, `4k` | Same | `model/search-filters.js` |
@@ -534,6 +673,7 @@ only, by Clip Up Next).
 | What | Where | Rebuild or clear |
 |---|---|---|
 | Filter key cache | Two tables in Jellyfin's `jellyfin.db`: `JellyfinPlus_FilterKeys(LibraryId, Kind, ItemType, CleanValue, Value, ItemCount, RefId)` and `JellyfinPlus_FilterKeysMeta(LibraryId, Kind, BuiltAtUtc, SourceItemCount, KeyCount, Fingerprint)`. Created with `CREATE TABLE IF NOT EXISTS` by raw SQL; Jellyfin's own schema and migrations are never touched. One row per distinct key per library per item type. Kinds: tags, genres, years, ratings, genre entities. | Rebuild: `POST /JellyfinPlus/FilterCache/Rebuild` or the scheduled task. A forced rebuild deletes and rewrites each library's rows in one transaction, so readers see old or new rows, never a mix. Rows of libraries that no longer exist are removed on each rebuild. Nothing in the plugin drops the tables, including on uninstall. To remove them, stop Jellyfin, back up `jellyfin.db`, and drop both tables by hand (not exercised here; the engine recreates them on its next run). |
+| Search index | Three objects in `jellyfin.db`: virtual tables `JellyfinPlus_FtsNames`, `JellyfinPlus_FtsTags` (FTS5, trigram) and `JellyfinPlus_FtsMeta(Key, Value)`, holding the signature the index was built at. Created with `IF NOT EXISTS`; Jellyfin's schema is untouched. About 45 MB on an 80k-item library. | Rebuild: `POST /JellyfinPlus/FtsIndex/Rebuild` or the scheduled task. Safe to drop by hand with Jellyfin stopped (search falls back to the stock queries; the engine recreates and rebuilds it). Nothing in the plugin drops the tables, including on uninstall. |
 | Plugin settings | XML at `plugins/configurations/Jellyfin.Plugin.Plus.xml` under Jellyfin's data directory (`/var/lib/jellyfin/plugins/configurations/` in the install scripts). On first start the constructor copies `Jellyfin.Plugin.GpuUpscale.xml` over if the new file is absent. | Edit on the dashboard page; changes are pushed to the patches live. Delete the file with Jellyfin stopped to return to the defaults in section 1. |
 | Shader cache | `ShaderCacheDirectory`, default `/var/cache/jellyfin/jellyfin-plus-shaders`: composed shader files named `<level>+<level>.glsl`, and a `plcache/` subdirectory where libplacebo keeps its compiled-shader scratch files. A composed file is rewritten if any input shader is newer. | Safe to delete the contents; composed files are rebuilt on demand and libplacebo recompiles, so the first sessions afterwards start slower (inferred from the code, not timed). |
 | Shaders and models (inputs) | `ShaderDirectory` `/usr/share/jellyfin-shaders`; neural models, DLSS runtime, depth model, DLPP and VSR DLL paths under `/usr/lib/jellyfin-ffmpeg-oidn/` (all configurable). Not shipped with the plugin. | `scripts/install-shaders.sh`; see INSTALL.md |

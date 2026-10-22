@@ -20,6 +20,7 @@ import { installClipUpNext } from './controller/clip-upnext.js';
 import { installDetailRelated } from './controller/detail-related.js';
 import { installPersonVideos } from './controller/person-videos.js';
 import { installBulkTags } from './controller/bulk-tags.js';
+import { installSearchCensus } from './controller/search-census.js';
 import { installLibraryFilterHooks } from './controller/library-filters.js';
 import { installLibraryFilterPanel } from './view/library-filter-panel.js';
 
@@ -42,6 +43,8 @@ function feature(name, install) {
     log('bootstrap install: start');
     try {
         hookWebpack();
+        // Innermost on purpose: it must judge a search url AFTER network.js's markings have rewritten it.
+        feature('search census', installSearchCensus);
         hookFetch();
         hookXhr();
         // Wraps fetch/XHR on top of the hooks above, so it must come after them.

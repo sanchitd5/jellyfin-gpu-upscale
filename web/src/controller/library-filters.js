@@ -1,6 +1,7 @@
 import { log } from '../lib/log.js';
 import { rewriteLibraryUrl, parseTags, buildTags } from '../model/library-filter-marks.js';
 import { getQueryClient } from './search-exclude.js';
+import { fetchTagWindow, TOTAL_HEADER } from './tag-window.js';
 
 /*
  * THE LIBRARY FILTER POPOVER'S DATA SIDE (view/library-filter-panel.js is the DOM side).
@@ -202,10 +203,53 @@ function noteFullList(key, tags) {
         norm: tags.map(normalize),
         search: prev ? prev.search : '',
         windowed: tags.length > WINDOW_LIMIT,
+        serverSide: false,
+        total: tags.length,
         matches: tags.length,
         shown: tags.length
     };
     return lists[key];
+}
+
+/*
+ * The server answered a WINDOW of a long list (jpTagLimit) and said how many tags there are in all.
+ * `full` is only that first slice, so matching happens on the server: `cur` is the newest window
+ * received (for the query it was asked with), and a change of search text fetches the next one.
+ */
+function noteServerList(key, firstSlice, total) {
+    var prev = lists[key];
+    var base = { q: '', tags: firstSlice.slice(0, WINDOW_SIZE), total: total };
+    if (prev && prev.serverSide) {
+        // A refetch of the same list: keep the window for the text typed so far (and any request in
+        // flight for it); only the unfiltered slice and the count are replaced.
+        prev.full = firstSlice;
+        prev.total = total;
+        prev.base = base;
+        if (prev.cur.q === '') {
+            prev.cur = base;
+        }
+
+        return prev;
+    }
+
+    lists[key] = {
+        full: firstSlice,
+        norm: [],
+        search: prev ? prev.search : '',
+        windowed: true,
+        serverSide: true,
+        total: total,
+        base: base,
+        cur: base,
+        asked: '',
+        matches: total,
+        shown: base.tags.length
+    };
+    return lists[key];
+}
+
+function ordinal(a, b) {
+    return a < b ? -1 : (a > b ? 1 : 0);
 }
 
 export function setSearch(key, text) {
@@ -221,6 +265,23 @@ function windowTags(key, parentId) {
     var keep = {};
     sel.tags.concat(sel.exclude).forEach(function (t) { keep[t] = true; });
     var q = normalize(e.search || '').trim();
+    if (e.serverSide) {
+        // The window is whatever the server last sent for some query; selected and excluded tags are
+        // always added (they are known by name), and the whole thing stays in the server's order.
+        var seen = {};
+        var merged = [];
+        e.cur.tags.concat(Object.keys(keep)).forEach(function (t) {
+            if (!seen[t]) {
+                seen[t] = true;
+                merged.push(t);
+            }
+        });
+        merged.sort(ordinal);
+        e.matches = e.cur.total;
+        e.shown = merged.length;
+        return merged;
+    }
+
     var out = [];
     var shown = 0;
     var matches = 0;
@@ -241,12 +302,60 @@ function windowTags(key, parentId) {
     return out;
 }
 
+/*
+ * A server-side list shows the newest window it has until the one for the current search text
+ * arrives; then it swaps it in. One request per distinct text (the panel debounces typing), and a
+ * reply for text that has since changed is dropped.
+ */
+function askServer(key, parentId, itemTypes) {
+    var e = lists[key];
+    var q = normalize(e.search || '').trim();
+    if (q === e.cur.q || q === e.asked) {
+        return;
+    }
+
+    if (!q) {
+        e.cur = e.base;
+        e.asked = '';
+        return;
+    }
+
+    e.asked = q;
+    fetchTagWindow({ parentId: parentId, itemTypes: itemTypes, query: e.search, limit: WINDOW_SIZE }).then(function (w) {
+        if (lists[key] !== e) {
+            return;
+        }
+
+        if (normalize(e.search || '').trim() !== q) {
+            // Typed on since: this reply is not wanted now, and asking for it again later must work.
+            if (e.asked === q) {
+                e.asked = '';
+            }
+
+            return;
+        }
+
+        e.cur = { q: q, tags: w.tags, total: w.total };
+        applyWindow(parentId, itemTypes);
+    }, function (err) {
+        if (lists[key] === e) {
+            e.asked = '';
+        }
+
+        log('tag window request failed', err);
+    });
+}
+
 /* Writes the current window into the React Query entry/entries for this list. */
 export function applyWindow(parentId, itemTypes) {
     var qc = getQueryClient();
     var key = listKey(parentId, itemTypes);
     if (!qc || !lists[key] || !lists[key].windowed) {
         return false;
+    }
+
+    if (lists[key].serverSide) {
+        askServer(key, parentId, itemTypes);
     }
 
     var tags = windowTags(key, parentId);
@@ -305,8 +414,22 @@ export function ensureWindowed(ctx) {
 
 var FILTERS_URL = /\/Items\/Filters\?/i;
 
+/*
+ * The popover's /Items/Filters request, asking the server for at most WINDOW_LIMIT + 1 tags. A library
+ * with more is windowed anyway, so it never needs more than the first slice (plus the count, which
+ * comes back in a header); a library with fewer gets its whole list, exactly as before. A server
+ * that ignores the parameter answers in full and the full-list path below handles that.
+ */
+function openUrl(url) {
+    if (typeof url !== 'string' || !FILTERS_URL.test(url) || /[?&]jpTagLimit=/i.test(url)) {
+        return url;
+    }
+
+    return url + '&jpTagLimit=' + (WINDOW_LIMIT + 1);
+}
+
 /* The /Items/Filters body, with a long Tags list replaced by its window. */
-function windowResponse(raw, url) {
+function windowResponse(raw, url, totalHeader) {
     var body = JSON.parse(raw);
     if (!body || !Array.isArray(body.Tags)) {
         return raw;
@@ -314,6 +437,16 @@ function windowResponse(raw, url) {
 
     var parentId = queryParam(url, 'parentid')[0];
     var key = listKey(parentId, queryParam(url, 'includeitemtypes'));
+    var total = totalHeader == null || totalHeader === '' ? NaN : parseInt(totalHeader, 10);
+    if (!isNaN(total) && total > body.Tags.length) {
+        // The server cut the list (jpTagLimit, see openUrl): this is its first slice of `total` tags.
+        noteServerList(key, body.Tags, total);
+        body.Tags = windowTags(key, parentId);
+        body.GuWindow = true;
+        log('tag list windowed by the server: ' + body.Tags.length + ' of ' + total);
+        return JSON.stringify(body);
+    }
+
     var e = noteFullList(key, body.Tags);
     if (!e.windowed) {
         return raw;
@@ -334,7 +467,7 @@ export function installLibraryFilterHooks() {
 
             proto.open = function (method, url) {
                 try {
-                    var out = rewriteLibraryUrl(url);
+                    var out = openUrl(rewriteLibraryUrl(url));
                     this.__jellyfinPlusLibUrl = out;
                     if (out !== url) {
                         var args = Array.prototype.slice.call(arguments);
@@ -360,7 +493,7 @@ export function installLibraryFilterHooks() {
                                 var raw = Object.getOwnPropertyDescriptor(
                                     window.XMLHttpRequest.prototype, 'responseText').get.call(xhr);
                                 try {
-                                    return windowResponse(raw, url);
+                                    return windowResponse(raw, url, xhr.getResponseHeader(TOTAL_HEADER));
                                 } catch (err) {
                                     log('windowing the tag list failed; passing it through', err);
                                     return raw;

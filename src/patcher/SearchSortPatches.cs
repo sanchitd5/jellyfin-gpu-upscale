@@ -51,6 +51,8 @@ namespace Jellyfin.Plugin.Plus.Patcher
     /// raises the pool to stock + startIndex, and jpPaged=true to <see cref="MaxPagedCandidates"/> from page
     /// 1. TotalRecordCount then means "matches among the first N relevance candidates" (N = the pool, at
     /// most 5000): exact when it is below N, a lower bound when it equals what N candidates can yield.
+    /// The final candidates are also remembered on the request for SearchDeepPagePatches, which makes the
+    /// entity load page-sized instead of pool-sized (same results; see that class).
     ///
     /// ALL-OF PEOPLE. jpPersonMatch=all with two or more personIds narrows the candidates (in the same
     /// postfix, sorted or not) to items credited with every one of them; stock's any-of personIds then
@@ -176,6 +178,12 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
             /// <summary>The request's personTypes (credit roles), applied to each person's credit row.</summary>
             public string[] PersonTypes { get; set; } = Array.Empty<string>();
+
+            /// <summary>The request's limit (page size), when present and valid. Used to remember the page for deep paging.</summary>
+            public int? Limit { get; set; }
+
+            /// <summary>The request, so the final candidates can be remembered on it after an await.</summary>
+            public HttpContext Context { get; set; }
         }
 
         /// <summary>
@@ -261,6 +269,12 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 spec.StartIndex = start;
             }
 
+            if (query.TryGetValue("limit", out var limitValues)
+                && int.TryParse(limitValues.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out var limit))
+            {
+                spec.Limit = limit;
+            }
+
             spec.PersonTypes = SplitList(query, "personTypes").Distinct(StringComparer.Ordinal).ToArray();
             if (SplitList(query, PersonMatchParam).Any(v => string.Equals(v, "all", StringComparison.OrdinalIgnoreCase)))
             {
@@ -324,7 +338,11 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 }
 
                 spec.UserId = query.UserId;
-                if (spec.Sort.Length > 0 || spec.AllPersons != null)
+                spec.Context = _http.HttpContext;
+
+                // The postfix also runs for a plain search when deep paging can use the final candidates
+                // (it only remembers them on the request; the result is returned as it was).
+                if (spec.Sort.Length > 0 || spec.AllPersons != null || (SearchDeepPagePatches.Available && spec.Limit.HasValue))
                 {
                     __state = spec;
                 }
@@ -356,7 +374,33 @@ namespace Jellyfin.Plugin.Plus.Patcher
         {
             // The stock result, and any exception it throws, pass through exactly as before.
             var results = await original.ConfigureAwait(false);
+            var refined = await RefineAsync(manager, spec, results).ConfigureAwait(false);
 
+            // Remember the final candidates so the entity load can be limited to the page (deep paging).
+            // Only a note on the request; the returned list is exactly what was refined.
+            try
+            {
+                SearchDeepPagePatches.Record(spec.Context, refined, spec.StartIndex, spec.Limit);
+            }
+            catch (Exception ex)
+            {
+                Warn(ex);
+            }
+
+            return refined;
+        }
+
+        private static async Task<IReadOnlyList<SearchResult>> RefineAsync(
+            object manager,
+            Spec spec,
+            IReadOnlyList<SearchResult> results)
+        {
+            if (spec.Sort.Length == 0 && spec.AllPersons == null)
+            {
+                return results;
+            }
+
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 if (results == null || results.Count == 0)
@@ -408,6 +452,10 @@ namespace Jellyfin.Plugin.Plus.Patcher
             {
                 Warn(ex);
                 return results;
+            }
+            finally
+            {
+                ServerTimingPatches.Record("sort", ServerTimingPatches.Ms(started));
             }
         }
 

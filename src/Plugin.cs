@@ -69,7 +69,28 @@ namespace Jellyfin.Plugin.Plus
 
         public override Guid Id => Guid.Parse("6f2a9c31-4d7b-4e2a-9d15-8a1c0b7e3f44");
 
-        public override string Description => "Jellyfin Plus: realtime GPU upscaling of transcodes, tag search, library tag filters and other quality-of-life patches.";
+        /// <summary>One-line summary, used as meta.json "overview" (catalogue / plugin card).</summary>
+        public const string Overview = "GPU video enhancement plus search, filtering and library quality-of-life improvements for Jellyfin.";
+
+        /// <summary>
+        /// Shown on the dashboard's plugin page as plain text (line breaks collapse to spaces, so each
+        /// section leads with its own label). Keep it accurate
+        /// to what ships: ENHANCEMENTS.md is the full list.
+        /// </summary>
+        public override string Description =>
+            "Jellyfin Plus extends Jellyfin with GPU video enhancement and a set of search, browsing and library improvements.\n\n"
+            + "Video enhancement: real-time super-resolution upscaling, denoising, deblurring, deblocking, debanding and other "
+            + "GPU filters, applied inside the transcode and chosen per session from the player's Enhance panel. Source files "
+            + "are never rewritten; direct play is untouched unless enhancement is requested.\n\n"
+            + "Search: matches tags as well as titles, supports * and ? wildcards (case-insensitive), per-tag exclusion, "
+            + "sorting, and a Sort & filter sheet (cast & crew, tags, studio, runtime, date added, resolution, played, "
+            + "favourites), with pages or infinite scroll in a grid on desktop and mobile.\n\n"
+            + "Library: tag exclude and match-all filters, a searchable tag list served from a filter cache that is rebuilt "
+            + "after library scans (manual rebuild: Scheduled Tasks > Jellyfin Plus: rebuild filter cache), More Like This "
+            + "and tag/person chips for videos, bulk tag editing, and tap-friendly card actions on mobile.\n\n"
+            + "Everything is applied at runtime through Harmony patches and an injected web-client script. Each part falls "
+            + "back to stock Jellyfin behaviour if it cannot be applied. The full list of changes is in ENHANCEMENTS.md in "
+            + "the project repository.";
 
         public IEnumerable<PluginPageInfo> GetPages()
         {
