@@ -102,15 +102,51 @@ export function noteQueryClient(exports) {
     } catch (err) { /* an exotic export is not a reason to break module loading */ }
 }
 
-/* Re-runs the search page's queries so they go out again with the current exclusion. */
+var refetchGeneration = 0;
+
+function isSectionsQuery(q) {
+    return q.queryKey && q.queryKey[0] === 'Search' && q.queryKey[1] === 'Items';
+}
+
+/*
+ * Re-runs the search page's queries so they go out again with the current exclusion.
+ *
+ * TWO PHASES, in order. useSearchItems' ['Search', 'Items', ...] query is what the page renders,
+ * and its queryFn builds the sections from the OTHER search queries' data (videos, people, ...)
+ * as captured in the closure of the last render. Invalidating all of them at once re-ran it with
+ * the previous data, so the screen always showed the exclusion before last - verified live: the
+ * Video query held the excluded result while the page kept the old cards. So: refetch every
+ * search query except Items, let React re-render with the new data (which hands Items a fresh
+ * queryFn), and only then refetch Items. A newer keystroke abandons an older run's second phase.
+ */
 function refetchSearch() {
     if (!queryClient) {
         log('refetchSearch: no React Query client found; results refresh on the next search');
         return;
     }
 
+    var generation = ++refetchGeneration;
     try {
-        queryClient.invalidateQueries({ queryKey: ['Search'] });
+        Promise.resolve(queryClient.invalidateQueries({
+            predicate: function (q) {
+                return q.queryKey && q.queryKey[0] === 'Search' && !isSectionsQuery(q);
+            }
+        }))
+            .catch(function (err) { log('refetchSearch: phase 1 failed', err); })
+            .then(function () {
+                // Two frames: React commits the new data, then effects update the observers.
+                return new Promise(function (resolve) {
+                    requestAnimationFrame(function () { requestAnimationFrame(resolve); });
+                });
+            })
+            .then(function () {
+                if (generation !== refetchGeneration) {
+                    return undefined;
+                }
+
+                return queryClient.invalidateQueries({ predicate: isSectionsQuery });
+            })
+            .catch(function (err) { log('refetchSearch: phase 2 failed', err); });
     } catch (err) {
         log('refetchSearch: invalidateQueries threw', err);
     }
