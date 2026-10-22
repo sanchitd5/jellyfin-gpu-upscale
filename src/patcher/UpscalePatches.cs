@@ -204,6 +204,26 @@ namespace Jellyfin.Plugin.GpuUpscale.Patcher
                 logger?.LogWarning(ex, "GpuUpscale: the tag search patch could not be installed. Stock name search is unaffected.");
             }
 
+            // Library tag filters: BaseItemRepository.TranslateQuery honours excludeTagNames /
+            // tagMatch=all on /Items. Only ever narrows a listing. Own try/catch.
+            try
+            {
+                LibraryFilterPatches.Apply(harmony, logger);
+                if (LibraryFilterPatches.Available)
+                {
+                    applied.Add("library tag exclude / match-all");
+                }
+                else
+                {
+                    failed.Add("library tag exclude / match-all (stock listing unaffected)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("library tag exclude / match-all (stock listing unaffected)");
+                logger?.LogWarning(ex, "GpuUpscale: the library tag filter patch could not be installed. Stock library listing is unaffected.");
+            }
+
             // More Like This for Video items (no stock provider covers Video). Own try/catch.
             try
             {

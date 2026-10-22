@@ -28,6 +28,7 @@ esbuild) support natively.
 | module | exports | imports |
 |---|---|---|
 | `model/controls-data.js` | `CONTROLS`, `SR_ALIASES`, `GAME_OPTION_KEYS`, `DEFAULT_PREFS` | none (pure data) |
+| `model/library-filter-marks.js` | `MARK_START`, `mark()`, `isMark()`, `parseTags()`, `buildTags()`, `rewriteLibraryUrl()` | none (pure) |
 | `model/state.js` | `state` (the mutable session singleton), `LADDER_SHARPEN`, `LADDER_SR`, `FPS`, `DENOISE_COST`, `NEURAL_COST`, `GAME_COST`, `COSTS`, `DEBLOCK_COST` | `controls-data.js` (`DEFAULT_PREFS`, to seed `state.prefs`) |
 | `model/prefs-store.js` | `savePrefs()`; loads stored prefs into `state` as a side effect on import | `state.js`, `controls-data.js` (`DEFAULT_PREFS`, `SR_ALIASES`) |
 | `model/costing.js` | `serverConfig()`, `eligibleTargets()`, `srWouldRun()`, `stageCost()`, `selectionCost()`, `costHint()` | `state.js`, `controls-data.js` (`CONTROLS`), `effective.js` (`shownPrefs`) `<->`, `lib/utils.js` (`isOff`) |
@@ -42,7 +43,8 @@ esbuild) support natively.
 | `controller/probe.js` | `probeServer()`, `axisControls()`, `controlNote()` | `model/state.js`, `model/controls-data.js` (`CONTROLS`), `model/costing.js` (`eligibleTargets`, `srWouldRun`), `model/effective.js` (`shownPrefs`), `lib/log.js`, `lib/utils.js` (`isOff`) |
 | `controller/network.js` | `wireParams()`, `paramSig()`, `addParams()`, `markHlsUrl()`, `hookFetch()`, `hookXhr()` | `model/state.js`, `model/controls-data.js` (`GAME_OPTION_KEYS`), `model/effective.js` (`effective`, `anyEnhancement`) `<->`, `playback-hooks.js` (`resetUpscaleForNewSource`) `<->`, `search-exclude.js` (`markSearchUrl`), `lib/log.js` |
 | `controller/search-scope.js` | `installSearchScopeFix()` | `lib/log.js` |
-| `controller/search-exclude.js` | `excludeText()`, `markSearchUrl()`, `noteQueryClient()`, `watchSearchPage()` | `lib/log.js`, `lib/dom.js` (`el`) |
+| `controller/library-filters.js` | `WINDOW_LIMIT`, `WINDOW_SIZE`, `normalize()`, `listKey()`, `listState()`, `setSearch()`, `applyWindow()`, `ensureWindowed()`, `findFilterContext()`, `readFilters()`, `updateFilters()`, `updateTagState()`, `nameOf()`, `searchEntities()`, `installLibraryFilterHooks()` | `lib/log.js`, `search-exclude.js` (`getQueryClient`), `model/library-filter-marks.js` |
+| `controller/search-exclude.js` | `excludeText()`, `markSearchUrl()`, `noteQueryClient()`, `getQueryClient()`, `watchSearchPage()` | `lib/log.js`, `lib/dom.js` (`el`) |
 | `controller/live-apply.js` | `repaintPanel()`, `isPlaybackManager()`, `notePlaybackManager()`, `player()`, `playerPresent()`, `watchApplied()`, `replayHere()`, `directPlaying()`, `requestRestream()`, `activeState()`, `APPLY_LABEL`, `APPLY_FAILED_TEXT` | `model/state.js`, `lib/utils.js` (`isOff`), `lib/log.js`, `view/panel-dom.js` (`renderPanel`, `panelEl`) `<->`, `live-block.js` (`LIVE_ROWS`) `<->` |
 | `controller/live-block.js` | `LIVE_ROWS`, `staleNote()`, `liveLines()`, `fetchServerState()` | `model/state.js`, `lib/utils.js` (`isOff`), `network.js` (`wireParams`, `paramSig`), `live-apply.js` (`activeState`) `<->` |
 | `controller/action-sheet.js` | `isPlayerSettingsSheet()`, `wrapActionSheet()` | `model/state.js`, `model/effective.js` (`summaryText`), `playback-hooks.js` (`openEnhancePanel`) `<->`, `lib/log.js` |
@@ -62,6 +64,7 @@ esbuild) support natively.
 | `view/panel-dom.js` | `FOCUSABLE`, `PANEL_ID`, `panelEl()`, `ensureStyle()`, `liveRows()`, `applyPanelPos()`, `renderPanel()`, `closePanel()` | `lib/dom.js` (`el`), `lib/log.js`, `model/state.js`, `model/controls-data.js` (`CONTROLS`, `DEFAULT_PREFS`), `model/conflicts.js`, `model/effective.js`, `model/ladder.js`, `model/costing.js`, `model/prefs-store.js` (`savePrefs`), `controller/live-apply.js` (`requestRestream`, `activeState`, `APPLY_LABEL`, `APPLY_FAILED_TEXT`) `<->`, `controller/live-block.js` (`liveLines`), `controller/probe.js` (`axisControls`, `controlNote`) |
 | `view/search-grid.js` | `installSearchGrid()` | `lib/log.js` |
 | `view/image-zoom.js` | `fullSizeUrl()`, `installImageZoom()` | `lib/log.js`, `lib/dom.js` (`el`) |
+| `view/library-filter-panel.js` | `installLibraryFilterPanel()` | `lib/log.js`, `lib/dom.js` (`el`), `controller/library-filters.js` |
 | `view/card-actions.js` | `installCardActions()` | `lib/log.js`, `lib/dom.js` (`el`) |
 | `view/bulk-tags-dialog.js` | `showTagDialog()` | `lib/dom.js` (`el`), `lib/log.js` |
 

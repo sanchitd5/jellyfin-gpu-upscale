@@ -17,6 +17,8 @@ import { installClipUpNext } from './controller/clip-upnext.js';
 import { installDetailRelated } from './controller/detail-related.js';
 import { installPersonVideos } from './controller/person-videos.js';
 import { installBulkTags } from './controller/bulk-tags.js';
+import { installLibraryFilterHooks } from './controller/library-filters.js';
+import { installLibraryFilterPanel } from './view/library-filter-panel.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -41,6 +43,8 @@ function feature(name, install) {
         hookXhr();
         // Wraps fetch/XHR on top of the hooks above, so it must come after them.
         feature('play-all fix', installPlayAllFix);
+        feature('library filter hooks', installLibraryFilterHooks);
+        feature('library filter panel', installLibraryFilterPanel);
         tryRequireShim();
         watchPlaybackInfoDialog();
         feature('search page', watchSearchPage);
