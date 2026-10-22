@@ -54,6 +54,11 @@
       <HintPath>$(JellyfinBin)/Microsoft.EntityFrameworkCore.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Filter key cache (FilterCacheEngine.cs): raw SQL on Jellyfin's own connection (GetDbConnection). -->
+    <Reference Include="Microsoft.EntityFrameworkCore.Relational">
+      <HintPath>$(JellyfinBin)/Microsoft.EntityFrameworkCore.Relational.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Microsoft.EntityFrameworkCore.Abstractions">
       <HintPath>$(JellyfinBin)/Microsoft.EntityFrameworkCore.Abstractions.dll</HintPath>
       <Private>false</Private>

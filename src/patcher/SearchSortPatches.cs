@@ -45,6 +45,17 @@ namespace Jellyfin.Plugin.Plus.Patcher
     /// float change hands, user-access filtering is still done by folder.GetItems untouched, and the
     /// set of items returned is exactly the stock set - only their order differs.
     ///
+    /// PAGING. ItemsController pages the loaded candidates in memory (startIndex/limit) and reports
+    /// TotalRecordCount as the number of candidates that survived loading and filtering, so with the stock
+    /// pool of limit*3 page 4 of limit 100 is empty and the total is at most 300. startIndex &gt; 0 therefore
+    /// raises the pool to stock + startIndex, and jpPaged=true to <see cref="MaxPagedCandidates"/> from page
+    /// 1. TotalRecordCount then means "matches among the first N relevance candidates" (N = the pool, at
+    /// most 5000): exact when it is below N, a lower bound when it equals what N candidates can yield.
+    ///
+    /// ALL-OF PEOPLE. jpPersonMatch=all with two or more personIds narrows the candidates (in the same
+    /// postfix, sorted or not) to items credited with every one of them; stock's any-of personIds then
+    /// runs on what is left. Fail-soft: on any error the stock candidates are returned.
+    ///
     /// WITH NO PARAMETERS the request is untouched: the prefix leaves Limit alone and the postfix
     /// returns the original task. Total, like every other patch: any failure returns the stock
     /// candidates in stock order.
@@ -54,17 +65,32 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// <summary>Candidate-pool size used when a sort or filter is requested.</summary>
         public const int MaxCandidates = 2000;
 
+        /// <summary>
+        /// Candidate-pool size for a paged search (jpPaged=true, or startIndex past the stock window).
+        /// 5000 because the page-size choices are 50/100/200 and a pool of 5000 ids is still one cheap
+        /// id+score query and one ids-only item load; 25 pages of 200 is more than a person pages through
+        /// before refining the search. Beyond it the result is truncated, not wrong (see TotalRecordCount).
+        /// </summary>
+        public const int MaxPagedCandidates = 5000;
+
         public const string SortByParam = "sortBy";
         public const string SortOrderParam = "sortOrder";
         public const string SeedParam = "jpSeed";
+        public const string PagedParam = "jpPaged";
+        public const string PersonMatchParam = "jpPersonMatch";
+
+        // The id stock's search provider uses when it has nothing to return (12.1: SqlSearchProvider).
+        // An empty candidate list makes ItemsController fall back to a name-substring query, which would
+        // undo a narrowing; this id exists in no table, so the controller loads nothing for it.
+        private static readonly Guid _placeholderId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
         // Request parameters from the wire contract that act AFTER candidate selection, so need a
         // pool wide enough to leave something once they have narrowed it. includeItemTypes /
         // mediaTypes are deliberately absent: the provider applies those itself, inside its query.
         private static readonly string[] _filterParams =
         {
-            "isPlayed", "isFavorite", "tags", "tagMatch", "excludeTagNames", "personIds", "studioIds",
-            "jpMinRuntime", "jpMaxRuntime", "jpMinDateAdded", "jpMaxDateAdded", "jpResolution",
+            "isPlayed", "isFavorite", "tags", "tagMatch", "excludeTagNames", "personIds", "personTypes",
+            "jpPersonMatch", "studioIds", "jpMinRuntime", "jpMaxRuntime", "jpMinDateAdded", "jpMaxDateAdded", "jpResolution",
         };
 
         private static readonly HttpContextAccessor _http = new HttpContextAccessor();
@@ -138,6 +164,46 @@ namespace Jellyfin.Plugin.Plus.Patcher
             public bool Widen { get; set; }
 
             public Guid? UserId { get; set; }
+
+            /// <summary>jpPaged=true: the client pages through the result and wants a meaningful total.</summary>
+            public bool Paged { get; set; }
+
+            /// <summary>The request's startIndex (0 when absent or malformed).</summary>
+            public int StartIndex { get; set; }
+
+            /// <summary>With jpPersonMatch=all and two or more distinct personIds: the people who must ALL credit an item. Null otherwise.</summary>
+            public Guid[] AllPersons { get; set; }
+
+            /// <summary>The request's personTypes (credit roles), applied to each person's credit row.</summary>
+            public string[] PersonTypes { get; set; } = Array.Empty<string>();
+        }
+
+        /// <summary>
+        /// The candidate-pool size to ask the providers for, or null to leave the stock limit alone.
+        /// Never lowers a limit (the all-types search already asks for 2400). A sort or filter widens to
+        /// <see cref="MaxCandidates"/>; a request past the stock window (startIndex &gt; 0) needs the stock
+        /// pool plus the offset, or page 4 of limit 100 is empty; a paged request takes the whole
+        /// <see cref="MaxPagedCandidates"/> so its total (and so "page X of Y") is meaningful from page 1.
+        /// </summary>
+        internal static int? ComputePool(int? stockLimit, Spec spec)
+        {
+            var target = 0;
+            if (spec.Widen)
+            {
+                target = MaxCandidates;
+            }
+
+            if (spec.StartIndex > 0 && stockLimit.HasValue)
+            {
+                target = Math.Max(target, (int)Math.Min(MaxPagedCandidates, (long)stockLimit.Value + spec.StartIndex));
+            }
+
+            if (spec.Paged)
+            {
+                target = MaxPagedCandidates;
+            }
+
+            return target > 0 && (stockLimit ?? 100) < target ? target : null;
         }
 
         internal enum SortKey
@@ -186,6 +252,29 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
             spec.Widen = spec.Sort.Length > 0
                 || _filterParams.Any(p => query.TryGetValue(p, out var v) && v.Any(s => !string.IsNullOrWhiteSpace(s)));
+
+            spec.Paged = query.TryGetValue(PagedParam, out var pagedValues)
+                && pagedValues.Any(v => string.Equals(v, "true", StringComparison.OrdinalIgnoreCase));
+            if (query.TryGetValue("startIndex", out var startValues)
+                && int.TryParse(startValues.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out var start))
+            {
+                spec.StartIndex = start;
+            }
+
+            spec.PersonTypes = SplitList(query, "personTypes").Distinct(StringComparer.Ordinal).ToArray();
+            if (SplitList(query, PersonMatchParam).Any(v => string.Equals(v, "all", StringComparison.OrdinalIgnoreCase)))
+            {
+                var people = SplitList(query, "personIds")
+                    .Select(s => Guid.TryParse(s, out var g) ? g : Guid.Empty)
+                    .Where(g => g != Guid.Empty)
+                    .Distinct()
+                    .ToArray();
+                if (people.Length >= 2)
+                {
+                    spec.AllPersons = people;
+                }
+            }
+
             return spec;
         }
 
@@ -226,19 +315,16 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 }
 
                 var spec = ParseSpec(request.Query);
-                if (!spec.Widen)
-                {
-                    return;
-                }
 
-                // Never lower a limit the caller already made larger (the all-types search asks for 2400).
-                if ((query.Limit ?? 100) < MaxCandidates)
+                // Never lowers a limit the caller already made larger (the all-types search asks for 2400).
+                var pool = ComputePool(query.Limit, spec);
+                if (pool.HasValue)
                 {
-                    _setLimit.Invoke(query, new object[] { MaxCandidates });
+                    _setLimit.Invoke(query, new object[] { pool.Value });
                 }
 
                 spec.UserId = query.UserId;
-                if (spec.Sort.Length > 0)
+                if (spec.Sort.Length > 0 || spec.AllPersons != null)
                 {
                     __state = spec;
                 }
@@ -273,13 +359,38 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
             try
             {
-                if (results == null || results.Count < 2)
+                if (results == null || results.Count == 0)
                 {
                     return results;
                 }
 
                 var factory = (IDbContextFactory<JellyfinDbContext>)_dbProvider.GetValue(manager);
                 if (factory == null)
+                {
+                    return results;
+                }
+
+                // jpPersonMatch=all: narrow the candidates to items credited with EVERY picked person
+                // (stock's personIds is any-of, and still runs afterwards on what is left). Runs with or
+                // without a sort. Only ever removes candidates; a failure below returns what we had.
+                if (spec.AllPersons != null)
+                {
+                    var all = results.Select(r => r.ItemId).Distinct().ToArray();
+                    var keep = await PersonsAllAsync(factory, all, spec.AllPersons, spec.PersonTypes).ConfigureAwait(false);
+                    if (keep.Count == 0)
+                    {
+                        // An empty list makes the controller fall back to a name-substring query that
+                        // ignores this narrowing; a candidate that exists nowhere keeps "no match" true.
+                        return new[] { new SearchResult(_placeholderId, 0f) };
+                    }
+
+                    if (keep.Count < all.Length)
+                    {
+                        results = results.Where(r => keep.Contains(r.ItemId)).ToList();
+                    }
+                }
+
+                if (spec.Sort.Length == 0 || results.Count < 2)
                 {
                     return results;
                 }
@@ -297,6 +408,47 @@ namespace Jellyfin.Plugin.Plus.Patcher
             {
                 Warn(ex);
                 return results;
+            }
+        }
+
+        /// <summary>
+        /// The candidates credited with EVERY person. A person is resolved the way stock's personIds
+        /// filter does (TranslateQuery: Person BaseItem by id -> Name -> Peoples rows -> PeopleBaseItemMap);
+        /// with <paramref name="types"/> the credit's PersonType must be one of them, on the same credit
+        /// row, as stock requires. An unknown person id matches nothing, so "all of" then matches nothing.
+        /// </summary>
+        internal static async Task<HashSet<Guid>> PersonsAllAsync(
+            IDbContextFactory<JellyfinDbContext> factory,
+            Guid[] ids,
+            Guid[] people,
+            string[] types)
+        {
+            var db = await factory.CreateDbContextAsync().ConfigureAwait(false);
+            await using (db.ConfigureAwait(false))
+            {
+                var keep = ids.ToHashSet();
+                foreach (var pid in people)
+                {
+                    var peopleRowIds = db.BaseItems
+                        .Where(b => b.Id == pid)
+                        .Join(db.Peoples, b => b.Name, p => p.Name, (b, p) => p.Id);
+                    var credits = db.PeopleBaseItemMap
+                        .AsNoTracking()
+                        .Where(m => ids.Contains(m.ItemId) && peopleRowIds.Contains(m.PeopleId));
+                    if (types.Length > 0)
+                    {
+                        credits = credits.Where(m => types.Contains(m.People.PersonType));
+                    }
+
+                    var has = await credits.Select(m => m.ItemId).Distinct().ToListAsync().ConfigureAwait(false);
+                    keep.IntersectWith(has);
+                    if (keep.Count == 0)
+                    {
+                        break;
+                    }
+                }
+
+                return keep;
             }
         }
 
