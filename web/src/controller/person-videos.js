@@ -24,7 +24,7 @@ import { log } from '../lib/log.js';
  * the web client is touched.
  */
 
-var STYLE_ID = 'gpuUpscaleVideoSectionStyle';
+var STYLE_ID = 'jellyfinPlusVideoSectionStyle';
 var MARK = 'data-gpr-videos';
 var LIMIT = 24;
 

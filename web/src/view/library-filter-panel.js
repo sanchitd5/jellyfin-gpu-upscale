@@ -35,7 +35,7 @@ import {
  * through a global; everything is in try/catch so the web client cannot break.
  */
 
-var STYLE_ID = 'gpuUpscaleLibFilterStyle';
+var STYLE_ID = 'jellyfinPlusLibFilterStyle';
 var POPOVER_ID = 'filter-popover';
 var TAGS_REGION_ID = 'filtersTags-content';
 

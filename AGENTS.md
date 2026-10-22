@@ -25,7 +25,7 @@ Layout:
 src/                    plugin assembly (loads into Jellyfin's collectible ALC)
 src/patcher/            patcher assembly (loads into the DEFAULT ALC, this is where Harmony lives)
 src/Configuration/      settings class + the dashboard page
-web/src/                real ES modules (source); web/gpu-upscale.js is the BUILT, gitignored
+web/src/                real ES modules (source); web/jellyfin-plus.js is the BUILT, gitignored
                         bundle of it (esbuild, scripts/build-web-panel.sh) - the injected browser
                         script: the Enhance panel + request marking
 ffmpeg/vf_*.c           the five custom filters, plus their build patches and gen_perm.py
@@ -48,7 +48,7 @@ findings for both tracks are in `TASK.md`; the retired AIVP neural-path investig
 Jellyfin loads plugins into a collectible `AssemblyLoadContext`; Harmony cannot emit detours against
 one (`Resolving to a collectible assembly is not supported`). Jellyfin also enumerates plugin DLLs
 with `SearchOption.AllDirectories`, so a *subfolder* is not far enough away. The patcher ships to
-`/usr/lib/jellyfin-gpuupscale/`. The two sides exchange only primitives - JSON strings and an
+`/usr/lib/jellyfin-plus/`. The two sides exchange only primitives - JSON strings and an
 `object`-typed logger. Never let a shared type cross that boundary.
 
 **2. Lib.Harmony must be 2.4.2+.** 2.4.1 refuses .NET 10 outright.
@@ -63,7 +63,7 @@ separately, after the core set is live, each in its own try/catch.
 **4. Every patch fails safe.** A throw inside a postfix must leave Jellyfin's own value in place.
 Enhancement is a luxury; playback is not.
 
-**5. `/usr/lib/jellyfin-gpuupscale/gpu-upscale.js` is the canonical client script.**
+**5. `/usr/lib/jellyfin-plus/jellyfin-plus.js` is the canonical client script.**
 The injector copies it into `/usr/share/jellyfin/web/`. Editing the web copy directly gets silently
 reverted on the next inject *while the cache-buster still advances*, so browsers cache the old script
 under a new URL. This has already caused one "all the options vanished" incident. Edit the canonical

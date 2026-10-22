@@ -291,7 +291,7 @@ function playbackInfoHost(dialog) {
 
 function maybeAnnotate(dialog) {
     try {
-        if (!dialog || dialog.__gpuUpscaleAnnotated) {
+        if (!dialog || dialog.__jellyfinPlusAnnotated) {
             return;
         }
 
@@ -300,7 +300,7 @@ function maybeAnnotate(dialog) {
             return;
         }
 
-        dialog.__gpuUpscaleAnnotated = true;
+        dialog.__jellyfinPlusAnnotated = true;
         fetchServerState().then(function (s) {
             try {
                 if (!s) {

@@ -20,7 +20,7 @@ import { log } from '../lib/log.js';
  * horizontal rows).
  */
 
-var STYLE_ID = 'gpuUpscaleSearchGridStyle';
+var STYLE_ID = 'jellyfinPlusSearchGridStyle';
 
 function rules(scope) {
     var s = scope + ' #searchPage .searchResults';

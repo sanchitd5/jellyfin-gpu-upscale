@@ -36,8 +36,8 @@ var MIN_RUNTIME_SECONDS = 20;
 var POLL_MS = 500;
 var TICKS_PER_SECOND = 10000000;
 
-var STYLE_ID = 'gpuUpscaleUpNextStyle';
-var CARD_ID = 'gpuUpscaleUpNext';
+var STYLE_ID = 'jellyfinPlusUpNextStyle';
+var CARD_ID = 'jellyfinPlusUpNext';
 
 var CSS = [
     '#' + CARD_ID + ' { position: fixed; right: 12px; left: 12px; margin-left: auto; max-width: 26em;'

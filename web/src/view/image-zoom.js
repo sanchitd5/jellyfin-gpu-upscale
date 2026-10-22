@@ -21,8 +21,8 @@ import { el } from '../lib/dom.js';
  * badge is drawn on the poster by CSS alone so the option is visible, not just discoverable.
  */
 
-var STYLE_ID = 'gpuUpscaleImageZoomStyle';
-var OVERLAY_ID = 'gpuUpscaleImageZoom';
+var STYLE_ID = 'jellyfinPlusImageZoomStyle';
+var OVERLAY_ID = 'jellyfinPlusImageZoom';
 var POSTER = '#itemDetailPage .detailImageContainer .cardImageContainer';
 
 // cardBuilder's sizing parameters. Removing them asks the server for the stored image.

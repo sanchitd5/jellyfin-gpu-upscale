@@ -197,7 +197,7 @@ export function fetchServerState() {
 
         return client.ajax({
             type: 'GET',
-            url: client.getUrl('GpuUpscale/Session/' + encodeURIComponent(state.playSessionId)),
+            url: client.getUrl('JellyfinPlus/Session/' + encodeURIComponent(state.playSessionId)),
             dataType: 'json'
         }).then(function (s) {
             state.lastServerState = s;

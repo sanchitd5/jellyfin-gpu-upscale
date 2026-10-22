@@ -31,8 +31,8 @@ import { el } from '../lib/dom.js';
  * Tap targets are 40 px; the visible disc inside is smaller so the thumbnail is not covered.
  */
 
-var STYLE_ID = 'gpuUpscaleCardActionsStyle';
-var ROW_CLASS = 'gpuUpscaleCardActions';
+var STYLE_ID = 'jellyfinPlusCardActionsStyle';
+var ROW_CLASS = 'jellyfinPlusCardActions';
 var CARD_SELECTOR = '.card[data-id][data-serverid]';
 // The stock items-container classes; the click handler that executes data-action lives on them.
 var CONTAINER_SELECTOR = '.itemsContainer, [is="emby-itemscontainer"]';
@@ -56,7 +56,7 @@ var CSS = [
         + ' min-width: ' + TAP_TARGET + '; min-height: ' + TAP_TARGET + ';'
         + ' width: ' + TAP_TARGET + '; height: ' + TAP_TARGET + ';'
         + ' background: transparent; color: #fff; cursor: pointer; -webkit-tap-highlight-color: transparent; }',
-    'html.layout-mobile .' + ROW_CLASS + ' .gpuUpscaleDisc {'
+    'html.layout-mobile .' + ROW_CLASS + ' .jellyfinPlusDisc {'
         + ' display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;'
         + ' border-radius: 50%; background: rgba(0,0,0,0.7); pointer-events: none; }',
     'html.layout-mobile .' + ROW_CLASS + ' .material-icons {'
@@ -214,7 +214,7 @@ function iconButton(icon, title) {
     b.type = 'button';
     b.title = title;
     b.setAttribute('aria-label', title);
-    var disc = el('span', 'gpuUpscaleDisc');
+    var disc = el('span', 'jellyfinPlusDisc');
     disc.appendChild(el('span', 'material-icons', icon));
     disc.firstChild.setAttribute('aria-hidden', 'true');
     b.appendChild(disc);

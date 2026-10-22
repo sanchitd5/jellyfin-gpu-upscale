@@ -1,5 +1,5 @@
 /*
- * GPU Upscale - jellyfin-web client hook.
+ * Jellyfin Plus - jellyfin-web client hook.
  *
  * Adds one "Enhance" entry to the player's settings menu. Choosing it opens ONE FLAT PANEL over
  * the video - no nested sheets, no back buttons - carrying, in this order:

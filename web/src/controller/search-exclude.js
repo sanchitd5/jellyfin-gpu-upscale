@@ -19,9 +19,9 @@ import { el } from '../lib/dom.js';
  *     export (webpack-hook.js hands every export to noteQueryClient), never by a global name.
  */
 
-var STORE = 'gpuUpscale.searchExclude';
+var STORE = 'jellyfinPlus.searchExclude';
 var PARAM = 'excludeTags';
-var BOX_CLASS = 'gpuUpscaleSearchExclude';
+var BOX_CLASS = 'jellyfinPlusSearchExclude';
 
 // Search endpoints the server patch serves: the search page's /Items calls, and /Search/Hints.
 var IS_SEARCH = /\/(items|search\/hints)(\?|$)/i;
@@ -292,8 +292,8 @@ function ensureBox(fields) {
     fields.appendChild(buildBox());
 
     var main = fields.querySelector('#searchTextInput');
-    if (main && !main.__gpuUpscaleSubmit) {
-        main.__gpuUpscaleSubmit = true;
+    if (main && !main.__jellyfinPlusSubmit) {
+        main.__jellyfinPlusSubmit = true;
         main.setAttribute('enterkeyhint', 'search');
         main.addEventListener('keydown', onEnter);
     }

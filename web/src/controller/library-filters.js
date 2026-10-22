@@ -335,7 +335,7 @@ export function installLibraryFilterHooks() {
             proto.open = function (method, url) {
                 try {
                     var out = rewriteLibraryUrl(url);
-                    this.__gpuUpscaleLibUrl = out;
+                    this.__jellyfinPlusLibUrl = out;
                     if (out !== url) {
                         var args = Array.prototype.slice.call(arguments);
                         args[1] = out;
@@ -351,7 +351,7 @@ export function installLibraryFilterHooks() {
 
             proto.send = function (body) {
                 try {
-                    var url = this.__gpuUpscaleLibUrl;
+                    var url = this.__jellyfinPlusLibUrl;
                     if (typeof url === 'string' && FILTERS_URL.test(url)) {
                         var xhr = this;
                         Object.defineProperty(xhr, 'responseText', {
@@ -408,7 +408,7 @@ export function installLibraryFilterHooks() {
 
 /* ---- studios and people: names for ids, and the typeahead ---- */
 
-var NAMES_KEY = 'gpuUpscale.libFilterNames';
+var NAMES_KEY = 'jellyfinPlus.libFilterNames';
 var NAMES_MAX = 400;
 
 function readNames() {

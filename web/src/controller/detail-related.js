@@ -30,7 +30,7 @@ import { el } from '../lib/dom.js';
  * library.
  */
 
-var STYLE_ID = 'gpuUpscaleDetailRelatedStyle';
+var STYLE_ID = 'jellyfinPlusDetailRelatedStyle';
 
 // Item types that get chips / a similar row. Types, not "everything": a Movie already has
 // working versions of both.

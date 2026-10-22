@@ -112,7 +112,7 @@ function mark(url) {
 
 export function installPlayAllFix() {
     try {
-        if (window.fetch && !window.fetch.__gpuUpscalePlayAll) {
+        if (window.fetch && !window.fetch.__jellyfinPlusPlayAll) {
             var previousFetch = window.fetch;
             var wrappedFetch = function (input, init) {
                 if (typeof input === 'string') {
@@ -124,12 +124,12 @@ export function installPlayAllFix() {
 
                 return previousFetch.apply(this, arguments);
             };
-            wrappedFetch.__gpuUpscalePlayAll = true;
+            wrappedFetch.__jellyfinPlusPlayAll = true;
             window.fetch = wrappedFetch;
         }
 
         var proto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
-        if (proto && !proto.open.__gpuUpscalePlayAll) {
+        if (proto && !proto.open.__jellyfinPlusPlayAll) {
             var previousOpen = proto.open;
             var wrappedOpen = function (method, url) {
                 var args = arguments;
@@ -145,7 +145,7 @@ export function installPlayAllFix() {
 
                 return previousOpen.apply(this, args);
             };
-            wrappedOpen.__gpuUpscalePlayAll = true;
+            wrappedOpen.__jellyfinPlusPlayAll = true;
             proto.open = wrappedOpen;
         }
 
