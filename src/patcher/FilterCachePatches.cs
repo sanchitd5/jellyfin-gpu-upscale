@@ -134,7 +134,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     Years = years.Select(t => int.Parse(t.Clean, CultureInfo.InvariantCulture)).OrderBy(y => y).ToArray(),
                     OfficialRatings = ratings.Select(t => t.Value).OrderBy(v => v, StringComparer.Ordinal).ToArray(),
                 };
-                FilterCacheEngine.Count("served:legacy");
+                scope.Served("legacy");
                 return false;
             }
             catch (Exception ex)
@@ -155,7 +155,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 }
 
                 __result = scope.Read(FilterCacheEngine.Kind.Tag).Select(t => t.Value).OrderBy(v => v, StringComparer.Ordinal).ToArray();
-                FilterCacheEngine.Count("served:tags");
+                scope.Served("tags");
                 return false;
             }
             catch (Exception ex)
@@ -188,7 +188,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     .Select(g => ((BaseItem)new Genre { Id = Guid.Parse(g.RefId), Name = g.Value }, (ItemCounts)null))
                     .ToList();
                 __result = new QueryResult<(BaseItem Item, ItemCounts ItemCounts)>(items);
-                FilterCacheEngine.Count("served:genres");
+                scope.Served("genres");
                 return false;
             }
             catch (Exception ex)
@@ -215,6 +215,19 @@ namespace Jellyfin.Plugin.Plus.Patcher
             }
 
             public Guid[] Libs { get; }
+
+            /// <summary>True when the libraries changed since the cache was built (served anyway, within the age bound).</summary>
+            public bool Stale { get; set; }
+
+            /// <summary>Counts a served request: <c>served:what</c>, and <c>served:stale</c> as well when it was stale.</summary>
+            public void Served(string what)
+            {
+                FilterCacheEngine.Count("served:" + what);
+                if (Stale)
+                {
+                    FilterCacheEngine.Count("served:stale");
+                }
+            }
 
             /// <summary>Item type names to restrict to, or null for every type.</summary>
             public string[] Types { get; }
@@ -257,20 +270,33 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 }
             }
 
+            // Everything above was decided live from this request's user and libraries. What is left is only
+            // about the cached CONTENT: fresh is best, stale-but-recent is served too (stale-while-revalidate:
+            // at worst a just-added value is missing for a while, never a value the user may not see), and a
+            // rebuild is scheduled either way.
             var db = FilterCacheEngine.OpenDb(out var conn);
             try
             {
+                var stale = false;
                 foreach (var k in kinds)
                 {
-                    if (!FilterCacheEngine.IsFresh(db, conn, libs, k, out var why))
+                    var state = FilterCacheEngine.Check(db, conn, libs, k, out var why);
+                    if (state == FilterCacheEngine.Freshness.Unusable)
                     {
                         FilterCacheEngine.RequestHeal();
                         db.Dispose();
                         return Reject(why);
                     }
+
+                    stale |= state == FilterCacheEngine.Freshness.Stale;
                 }
 
-                return new Scope(db, conn, libs, types);
+                if (stale)
+                {
+                    FilterCacheEngine.RequestHeal();
+                }
+
+                return new Scope(db, conn, libs, types) { Stale = stale };
             }
             catch
             {
