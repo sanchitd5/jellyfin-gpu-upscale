@@ -13,8 +13,11 @@ mid-playback.
 > **Renamed from GPU Upscale.** The plugin began as a GPU upscaler and now also carries search fixes,
 > library-filter features and other quality-of-life patches, so the umbrella is **Jellyfin Plus**. The GPU
 > upscaling is still here, as the enhancement panel and engine. The plugin GUID is unchanged, and the
-> settings, shader cache and browser preferences carry over (migrated once on first run). Server paths and
-> log prefixes moved from `GpuUpscale` / `jellyfin-gpuupscale` to `JellyfinPlus` / `jellyfin-plus`.
+> settings, shader cache and browser preferences carry over. The plugin's constructor copies the old
+> `Jellyfin.Plugin.GpuUpscale.xml` settings to `Jellyfin.Plugin.Plus.xml` on first start (not the deploy
+> script); the shader cache moves to `/var/cache/jellyfin/jellyfin-plus-shaders`; browser preferences are
+> migrated by the client on first load. Server paths, HTTP routes (`/JellyfinPlus/...`) and log prefixes
+> moved from `GpuUpscale` / `jellyfin-gpuupscale` to `JellyfinPlus` / `jellyfin-plus`.
 
 Built and measured against Jellyfin **12.1.0** with an NVIDIA RTX 3090.
 
