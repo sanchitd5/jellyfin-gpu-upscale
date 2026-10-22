@@ -373,7 +373,7 @@ namespace Jellyfin.Plugin.Plus
             var idArray = ids as Guid[] ?? ids.ToArray();
             var personType = PersonType;
 
-            IQueryable<PeopleBaseItemMap> credits = db.PeopleBaseItemMap.AsNoTracking().Where(m => idArray.Contains(m.ItemId));
+            IQueryable<PeopleBaseItemMap> credits = db.PeopleBaseItemMap.AsNoTracking().Where(m => EF.Parameter(idArray).Contains(m.ItemId));
             if (needle != null)
             {
                 var pattern = LikePattern(needle);
@@ -402,7 +402,7 @@ namespace Jellyfin.Plugin.Plus
 
             var names = top.Select(r => r.Name).ToArray();
             var roleRows = await db.PeopleBaseItemMap.AsNoTracking()
-                .Where(m => idArray.Contains(m.ItemId) && names.Contains(m.People.Name))
+                .Where(m => EF.Parameter(idArray).Contains(m.ItemId) && names.Contains(m.People.Name))
                 .Select(m => new { m.People.Name, m.People.PersonType })
                 .Distinct()
                 .ToListAsync(ct)
@@ -435,17 +435,27 @@ namespace Jellyfin.Plugin.Plus
             CancellationToken ct)
         {
             var idArray = ids as Guid[] ?? ids.ToArray();
-            IQueryable<ItemValueMap> maps = db.ItemValuesMap.AsNoTracking()
-                .Where(m => idArray.Contains(m.ItemId) && m.ItemValue.Type == type);
+
+            // Count per value FIRST, over the candidates' own map rows (found through the ItemId index), and only
+            // then join the values for the Type filter and the names. Written as one join + filter + group, SQLite
+            // drives it from ItemValues (every tag value, ~15k) and probes the map once per value per candidate id,
+            // ~0.9 s over a 2000-item pool. (ItemValueId, ItemId) is the map's primary key, so Count() is the
+            // distinct-item count.
+            var counts = db.ItemValuesMap
+                .AsNoTracking()
+                .Where(m => EF.Parameter(idArray).Contains(m.ItemId))
+                .GroupBy(m => m.ItemValueId)
+                .Select(g => new { ItemValueId = g.Key, Count = g.Count() });
+            var values = db.ItemValues.AsNoTracking().Where(v => v.Type == type);
             if (needle != null)
             {
                 var pattern = LikePattern(needle);
-                maps = maps.Where(m => EF.Functions.Like(m.ItemValue.Value, pattern, "\\"));
+                values = values.Where(v => EF.Functions.Like(v.Value, pattern, "\\"));
             }
 
-            var grouped = maps
-                .GroupBy(m => m.ItemValue.Value)
-                .Select(g => new { Name = g.Key, Count = g.Select(m => m.ItemId).Distinct().Count() });
+            var grouped = from c in counts
+                          join v in values on c.ItemValueId equals v.ItemValueId
+                          select new { Name = v.Value, c.Count };
 
             if (itemType == null)
             {

@@ -434,7 +434,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                         .Join(db.Peoples, b => b.Name, p => p.Name, (b, p) => p.Id);
                     var credits = db.PeopleBaseItemMap
                         .AsNoTracking()
-                        .Where(m => ids.Contains(m.ItemId) && peopleRowIds.Contains(m.PeopleId));
+                        .Where(m => EF.Parameter(ids).Contains(m.ItemId) && peopleRowIds.Contains(m.PeopleId));
                     if (types.Length > 0)
                     {
                         credits = credits.Where(m => types.Contains(m.People.PersonType));
@@ -462,7 +462,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
             {
                 var items = await db.BaseItems
                     .AsNoTracking()
-                    .Where(e => ids.Contains(e.Id))
+                    .Where(e => EF.Parameter(ids).Contains(e.Id))
                     .Select(e => new
                     {
                         e.Id,
@@ -485,7 +485,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     var uid = spec.UserId.Value;
                     var ud = await db.UserData
                         .AsNoTracking()
-                        .Where(u => u.UserId == uid && ids.Contains(u.ItemId))
+                        .Where(u => u.UserId == uid && EF.Parameter(ids).Contains(u.ItemId))
                         .Select(u => new { u.ItemId, u.PlayCount, u.LastPlayedDate })
                         .ToListAsync()
                         .ConfigureAwait(false);
