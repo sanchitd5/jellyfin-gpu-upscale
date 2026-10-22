@@ -573,23 +573,36 @@ export function installLibraryFilterPanel() {
             (document.head || document.documentElement).appendChild(style);
         }
 
-        var pending = false;
-        new MutationObserver(function () {
-            if (pending) {
-                return;
-            }
-
-            pending = true;
-            requestAnimationFrame(function () {
-                pending = false;
-                try {
-                    scan();
-                } catch (err) {
-                    log('library filter popover scan failed', err);
+        // MUI portals the popover as a direct child of <body>, so watching body's children is
+        // enough - but this script runs from <head>, before <body> exists. Observing
+        // documentElement non-recursively then never sees the popover (verified live: the panel
+        // never attached and the Tags accordion rendered every tag). So wait for <body>.
+        var start = function () {
+            var pending = false;
+            new MutationObserver(function () {
+                if (pending) {
+                    return;
                 }
-            });
-        }).observe(document.body || document.documentElement, { childList: true });
-        scan();
+
+                pending = true;
+                requestAnimationFrame(function () {
+                    pending = false;
+                    try {
+                        scan();
+                    } catch (err) {
+                        log('library filter popover scan failed', err);
+                    }
+                });
+            }).observe(document.body, { childList: true });
+            scan();
+            log('library filter panel installed');
+        };
+
+        if (document.body) {
+            start();
+        } else {
+            document.addEventListener('DOMContentLoaded', start, { once: true });
+        }
     } catch (err) {
         log('library filter panel install failed', err);
     }
