@@ -318,7 +318,7 @@ sudo rm -rf /usr/lib/jellyfin-plus
 sudo rm -f  /etc/apt/apt.conf.d/99-jellyfin-plus
 sudo rm -f  /usr/share/jellyfin/web/jellyfin-plus.js
 # restore the pristine web index saved by the injector
-sudo cp /usr/share/jellyfin/web/index.html.gpuupscale-orig /usr/share/jellyfin/web/index.html
+sudo cp /usr/share/jellyfin/web/index.html.jellyfin-plus-orig /usr/share/jellyfin/web/index.html
 # if you used the shim, put the encoder path back
 sudo sed -i 's#JELLYFIN_FFMPEG_OPT=.*#JELLYFIN_FFMPEG_OPT="--ffmpeg=/usr/lib/jellyfin-ffmpeg/ffmpeg"#' \
   /etc/default/jellyfin
