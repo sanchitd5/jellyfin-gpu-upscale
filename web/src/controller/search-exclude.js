@@ -28,7 +28,6 @@ var IS_SEARCH = /\/(items|search\/hints)(\?|$)/i;
 var HAS_TERM = /[?&]searchterm=[^&]/i;
 
 var queryClient = null;
-var debounce = null;
 
 export function excludeText() {
     try {
@@ -152,6 +151,86 @@ function refetchSearch() {
     }
 }
 
+/*
+ * SEARCH ON SUBMIT, NOT WHILE TYPING.
+ *
+ * jellyfin-web 12.1's search box is a React controlled input (SearchFields.tsx) whose onChange
+ * pushes every keystroke into the `query` URL param; search.tsx then searches 500ms after typing
+ * pauses. On a large library each pause is a full set of search requests. Here a window-level
+ * CAPTURE listener stops the box's `input` events before React's root listener sees them, so the
+ * text sits in the box uncommitted. Submitting - the Search button, or Enter in either box -
+ * replays one `input` event that is let through. React's value tracker still holds the last
+ * committed value, so it sees the change and runs its normal onChange: same URL, same queries,
+ * same debounce, nothing of React's reimplemented.
+ *
+ * Not on TV layouts: there the on-screen alpha picker calls onSearch directly and D-pad users
+ * have no Enter key worth relying on.
+ */
+var SEARCH_INPUT = '#searchPage #searchTextInput';
+var replaying = false;
+
+function isTv() {
+    return document.documentElement.classList.contains('layout-tv');
+}
+
+function holdTyping(e) {
+    if (replaying || isTv()) {
+        return;
+    }
+
+    var t = e.target;
+    if (t && t.matches && t.matches(SEARCH_INPUT)) {
+        e.stopImmediatePropagation();
+    }
+}
+
+function committedQuery() {
+    try {
+        var hash = window.location.hash || '';
+        var q = hash.indexOf('?');
+        return q === -1 ? '' : (new URLSearchParams(hash.slice(q + 1)).get('query') || '');
+    } catch (e) {
+        return '';
+    }
+}
+
+function submitSearch() {
+    var main = document.querySelector(SEARCH_INPUT);
+    var box = document.querySelector('.' + BOX_CLASS + ' input');
+    var queryChanged = !!main && main.value !== committedQuery();
+
+    var exclude = box ? box.value.trim() : excludeText();
+    var excludeChanged = exclude !== excludeText();
+    saveExclude(exclude);
+
+    if (queryChanged) {
+        // Let one event through to React. Its own debounce then runs the new search, and every
+        // request it makes reads the exclusion just saved - no separate refetch needed.
+        replaying = true;
+        try {
+            main.dispatchEvent(new Event('input', { bubbles: true }));
+        } finally {
+            replaying = false;
+        }
+
+        log('submitSearch: query "' + main.value + '", exclude "' + exclude + '"');
+    } else if (excludeChanged) {
+        refetchSearch();
+        log('submitSearch: exclude only, "' + exclude + '"');
+    }
+}
+
+function onEnter(e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        submitSearch();
+        if (e.target && e.target.blur && document.documentElement.classList.contains('layout-mobile')) {
+            // Drops the on-screen keyboard so the results are visible.
+            e.target.blur();
+        }
+    }
+}
+
 function buildBox() {
     var row = el('div', BOX_CLASS + ' searchFieldsInner flex align-items-center justify-content-center');
     row.style.marginTop = '0.5em';
@@ -168,22 +247,35 @@ function buildBox() {
     input.maxLength = 200;
     input.placeholder = 'Exclude tags (comma-separated)';
     input.setAttribute('aria-label', 'Exclude tags');
+    input.setAttribute('enterkeyhint', 'search');
     input.title = 'Hide results with a tag containing any of these words. Case-insensitive.';
     input.value = excludeText();
 
-    input.addEventListener('input', function () {
-        saveExclude(input.value.trim());
-        clearTimeout(debounce);
-        // Same pause the search box itself waits (search.tsx debounces its query by 500ms).
-        debounce = setTimeout(refetchSearch, 500);
+    // The page binds keys for its own navigation; typing here must not trigger them.
+    input.addEventListener('keydown', function (e) {
+        e.stopPropagation();
+        onEnter(e);
     });
 
-    // The page binds keys for its own navigation; typing here must not trigger them.
-    input.addEventListener('keydown', function (e) { e.stopPropagation(); });
+    var button = el('button', 'raised button-submit emby-button');
+    button.type = 'button';
+    button.setAttribute('aria-label', 'Search');
+    button.style.margin = '0 0 0 0.6em';
+    button.style.padding = '0.55em 0.9em';
+    button.style.flexShrink = '0';
+    button.style.display = 'inline-flex';
+    button.style.alignItems = 'center';
+    var bIcon = el('span', 'material-icons search');
+    bIcon.setAttribute('aria-hidden', 'true');
+    button.appendChild(bIcon);
+    button.appendChild(el('span', null, 'Search'));
+    button.lastChild.style.marginLeft = '0.3em';
+    button.addEventListener('click', function () { submitSearch(); });
 
     wrap.appendChild(input);
     row.appendChild(icon);
     row.appendChild(wrap);
+    row.appendChild(button);
     return row;
 }
 
@@ -193,7 +285,15 @@ function ensureBox(fields) {
     }
 
     fields.appendChild(buildBox());
-    log('search exclude box added');
+
+    var main = fields.querySelector('#searchTextInput');
+    if (main && !main.__gpuUpscaleSubmit) {
+        main.__gpuUpscaleSubmit = true;
+        main.setAttribute('enterkeyhint', 'search');
+        main.addEventListener('keydown', onEnter);
+    }
+
+    log('search exclude box + submit button added');
 
     // Results already on screen (or restored from the persisted cache) may predate the
     // current exclusion.
@@ -214,6 +314,9 @@ function scan() {
 
 export function watchSearchPage() {
     try {
+        // Capture on window runs before React's listeners on its root container.
+        window.addEventListener('input', holdTyping, true);
+
         var pending = false;
         var observer = new MutationObserver(function () {
             // Coalesced: React commits many mutations at once and one scan covers them all.
