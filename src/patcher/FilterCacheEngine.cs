@@ -60,6 +60,16 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// <summary>Shorter delay used when a request found the cache stale or missing (heals the next ones).</summary>
         internal static readonly TimeSpan HealDelay = TimeSpan.FromSeconds(3);
 
+        /// <summary>The longest a continuously changing library waits for a rebuild (the debounce is capped by it).</summary>
+        internal static readonly TimeSpan MaxWait = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// A stale cache (the library changed since it was built) is still served while it is younger than this
+        /// (stale-while-revalidate), and a rebuild is scheduled. Staleness only ever means a just-added value can
+        /// be missing for a while; every permission check stays live per request.
+        /// </summary>
+        internal static readonly TimeSpan MaxStaleAge = TimeSpan.FromMinutes(30);
+
         internal enum Kind
         {
             Tag = 1,
@@ -209,7 +219,34 @@ namespace Jellyfin.Plugin.Plus.Patcher
             }
         }
 
-        private static void OnChanged(object sender, ItemChangeEventArgs e) => Schedule(DebounceDelay);
+        // TickCount64 of the first change not yet handed to a rebuild; 0 when none is waiting.
+        private static long _pendingSinceTicks;
+
+        /// <summary>
+        /// A library change: rebuild after a quiet period, but never later than <see cref="MaxWait"/> after the
+        /// first unhandled change. Without the cap a library that is scanned continuously (an item every few
+        /// seconds) would keep resetting the debounce and never rebuild.
+        /// </summary>
+        private static void OnChanged(object sender, ItemChangeEventArgs e) => ScheduleDebounced();
+
+        private static void ScheduleDebounced()
+        {
+            var now = Environment.TickCount64;
+            var since = Interlocked.CompareExchange(ref _pendingSinceTicks, now, 0);
+            if (since == 0)
+            {
+                since = now;
+            }
+
+            Schedule(NextDelay(since, now));
+        }
+
+        /// <summary>Debounce delay for a change when the first unhandled one was at <paramref name="sinceMs"/> (TickCount64 ms).</summary>
+        internal static TimeSpan NextDelay(long sinceMs, long nowMs)
+        {
+            var untilMax = sinceMs + (long)MaxWait.TotalMilliseconds - nowMs;
+            return TimeSpan.FromMilliseconds(Math.Max(0, Math.Min((long)DebounceDelay.TotalMilliseconds, untilMax)));
+        }
 
         private static void Schedule(TimeSpan delay)
         {
@@ -238,11 +275,17 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
         private static void RunBackground(bool force)
         {
+            Interlocked.Exchange(ref _pendingSinceTicks, 0);
             _ = Task.Run(() =>
             {
                 try
                 {
-                    Rebuild(force, null, CancellationToken.None, waitForLock: false);
+                    // A run already in flight started from an older state of the library; look again afterwards
+                    // rather than dropping this request.
+                    if (!Rebuild(force, null, CancellationToken.None, waitForLock: false))
+                    {
+                        ScheduleDebounced();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -353,7 +396,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// <paramref name="force"/>). One transaction per library, so readers see the old rows or the new
         /// ones, never a mixture.
         /// </summary>
-        internal static void Rebuild(bool force, IProgress<double> progress, CancellationToken ct, bool waitForLock)
+        internal static bool Rebuild(bool force, IProgress<double> progress, CancellationToken ct, bool waitForLock)
         {
             if (waitForLock)
             {
@@ -361,7 +404,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
             }
             else if (!_buildLock.Wait(0, ct))
             {
-                return;
+                return false;
             }
 
             try
@@ -397,6 +440,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 PurgeUnknown(libraries.Select(l => l.Id).ToArray());
                 progress?.Report(100);
                 _log?.LogInformation("JellyfinPlus: filter key cache: {Built} of {Total} libraries rebuilt{Forced}", built, libraries.Count, force ? " (forced)" : string.Empty);
+                return true;
             }
             catch (OperationCanceledException)
             {
@@ -632,32 +676,84 @@ namespace Jellyfin.Plugin.Plus.Patcher
             return map;
         }
 
+        internal enum Freshness
+        {
+            /// <summary>Built, and the libraries have not changed since.</summary>
+            Fresh,
+
+            /// <summary>Built, the libraries changed since, but it is younger than <see cref="MaxStaleAge"/>: serve it, rebuild soon.</summary>
+            Stale,
+
+            /// <summary>Not built, or stale and too old to serve.</summary>
+            Unusable,
+        }
+
         /// <summary>
-        /// True when every library in <paramref name="libs"/> has a cached <paramref name="kind"/> whose
-        /// fingerprint matches the library as it is right now.
+        /// How usable the cached <paramref name="kind"/> is for every library in <paramref name="libs"/>.
+        /// Only about content: permissions are decided separately and live, per request.
         /// </summary>
-        internal static bool IsFresh(JellyfinDbContext db, DbConnection conn, Guid[] libs, Kind kind, out string why)
+        internal static Freshness Check(JellyfinDbContext db, DbConnection conn, Guid[] libs, Kind kind, out string why)
+            => Check(db, conn, libs, new[] { kind }, out why);
+
+        /// <summary>
+        /// The worst state over several kinds. The library fingerprint is computed ONCE for all of them (it is
+        /// a count/max over the library's rows, the dominant cost of a served request).
+        /// </summary>
+        internal static Freshness Check(JellyfinDbContext db, DbConnection conn, Guid[] libs, Kind[] kinds, out string why)
         {
             var meta = ReadMeta(conn, libs);
-            if (libs.Any(l => !meta.ContainsKey((l, kind))))
+            if (kinds.Any(k => libs.Any(l => !meta.ContainsKey((l, k)))))
             {
                 why = "not-built";
-                return false;
+                return Freshness.Unusable;
             }
 
             var fps = Fingerprints(db, libs);
-            var genreFp = kind == Kind.GenreEntity ? GenreFingerprint(db) : null;
-            foreach (var l in libs)
+            var genreFp = kinds.Contains(Kind.GenreEntity) ? GenreFingerprint(db) : null;
+            var result = Freshness.Fresh;
+            why = null;
+            foreach (var kind in kinds)
             {
-                if (meta[(l, kind)].Fingerprint != FingerprintFor(kind, fps[l], genreFp))
+                var one = CheckOne(meta, fps, genreFp, libs, kind, out var w);
+                if (one == Freshness.Unusable)
                 {
-                    why = "stale";
-                    return false;
+                    why = w;
+                    return one;
+                }
+
+                if (one == Freshness.Stale)
+                {
+                    result = Freshness.Stale;
                 }
             }
 
+            return result;
+        }
+
+        private static Freshness CheckOne(
+            Dictionary<(Guid, Kind), Meta> meta,
+            Dictionary<Guid, string> fps,
+            string genreFp,
+            Guid[] libs,
+            Kind kind,
+            out string why)
+        {
+            var stale = libs.Any(l => meta[(l, kind)].Fingerprint != FingerprintFor(kind, fps[l], genreFp));
+            if (!stale)
+            {
+                why = null;
+                return Freshness.Fresh;
+            }
+
+            var oldest = libs.Min(l => meta[(l, kind)].BuiltAtUtc);
+            if (DateTime.UtcNow - oldest > MaxStaleAge)
+            {
+                why = "stale";
+                return Freshness.Unusable;
+            }
+
             why = null;
-            return true;
+            return Freshness.Stale;
         }
 
         /// <summary>

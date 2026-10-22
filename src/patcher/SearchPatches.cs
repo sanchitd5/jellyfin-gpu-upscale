@@ -274,6 +274,30 @@ namespace Jellyfin.Plugin.Plus.Patcher
             return query;
         }
 
+        // Above this many matching tag values an IN list stops being cheaper than the correlated form.
+        private const int MaxTagValueIds = 20000;
+
+        /// <summary>
+        /// The ItemValueIds of the tag values <see cref="TagMatch"/> accepts (a tag containing the term and
+        /// none of the exclude terms), or null when there are too many for an IN list.
+        /// </summary>
+        private static async Task<List<Guid>> MatchingTagValues(JellyfinDbContext db, string search, string[] excludes, CancellationToken ct)
+        {
+            // Locals, not constants, so EF sends them as parameters.
+            var needle = search;
+            IQueryable<ItemValue> values = db.ItemValues
+                .AsNoTracking()
+                .Where(v => v.Type == ItemValueType.Tags && v.CleanValue.Contains(needle));
+            foreach (var term in excludes)
+            {
+                var t = term;
+                values = values.Where(v => !v.CleanValue.Contains(t));
+            }
+
+            var ids = await values.Select(v => v.ItemValueId).Take(MaxTagValueIds + 1).ToListAsync(ct).ConfigureAwait(false);
+            return ids.Count > MaxTagValueIds ? null : ids;
+        }
+
         private static async Task<IReadOnlyList<SearchResult>> WithTagMatches(
             object provider,
             SearchProviderQuery query,
@@ -306,12 +330,17 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 var dbContext = await factory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
                 await using (dbContext.ConfigureAwait(false))
                 {
-                    var tagMatch = TagMatch(clean, excludes);
+                    // Two steps instead of one correlated EXISTS per BaseItems row: first the (few thousand at
+                    // most) tag VALUES that match, from ItemValues alone; then the items that carry one of
+                    // them, found through the ItemValuesMap index. Same predicate, same result.
+                    var tagValueIds = await MatchingTagValues(dbContext, clean, excludes, cancellationToken).ConfigureAwait(false);
                     IQueryable<BaseItemEntity> dbQuery = dbContext.BaseItems
                         .AsNoTracking()
                         .Where(e => e.Id != _placeholderId)
-                        .Where(e => !e.IsVirtualItem)
-                        .Where(e => e.ItemValues!.AsQueryable().Any(tagMatch));
+                        .Where(e => !e.IsVirtualItem);
+                    dbQuery = tagValueIds != null
+                        ? dbQuery.Where(e => e.ItemValues!.Any(m => tagValueIds.Contains(m.ItemValueId)))
+                        : dbQuery.Where(e => e.ItemValues!.AsQueryable().Any(TagMatch(clean, excludes)));
 
                     dbQuery = (IQueryable<BaseItemEntity>)_applyTypeFilter.Invoke(provider, new object[] { dbQuery, query.IncludeItemTypes, query.ExcludeItemTypes });
                     dbQuery = (IQueryable<BaseItemEntity>)_applyMediaTypeFilter.Invoke(null, new object[] { dbQuery, query.MediaTypes });
