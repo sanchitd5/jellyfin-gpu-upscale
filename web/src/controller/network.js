@@ -500,13 +500,13 @@ export function hookXhr() {
 
     proto.open = function (method, url) {
         try {
-            this.__gpuUpscaleUrl = url;
+            this.__jellyfinPlusUrl = url;
 
             // The search page's exclude-tags box (search-exclude.js). Search requests are never
             // HLS or PlaybackInfo, so this returns before either of the branches below.
             var searchUrl = markSearchUrl(url);
             if (searchUrl !== url) {
-                this.__gpuUpscaleUrl = searchUrl;
+                this.__jellyfinPlusUrl = searchUrl;
                 var searchArgs = Array.prototype.slice.call(arguments);
                 searchArgs[1] = searchUrl;
                 return originalOpen.apply(this, searchArgs);
@@ -521,7 +521,7 @@ export function hookXhr() {
                 log('hookXhr.open: matched HLS media url ' + url);
                 var markedUrl = markHlsUrl(url);
                 if (markedUrl !== url) {
-                    this.__gpuUpscaleUrl = markedUrl;
+                    this.__jellyfinPlusUrl = markedUrl;
                     var hlsArgs = Array.prototype.slice.call(arguments);
                     hlsArgs[1] = markedUrl;
                     log('hookXhr.open: end, opening the marked url instead - ' + markedUrl);
@@ -533,7 +533,7 @@ export function hookXhr() {
                 log('hookXhr.open: matched PlaybackInfo request - ' + url);
                 var forced = forceTranscodeUrl(url);
                 if (forced !== url) {
-                    this.__gpuUpscaleUrl = forced;
+                    this.__jellyfinPlusUrl = forced;
                     var args = Array.prototype.slice.call(arguments);
                     args[1] = forced;
                     log('hookXhr.open: end, opening the forced-transcode url instead - ' + forced);
@@ -550,7 +550,7 @@ export function hookXhr() {
         var outgoing = body;
 
         try {
-            var url = this.__gpuUpscaleUrl;
+            var url = this.__jellyfinPlusUrl;
             if (url && IS_PLAYBACK_INFO.test(url)) {
                 log('hookXhr.send: start, PlaybackInfo request going out - ' + url);
                 // Request side: make sure a TranscodingUrl will exist to mark.

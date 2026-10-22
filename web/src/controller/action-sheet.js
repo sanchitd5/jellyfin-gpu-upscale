@@ -21,7 +21,7 @@ export function isPlayerSettingsSheet(items) {
 
 export function wrapActionSheet(ns) {
     try {
-        if (!ns || typeof ns !== 'object' || ns.__gpuUpscaleSheet || typeof ns.show !== 'function') {
+        if (!ns || typeof ns !== 'object' || ns.__jellyfinPlusSheet || typeof ns.show !== 'function') {
             return;
         }
 
@@ -36,15 +36,15 @@ export function wrapActionSheet(ns) {
         var originalShow = ns.show;
         ns.show = function (options) {
             try {
-                if (options && isPlayerSettingsSheet(options.items) && !options.__gpuUpscaleOwn) {
+                if (options && isPlayerSettingsSheet(options.items) && !options.__jellyfinPlusOwn) {
                     state.sheetsSeen++;
                     options.items = options.items.concat([{
-                        name: 'Enhance', id: 'gpuupscale-enhance', asideText: summaryText()
+                        name: 'Enhance', id: 'jellyfinplus-enhance', asideText: summaryText()
                     }]);
 
                     var self = this;
                     return originalShow.apply(self, arguments).then(function (chosen) {
-                        if (chosen !== 'gpuupscale-enhance') {
+                        if (chosen !== 'jellyfinplus-enhance') {
                             return chosen;
                         }
 
@@ -59,7 +59,7 @@ export function wrapActionSheet(ns) {
             return originalShow.apply(this, arguments);
         };
 
-        ns.__gpuUpscaleSheet = true;
+        ns.__jellyfinPlusSheet = true;
         state.sheetWraps = (state.sheetWraps || 0) + 1;
     } catch (err) {
         log('could not wrap action sheet', err);

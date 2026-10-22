@@ -1,4 +1,4 @@
-# Installing GPU Upscale from scratch
+# Installing Jellyfin Plus from scratch
 
 A complete walkthrough, from a plain Jellyfin server to working realtime upscaling.
 
@@ -108,31 +108,31 @@ guessing NuGet versions.
 V=1.0.0.0
 
 # the plugin, in Jellyfin's plugin directory
-sudo mkdir -p /var/lib/jellyfin/plugins/GpuUpscale_$V
-sudo cp out/Jellyfin.Plugin.GpuUpscale.dll out/Jellyfin.Plugin.GpuUpscale.deps.json \
-        /var/lib/jellyfin/plugins/GpuUpscale_$V/
+sudo mkdir -p /var/lib/jellyfin/plugins/JellyfinPlus_$V
+sudo cp out/Jellyfin.Plugin.Plus.dll out/Jellyfin.Plugin.Plus.deps.json \
+        /var/lib/jellyfin/plugins/JellyfinPlus_$V/
 
 # the patcher, deliberately OUTSIDE the plugin directory
-sudo mkdir -p /usr/lib/jellyfin-gpuupscale
-sudo cp out-patcher/Jellyfin.Plugin.GpuUpscale.Patcher.dll out-patcher/0Harmony.dll \
-        /usr/lib/jellyfin-gpuupscale/
+sudo mkdir -p /usr/lib/jellyfin-plus
+sudo cp out-patcher/Jellyfin.Plugin.Plus.Patcher.dll out-patcher/0Harmony.dll \
+        /usr/lib/jellyfin-plus/
 
-# the client script — web/gpu-upscale.js is a BUILD OUTPUT, not checked in; build it first
+# the client script — web/jellyfin-plus.js is a BUILD OUTPUT, not checked in; build it first
 # (needs Node.js/npm — see web/package.json — installed once with `npm install` in web/)
 (cd web && npm install --no-audit --no-fund)
 ./scripts/build-web-panel.sh
 # this copy is CANONICAL
-sudo cp web/gpu-upscale.js /usr/lib/jellyfin-gpuupscale/gpu-upscale.js
+sudo cp web/jellyfin-plus.js /usr/lib/jellyfin-plus/jellyfin-plus.js
 
-sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/GpuUpscale_$V
+sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/JellyfinPlus_$V
 ```
 
-Write `/var/lib/jellyfin/plugins/GpuUpscale_$V/meta.json`:
+Write `/var/lib/jellyfin/plugins/JellyfinPlus_$V/meta.json`:
 
 ```json
 {
   "guid": "6f2a9c31-4d7b-4e2a-9d15-8a1c0b7e3f44",
-  "name": "GPU Upscale",
+  "name": "Jellyfin Plus",
   "version": "1.0.0.0",
   "targetAbi": "12.1.0.0",
   "owner": "",
@@ -149,23 +149,23 @@ raise this.
 ## 4. Inject the client script
 
 ```bash
-sudo cp scripts/jellyfin-gpuupscale-webinject /usr/local/sbin/
-sudo chmod +x /usr/local/sbin/jellyfin-gpuupscale-webinject
-sudo /usr/local/sbin/jellyfin-gpuupscale-webinject
+sudo cp scripts/jellyfin-plus-webinject /usr/local/sbin/
+sudo chmod +x /usr/local/sbin/jellyfin-plus-webinject
+sudo /usr/local/sbin/jellyfin-plus-webinject
 ```
 
-This copies `/usr/lib/jellyfin-gpuupscale/gpu-upscale.js` into `/usr/share/jellyfin/web/`, adds a
+This copies `/usr/lib/jellyfin-plus/jellyfin-plus.js` into `/usr/share/jellyfin/web/`, adds a
 `<script>` tag to `index.html`, and bumps a cache-busting version.
 
-**Never edit `/usr/share/jellyfin/web/gpu-upscale.js` directly.** The injector overwrites it from
-the canonical copy in `/usr/lib/jellyfin-gpuupscale/`, so a direct edit gets silently reverted while
+**Never edit `/usr/share/jellyfin/web/jellyfin-plus.js` directly.** The injector overwrites it from
+the canonical copy in `/usr/lib/jellyfin-plus/`, so a direct edit gets silently reverted while
 the cache-buster still advances — meaning browsers cache the *old* script under a *new* URL. Edit
 the canonical copy, then re-run the injector.
 
 Survive package upgrades, which replace `index.html` and delete the script:
 
 ```bash
-sudo cp scripts/99-jellyfin-gpuupscale /etc/apt/apt.conf.d/
+sudo cp scripts/99-jellyfin-plus /etc/apt/apt.conf.d/
 ```
 
 ---
@@ -174,19 +174,19 @@ sudo cp scripts/99-jellyfin-gpuupscale /etc/apt/apt.conf.d/
 
 ```bash
 sudo systemctl restart jellyfin
-sudo journalctl -u jellyfin --since "-2 minutes" | grep GpuUpscale
+sudo journalctl -u jellyfin --since "-2 minutes" | grep JellyfinPlus
 ```
 
 You want to see:
 
 ```
-GpuUpscale: patched GetVideoProcessingFilterParam
-GpuUpscale: patched GetInputVideoHwaccelArgs
-GpuUpscale: patched GetHwaccelType
-GpuUpscale: patched GetHardwareVideoDecoder
-GpuUpscale: patched GetVideoEncoder
-GpuUpscale: Harmony patches installed, plugin owns the transcode filter chain.
-GpuUpscale: active (5 EncodingHelper methods patched); optional: direct-play override
+JellyfinPlus: patched GetVideoProcessingFilterParam
+JellyfinPlus: patched GetInputVideoHwaccelArgs
+JellyfinPlus: patched GetHwaccelType
+JellyfinPlus: patched GetHardwareVideoDecoder
+JellyfinPlus: patched GetVideoEncoder
+JellyfinPlus: Harmony patches installed, plugin owns the transcode filter chain.
+JellyfinPlus: active (5 EncodingHelper methods patched); optional: direct-play override
 ```
 
 If instead it names methods it could not resolve, your Jellyfin version has moved them — see
@@ -196,7 +196,7 @@ If instead it names methods it could not resolve, your Jellyfin version has move
 
 ## 6. Configure
 
-Dashboard → Plugins → **GPU Upscale**. Sensible starting point:
+Dashboard → Plugins → **Jellyfin Plus**. Sensible starting point:
 
 - `SrLevel` = `fsrcnnx` (the default; Anime4K only competes at its native 2x ratio)
 - `SrMinScaleFactor` = 1.60 — below this ratio the SR network is skipped, because fixed-2x networks
@@ -213,7 +213,7 @@ Do not trust the dashboard. Play something, then look at what was served.
 
 ```bash
 # what command did Jellyfin build?
-sudo journalctl -u jellyfin --since "-5 minutes" | grep -E "libplacebo|GpuUpscale:"
+sudo journalctl -u jellyfin --since "-5 minutes" | grep -E "libplacebo|JellyfinPlus:"
 
 # what resolution did the viewer receive?
 /usr/lib/jellyfin-ffmpeg/ffprobe -v error -select_streams v:0 \
@@ -222,10 +222,10 @@ sudo journalctl -u jellyfin --since "-5 minutes" | grep -E "libplacebo|GpuUpscal
 ```
 
 A served segment **larger than the source file** is the only proof that matters. The log line reads
-like `GpuUpscale: Upscaled 1280x720 to 1920x1080 (fsrcnnx), deband`.
+like `JellyfinPlus: Upscaled 1280x720 to 1920x1080 (fsrcnnx), deband`.
 
 In the browser: hard-reload (Ctrl/Cmd-Shift-R), play something, open the quality/settings menu and
-look for **Enhance**. In the console, `window.__gpuUpscale` should report `installed: true` and
+look for **Enhance**. In the console, `window.__jellyfinPlus` should report `installed: true` and
 `serverCaps {full: true}`.
 
 ---
@@ -279,9 +279,9 @@ The shim stands down automatically while the plugin's patches are active
 ## Troubleshooting
 
 **"Enhance" missing from the player menu.** Almost always a stale browser cache — hard-reload first.
-Then check the script is actually served: `curl -I http://<server>:8096/web/gpu-upscale.js` should be
-200. Note the web root is `/web/`, so `/gpu-upscale.js` at the root is correctly a 404. If
-`window.__gpuUpscale` is undefined, the tag is missing — re-run the injector. If it exists but shows
+Then check the script is actually served: `curl -I http://<server>:8096/web/jellyfin-plus.js` should be
+200. Note the web root is `/web/`, so `/jellyfin-plus.js` at the root is correctly a 404. If
+`window.__jellyfinPlus` is undefined, the tag is missing — re-run the injector. If it exists but shows
 no controls, the server-side capability probe failed.
 
 **Enhance shows "No enhancement" even with options selected.** The session is direct playing, so
@@ -305,7 +305,7 @@ need a 1440 target rather than 1080.
 **Playback breaks after enabling something.** Roll back:
 
 ```bash
-sudo /usr/local/sbin/jellyfin-gpuupscale-activate --rollback
+sudo /usr/local/sbin/jellyfin-plus-activate --rollback
 ```
 
 ---
@@ -313,10 +313,10 @@ sudo /usr/local/sbin/jellyfin-gpuupscale-activate --rollback
 ## Uninstalling
 
 ```bash
-sudo rm -rf /var/lib/jellyfin/plugins/GpuUpscale_*
-sudo rm -rf /usr/lib/jellyfin-gpuupscale
-sudo rm -f  /etc/apt/apt.conf.d/99-jellyfin-gpuupscale
-sudo rm -f  /usr/share/jellyfin/web/gpu-upscale.js
+sudo rm -rf /var/lib/jellyfin/plugins/JellyfinPlus_*
+sudo rm -rf /usr/lib/jellyfin-plus
+sudo rm -f  /etc/apt/apt.conf.d/99-jellyfin-plus
+sudo rm -f  /usr/share/jellyfin/web/jellyfin-plus.js
 # restore the pristine web index saved by the injector
 sudo cp /usr/share/jellyfin/web/index.html.gpuupscale-orig /usr/share/jellyfin/web/index.html
 # if you used the shim, put the encoder path back
@@ -334,7 +334,7 @@ them.
 
 Re-check, in this order:
 
-1. `journalctl -u jellyfin | grep GpuUpscale` — did all five core patches resolve?
+1. `journalctl -u jellyfin | grep JellyfinPlus` — did all five core patches resolve?
 2. Is the script tag still in `index.html`? A `jellyfin-web` upgrade removes it; the apt hook should
    re-apply it, but confirm.
 3. Play something and probe a served segment. A patch can survive by *name* and change meaning,

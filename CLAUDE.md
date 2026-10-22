@@ -94,7 +94,7 @@ Adding a setting means touching all of these together, or the page breaks:
 
 ## Before you change the client
 
-`web/gpu-upscale.js` is a **generated build output, not checked into git** (gitignored as of the
+`web/jellyfin-plus.js` is a **generated build output, not checked into git** (gitignored as of the
 `real-es-modules` pass, 2026-09-24, same as `web/node_modules`) and not the source. Build it with
 `scripts/build-web-panel.sh` before publishing, deploying, or handing the repo to a fresh checkout
 - there is no committed copy to fall back to. The real source is **real ES modules** with real
@@ -102,7 +102,7 @@ Adding a setting means touching all of these together, or the page breaks:
 
 | directory | holds |
 |---|---|
-| `web/src/lib/` | dependency-free leaves: `log.js` (`log()`), `dom.js` (`el()`), `utils.js` (`isOff()`) |
+| `web/src/lib/` | dependency-free leaves: `storage-migrate.js` (one-time old-to-new localStorage key rename, imported first by `bootstrap.js`), `log.js` (`log()`), `dom.js` (`el()`), `utils.js` (`isOff()`) |
 | `web/src/model/` | data and pure(ish) session logic: `controls-data.js` (`CONTROLS`/`SR_ALIASES`/`GAME_OPTION_KEYS`/`DEFAULT_PREFS`), `state.js` (the `state` singleton, `LADDER_SHARPEN`/`LADDER_SR`/`FPS`/`DENOISE_COST`/`NEURAL_COST`/`GAME_COST`/`COSTS`/`DEBLOCK_COST`), `prefs-store.js` (`savePrefs`, loads prefs on import), `costing.js` (`eligibleTargets`/`srWouldRun`/`stageCost`/`selectionCost`/`costHint`/`serverConfig`), `ladder.js` (`ladder`/`recommendedStage`/`sameStage`/`currentStage`/`stageText`), `effective.js` (`effective`/`displayPrefs`/`shownPrefs`/`anyEnhancement`/`summaryText`/`advancedText`), `conflicts.js` (`CONFLICTS` logic: `axisConflict`/`optionInert`/`costSuffix`/`shortName`/the CUDA-native neural predicates) |
 | `web/src/controller/` | orchestration and the network/DOM/webpack seams: `probe.js` (`probeServer`/`axisControls`/`controlNote`), `network.js` (`wireParams`/`addParams`/the fetch+XHR hooks that mark the TranscodingUrl), `live-apply.js` (player lookup, `replayHere`/`directPlaying`/`requestRestream`/`activeState`), `live-block.js` (`LIVE_ROWS`/`staleNote`/`liveLines`/`fetchServerState`), `playback-hooks.js` (playback-event hooking, `openEnhancePanel`, Playback Info annotation), `webpack-hook.js` (the webpack chunk hook), `action-sheet.js` (wrapping the player's settings sheet) |
 | `web/src/view/` | `panel-dom.js`: disclosure/row/quality-section rendering, panel dragging, `renderPanel`/`closePanel`/`panelEl` |
@@ -119,21 +119,21 @@ value read at module-evaluation time, which is exactly the case ES modules (and 
 Don't "fix" a circular import here by inlining or duplicating code to break the cycle; if a genuine
 init-order bug shows up, it will be a `ReferenceError` on first run, not a lint warning.
 
-Run `scripts/build-web-panel.sh` to regenerate `web/gpu-upscale.js` from `web/src/bootstrap.js` and
+Run `scripts/build-web-panel.sh` to regenerate `web/jellyfin-plus.js` from `web/src/bootstrap.js` and
 everything it imports. It shells out to **esbuild** (`--bundle --format=iife`), installed under
 `web/node_modules` (gitignored) from `web/package-lock.json` (checked in) - run `npm install` in
 `web/` once per build machine before the first build. esbuild is a **build-time-only** dependency:
 it never appears in the bundled output and is never needed on the server/CT114, only wherever this
-script runs. **Edit the files in `web/src/`, never `web/gpu-upscale.js` directly** - a hand-edit
+script runs. **Edit the files in `web/src/`, never `web/jellyfin-plus.js` directly** - a hand-edit
 there is silently overwritten by the next build. The runtime output is still one plain IIFE with no
 `import`/`export` and no runtime module resolution (jellyfin-web's injection context does not
 support ES modules at this stage) - esbuild's job is exactly to erase the module boundary at build
 time while the source keeps it at edit time.
 
-The injector is unaffected in shape: `/usr/lib/jellyfin-gpuupscale/gpu-upscale.js` is still
+The injector is unaffected in shape: `/usr/lib/jellyfin-plus/jellyfin-plus.js` is still
 canonical on the server, copied from the one file the build script produces, and it still copies it
 into the web root and bumps a cache-buster. **What changed**: the cache-buster is no longer a
-hand-maintained integer (see below), and `web/gpu-upscale.js` is no longer a file to keep "in sync"
+hand-maintained integer (see below), and `web/jellyfin-plus.js` is no longer a file to keep "in sync"
 by committing it - it does not exist until built. `scripts/proxmox-build.sh` and the manual steps in
 `INSTALL.md` both build it fresh (`npm install` in `web/`, then `scripts/build-web-panel.sh`) before
 publishing it, every time. **Editing the web copy directly gets silently reverted while the buster
@@ -197,18 +197,20 @@ exist.
 optionally rebuild ffmpeg with `--with-ffmpeg`, stage, end in-flight transcodes, restart, publish the
 client. It refuses to deploy an ffmpeg missing any of the five filters and restores the previous one.
 
-**The cache-buster in `scripts/jellyfin-gpuupscale-webinject` is no longer a hand-bumped integer**
+**The cache-buster in `scripts/jellyfin-plus-webinject` is no longer a hand-bumped integer**
 (as of the `real-es-modules` pass, 2026-09-24). It used to be `VERSION=N`, manually incremented,
 wrong in both directions when forgotten: a stale buster served every browser the OLD script from
 cache under the same URL, so a day of client work landed on nobody while the server reported the
 new behaviour; a bumped buster over an unchanged web copy was the failure the injector's own
 comments already warned about. The script now computes `VERSION` itself, at install time, as the
-first 10 hex characters of `sha256sum` over the exact `$SRC` file (`/usr/lib/jellyfin-gpuupscale/
-gpu-upscale.js`) it is about to install - so the buster cannot drift from the content being served:
+first 10 hex characters of `sha256sum` over the exact `$SRC` file (`/usr/lib/jellyfin-plus/
+jellyfin-plus.js`) it is about to install - so the buster cannot drift from the content being served:
 an unchanged rebuild reuses the same hash and URL, and any real content change gets a new one, with
 no line to remember to edit either way. Nothing else about the injector's calling convention
 changed - it still takes no arguments and still runs unmodified from the apt hook in
-`/etc/apt/apt.conf.d/99-jellyfin-gpuupscale`.
+`/etc/apt/apt.conf.d/99-jellyfin-plus`. (The plugin was renamed from GPU Upscale to Jellyfin Plus; the
+injector also removes any leftover `gpu-upscale.js` script tag so the old and new bundles never load
+together, and `web/src/lib/storage-migrate.js` carries the old `gpuUpscale*` localStorage keys over.)
 
 The C# half and the config page need a rebuild and a restart to take effect. The client script does
 not: publish it and bump the buster.

@@ -37,7 +37,7 @@ Verified clean: all 13 axes in `CONTROLS` are written by `addParams`/`wireParams
 ## Shim and scripts
 
 - [x] `shim/jellyfin-ffmpeg-upscale:46-48,119` 🔴 bug: `PATCHED_NODE_RE` has no word boundary, unlike the regex in `wants_patched`, so `strip_patched`'s `re.sub` matches `ort`/`oidn`/`optix`/`fsr2`/`dlss` as bare substrings anywhere in an arg. A `drawtext` overlay containing "sort"/"transport"/"distort" gets chewed out, corrupting the chain for a session that never asked for a patched filter. Anchor with the same `(^|,|\[)...(=|,|\]|$)` boundaries, or strip node-by-node off `split_filters()` with exact name match.
-- [ ] `scripts/99-jellyfin-gpuupscale:3` 🟡 risk: the apt `Post-Invoke` hook fires on every dpkg operation, not just jellyfin-web changes, running `jellyfin-gpuupscale-webinject` as root each time with errors swallowed by `|| true`. If that script or its source `/usr/lib/jellyfin-gpuupscale/gpu-upscale.js` is ever group- or other-writable, every apt run on the box becomes a root code-exec path — far broader than "reapply after a jellyfin-web upgrade". Scope the hook to jellyfin-web, and pin ownership/perms to root:root 0755 with no group/other write on both the script and its source.
+- [ ] `scripts/99-jellyfin-plus:3` 🟡 risk: the apt `Post-Invoke` hook fires on every dpkg operation, not just jellyfin-web changes, running `jellyfin-plus-webinject` as root each time with errors swallowed by `|| true`. If that script or its source `/usr/lib/jellyfin-plus/jellyfin-plus.js` is ever group- or other-writable, every apt run on the box becomes a root code-exec path — far broader than "reapply after a jellyfin-web upgrade". Scope the hook to jellyfin-web, and pin ownership/perms to root:root 0755 with no group/other write on both the script and its source.
 - [x] `shim/jellyfin-ffmpeg-upscale:330-343` 🟡 risk: `take_slot` is check-then-act — two shims started close together both read `live < max_concurrent` before either creates a slot file, so the concurrency cap is exceeded. Create the slot first with `os.open(slot, O_CREAT|O_EXCL)`, count after, unlink on overflow.
 - [x] `shim/jellyfin-ffmpeg-upscale:421` 🟡 risk: `/tmp/upscale-last.err` is a fixed path in world-writable `/tmp` opened without `O_EXCL`/`O_NOFOLLOW`. Concurrent transcodes stomp each other's diagnostics, and a pre-planted symlink lets a local user make the jellyfin process truncate any file it can write. Name it per-slot (SLOT_DIR already does) or use `tempfile`.
 - [x] `shim/jellyfin-ffmpeg-upscale:247-250` 🟡 risk: `target_from_filter` takes `MIN_CONST.findall(...)[0]`/`[1]` as width/height while scanning the whole filter string. Any other `min(...)` in the chain shifts the indices and silently targets the wrong resolution. Anchor to the scale node.
@@ -49,7 +49,7 @@ Verified clean: all 13 axes in `CONTROLS` are written by `addParams`/`wireParams
 - [x] `scripts/jellyfin-gpuupscale-activate:17-19,28-33` 🔵 nit: `$PLUGIN_DIR`/`$PATCH_DIR`/`$BACKUP`/`$STAGE` unquoted in every `cp -a`/`chown`. Harmless while they are fixed constants; quote them.
 - [x] `shim/jellyfin-ffmpeg-upscale:139-160` ❓ q: `patched_has` falls back to "assume it has everything" in a try/except, but `pick_binary` already gated on `os.access(..., X_OK)`. Which race is the inner except for — binary deleted between the access check and the subprocess call? If so, say so in a comment.
 
-Note: the repo ships no sudoers file; `scripts/99-jellyfin-gpuupscale` is the apt hook and is the actual privilege-broadening surface.
+Note: the repo ships no sudoers file; `scripts/99-jellyfin-plus` is the apt hook and is the actual privilege-broadening surface.
 
 ## ffmpeg filters (C)
 
@@ -65,7 +65,7 @@ All five fixed together in one change set — they share a single ffmpeg rebuild
 
 ## Still open
 
-- `scripts/99-jellyfin-gpuupscale` — scoping the apt hook to jellyfin-web is not a one-line edit, and the other half of the fix (root:root 0755, no group/other write on the injector and on `/usr/lib/jellyfin-gpuupscale/gpu-upscale.js`) is host-side.
+- `scripts/99-jellyfin-plus` — scoping the apt hook to jellyfin-web is not a one-line edit, and the other half of the fix (root:root 0755, no group/other write on the injector and on `/usr/lib/jellyfin-plus/jellyfin-plus.js`) is host-side.
 - `src/patcher/UpscaleEngine.cs:825` — chroma with a game upscaler: run a session with chroma on and off against the same source and compare the served segment before changing anything.
 
 ## Verification state
@@ -76,7 +76,7 @@ The local `dotnet build` fails with 25 x CS0246 on `EncodingJobInfo` / `Encoding
 
 The ffmpeg filters have not been compiled at all. Build them on the host and confirm `-filters` still lists all five (`vf_oidn`, `vf_optix`, `vf_ort`, `vf_fsr2`, `vf_dlss`).
 
-Session ownership is fail-open: an empty id on either side answers as before. Both ids come from unverified sources (reflection for the record's user, the `Jellyfin-UserId` claim for the caller). Check it by playing as one viewer, then requesting `/GpuUpscale/Session/<id>` with a second viewer's token: expected `Known: false`, and the real record with the first viewer's own token.
+Session ownership is fail-open: an empty id on either side answers as before. Both ids come from unverified sources (reflection for the record's user, the `Jellyfin-UserId` claim for the caller). Check it by playing as one viewer, then requesting `/JellyfinPlus/Session/<id>` with a second viewer's token: expected `Known: false`, and the real record with the first viewer's own token.
 
 ---
 
@@ -241,7 +241,7 @@ Two agents arrived independently at the same first item, from opposite ends of t
   band the ladder has no rung for. `[M]` whether ravu-zoom beats plain plus RCAS at 1.5x.
 - [ ] **Threshold arithmetic lives in three places** (`Decide`, `WouldEnhanceSource`, and the
   client's `eligibleTargets`/`srWouldRun`), so the probe ships raw numbers and the client re-derives
-  the rules. A `GET /GpuUpscale/Plan?w=&h=` answering from the same `Decide` code would leave the
+  the rules. A `GET /JellyfinPlus/Plan?w=&h=` answering from the same `Decide` code would leave the
   client deciding nothing.
 - [ ] **13 axes is not quite the problem: 12 of them are cost knobs and none is a statement about
   the content.** Add one viewer-facing axis (photographic / animation / grainy) that the server maps
@@ -432,7 +432,7 @@ Ordered by what is at stake.
   family per ratio. The client half shipped, so this is now a question about what the ladder is.
 - A plan-preview endpoint, so threshold arithmetic stops living in three places.
 - The cost tables moving server-side: they are measurements of the server living in the browser.
-- `scripts/99-jellyfin-gpuupscale`: the apt hook fires on every dpkg operation, and the other half of
+- `scripts/99-jellyfin-plus`: the apt hook fires on every dpkg operation, and the other half of
   the fix is host-side file ownership.
 
 ### Worth doing as one piece, and bigger than it looks

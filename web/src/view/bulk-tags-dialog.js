@@ -35,9 +35,9 @@ var CSS = '' +
     '.gubtBad{color:#ff8a80}';
 
 function injectStyle() {
-    if (document.getElementById('gpuUpscaleBulkTagsCss')) { return; }
+    if (document.getElementById('jellyfinPlusBulkTagsCss')) { return; }
     var s = document.createElement('style');
-    s.id = 'gpuUpscaleBulkTagsCss';
+    s.id = 'jellyfinPlusBulkTagsCss';
     s.textContent = CSS;
     document.head.appendChild(s);
 }

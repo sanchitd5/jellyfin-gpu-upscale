@@ -20,7 +20,7 @@ export function probeServer() {
 
         return client.ajax({
             type: 'GET',
-            url: client.getUrl('GpuUpscale/Session/probe'),
+            url: client.getUrl('JellyfinPlus/Session/probe'),
             dataType: 'json'
         }).then(function (res) {
             // The probe answer carries the levels this server can really deliver. Keep them:

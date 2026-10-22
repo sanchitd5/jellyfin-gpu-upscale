@@ -7,11 +7,11 @@ import { noteCardBuilder } from './detail-related.js';
 
 function wrapChunkModules(chunk) {
     try {
-        if (!chunk || chunk.__gpuUpscaleSeen) {
+        if (!chunk || chunk.__jellyfinPlusSeen) {
             return;
         }
 
-        chunk.__gpuUpscaleSeen = true;
+        chunk.__jellyfinPlusSeen = true;
         var modules = chunk[1];
         if (!modules) {
             return;
@@ -61,7 +61,7 @@ var GLOBALS = ['webpackChunk', 'webpackChunkjellyfin_web'];
 function hookChunkGlobal(key) {
     log('hookChunkGlobal: start, key=' + key);
     var chunks = window[key] = window[key] || [];
-    if (chunks.__gpuUpscaleHooked) {
+    if (chunks.__jellyfinPlusHooked) {
         log('hookChunkGlobal: end, ' + key + ' already hooked');
         return;
     }
@@ -91,7 +91,7 @@ function hookChunkGlobal(key) {
         set: function (value) { installed = value; }
     });
 
-    chunks.__gpuUpscaleHooked = true;
+    chunks.__jellyfinPlusHooked = true;
     chunks.forEach(wrapChunkModules);
     state.globals.push(key);
     log('hookChunkGlobal: end, hooked ' + key + ', ' + chunks.length + ' pre-existing chunks wrapped');

@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { DEFAULT_PREFS, SR_ALIASES } from './controls-data.js';
 
-var STORE = 'gpuUpscalePrefs';
+var STORE = 'jellyfinPlusPrefs';
 
 // Loaded once, at module init, exactly as the pre-module build loaded it once at IIFE start.
 (function loadPrefs() {

@@ -1,4 +1,4 @@
-# GPU Upscale for Jellyfin
+# Jellyfin Plus
 
 Realtime GPU super-resolution, sharpening and denoising for Jellyfin transcodes. A viewer picks a
 quality level from the player's **Enhance** panel and the stream is upscaled on the fly: a 540p
@@ -9,6 +9,12 @@ resolution, sharpening, refine and chroma passes. **Five custom ffmpeg video fil
 separately built binary beside the stock one, carry Intel Open Image Denoise, NVIDIA OptiX, ONNX
 neural models, FSR2 and DLSS/DLAA. Fourteen axes are exposed, all composable, all live-switchable
 mid-playback.
+
+> **Renamed from GPU Upscale.** The plugin began as a GPU upscaler and now also carries search fixes,
+> library-filter features and other quality-of-life patches, so the umbrella is **Jellyfin Plus**. The GPU
+> upscaling is still here, as the enhancement panel and engine. The plugin GUID is unchanged, and the
+> settings, shader cache and browser preferences carry over (migrated once on first run). Server paths and
+> log prefixes moved from `GpuUpscale` / `jellyfin-gpuupscale` to `JellyfinPlus` / `jellyfin-plus`.
 
 Built and measured against Jellyfin **12.1.0** with an NVIDIA RTX 3090.
 
@@ -93,14 +99,14 @@ dotnet publish src -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out
 dotnet publish src/patcher -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out-patcher
 
 # 3. deploy
-#    plugin  -> /var/lib/jellyfin/plugins/GpuUpscale_<version>/   (owned jellyfin:jellyfin)
-#    patcher -> /usr/lib/jellyfin-gpuupscale/                     (NOT under plugins/)
-#    client  -> /usr/share/jellyfin/web/gpu-upscale.js + a <script> tag in index.html
-sudo ./scripts/jellyfin-gpuupscale-webinject
+#    plugin  -> /var/lib/jellyfin/plugins/JellyfinPlus_<version>/   (owned jellyfin:jellyfin)
+#    patcher -> /usr/lib/jellyfin-plus/                     (NOT under plugins/)
+#    client  -> /usr/share/jellyfin/web/jellyfin-plus.js + a <script> tag in index.html
+sudo ./scripts/jellyfin-plus-webinject
 sudo systemctl restart jellyfin
 ```
 
-`scripts/jellyfin-gpuupscale-activate` swaps a staged build in place with a backup, and
+`scripts/jellyfin-plus-activate` swaps a staged build in place with a backup, and
 `--rollback` reverts it.
 
 ## The player menu
@@ -555,7 +561,7 @@ here rebuilt, which a `jellyfin-ffmpeg` upgrade cannot do. After a driver change
 
 ## Configuration
 
-Dashboard → Plugins → GPU Upscale. Defaults suit a single busy GPU:
+Dashboard → Plugins → Jellyfin Plus. Defaults suit a single busy GPU:
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -611,7 +617,7 @@ active (5 EncodingHelper methods patched); optional UNAVAILABLE: MediaInfoHelper
 
 ## Honest reporting
 
-The playback-info row and `GET /GpuUpscale/Session/{playSessionId}` report what the server **actually
+The playback-info row and `GET /JellyfinPlus/Session/{playSessionId}` report what the server **actually
 did**, with explicit statuses: `applied`, `concurrency-cap`, `subtitle-burn-in`, `stream-copy`,
 `disabled`, `not-requested`, `ineligible`. Negatives are recorded too, so a session that asked for 4K
 and hit the concurrency cap says so rather than claiming success.
@@ -730,7 +736,7 @@ that break the patches. It stands down automatically while the plugin's patches 
   them resolve to nothing; the plugin logs it and does not patch. Worse, a method could survive by
   name and change meaning — Harmony cannot detect that. **Re-verify after every Jellyfin upgrade.**
 - **A `jellyfin-web` package upgrade replaces `index.html` and deletes the injected script**, so the
-  Enhance menu silently disappears. `scripts/99-jellyfin-gpuupscale` re-applies it after dpkg runs.
+  Enhance menu silently disappears. `scripts/99-jellyfin-plus` re-applies it after dpkg runs.
 - **The client hooks depend on minified bundle internals** (the `webpackChunk` global, the module
   exporting `getVideoQualityOptions`, the player module's method shape). Modules are matched on
   export shape rather than by id, but a web rebuild can still break the menu. It fails safe: normal

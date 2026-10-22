@@ -3,7 +3,7 @@
 Full module list for the web client (`web/src/`), one line each: what it exports, what it imports.
 Written for the `real-es-modules` pass (2026-09-24, `.agent-briefs/real-es-modules.md`), which
 replaced the numbered `cat`-concatenated `web/src/NN-name.js` files with real ES modules bundled by
-esbuild into `web/gpu-upscale.js`. See `CLAUDE.md`'s "Before you change the client" section for the
+esbuild into `web/jellyfin-plus.js`. See `CLAUDE.md`'s "Before you change the client" section for the
 narrative version and `WEB_PANEL_DESIGN.md` section 9/9.1 for how this came to be.
 
 Layout is MVC-style: `lib/` (dependency-free leaves), `model/` (data + session logic), `controller/`
@@ -19,6 +19,7 @@ esbuild) support natively.
 
 | module | exports | imports |
 |---|---|---|
+| `lib/storage-migrate.js` | none (side effect: one-time rename of the old `gpuUpscale*` localStorage keys to `jellyfinPlus*`) | none |
 | `lib/log.js` | `log()` | none |
 | `lib/dom.js` | `el(tag, cls, text)` | none |
 | `lib/utils.js` | `isOff(v)` | none |
@@ -72,13 +73,13 @@ esbuild) support natively.
 
 | module | exports | imports |
 |---|---|---|
-| `bootstrap.js` | none (runs the install try/catch as a side effect) | `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`), `controller/search-exclude.js` (`watchSearchPage`), `controller/search-scope.js` (`installSearchScopeFix`), `view/search-grid.js` (`installSearchGrid`), `view/image-zoom.js` (`installImageZoom`), and the QoL installers: `controller/play-all.js`, `view/card-actions.js`, `controller/double-tap-seek.js`, `controller/clip-upnext.js`, `controller/detail-related.js`, `controller/person-videos.js`, `controller/bulk-tags.js` (each through `feature()`, its own try/catch) |
+| `bootstrap.js` | none (runs the install try/catch as a side effect) | `lib/storage-migrate.js` (first import; must run before `prefs-store.js` loads), `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`), `controller/search-exclude.js` (`watchSearchPage`), `controller/search-scope.js` (`installSearchScopeFix`), `view/search-grid.js` (`installSearchGrid`), `view/image-zoom.js` (`installImageZoom`), and the QoL installers: `controller/play-all.js`, `view/card-actions.js`, `controller/double-tap-seek.js`, `controller/clip-upnext.js`, `controller/detail-related.js`, `controller/person-videos.js`, `controller/bulk-tags.js` (each through `feature()`, its own try/catch) |
 | `banner.txt` | n/a - not a module, injected as the bundle's leading comment via esbuild's `--banner:js` | none |
 
 ## Build
 
 `scripts/build-web-panel.sh` runs `web/node_modules/.bin/esbuild src/bootstrap.js --bundle
 --format=iife --target=es2018 --banner:js="$(cat src/banner.txt)"` from `web/`, producing
-`web/gpu-upscale.js`. esbuild is a build-time-only dependency: `web/package.json` +
+`web/jellyfin-plus.js`. esbuild is a build-time-only dependency: `web/package.json` +
 `web/package-lock.json` are checked in, `web/node_modules/` is gitignored and installed with
 `npm install` in `web/` on whichever machine runs the build.

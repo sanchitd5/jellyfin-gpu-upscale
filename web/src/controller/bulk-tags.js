@@ -214,7 +214,7 @@ export function editItemTags(client, userId, id, add, remove) {
                 // Data-safety event: always logged, with the previous values, so it can be undone by hand.
                 var was = {};
                 diff.forEach(function (k) { was[k] = before[k]; });
-                console.error('[gpu-upscale] bulk tags: unexpected change on ' + id + '; previous values:', JSON.stringify(was));
+                console.error('[jellyfin-plus] bulk tags: unexpected change on ' + id + '; previous values:', JSON.stringify(was));
                 throw new Error('saved, but these fields changed unexpectedly: ' + diff.join(', '));
             }
             return { id: id, name: name, status: 'changed' };

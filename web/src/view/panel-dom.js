@@ -32,8 +32,8 @@ import { axisControls, controlNote } from '../controller/probe.js';
 // the Advanced section outside the trap and out of a remote's reach.
 export var FOCUSABLE = 'button,select,input,summary';
 
-export var PANEL_ID = 'gpuUpscalePanel';
-var STYLE_ID = 'gpuUpscalePanelStyle';
+export var PANEL_ID = 'jellyfinPlusPanel';
+var STYLE_ID = 'jellyfinPlusPanelStyle';
 var CSS = [
     '#' + PANEL_ID + '{position:fixed;right:1.2em;bottom:5.5em;z-index:99999;width:44em;',
     'max-width:calc(100vw - 2.4em);max-height:72vh;overflow-y:auto;background:rgba(16,16,18,.94);',
@@ -115,7 +115,7 @@ export function ensureStyle() {
  * or absent entry costs a closed section and nothing else, and wrapped in try/catch like every
  * other storage read here: a browser that refuses localStorage still gets a working panel.
  */
-var OPEN_STORE = 'gpuUpscaleOpen';
+var OPEN_STORE = 'jellyfinPlusOpen';
 
 function openState() {
     try {

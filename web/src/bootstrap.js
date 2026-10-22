@@ -1,3 +1,4 @@
+import './lib/storage-migrate.js';
 import { state } from './model/state.js';
 import { log } from './lib/log.js';
 import './model/prefs-store.js';

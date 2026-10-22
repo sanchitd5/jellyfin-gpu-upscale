@@ -40,8 +40,8 @@ var TICKS_PER_SECOND = 10000000;
 var PAGE = '#videoOsdPage';
 // Same exclusion the stock handler makes for the bottom OSD and up-next, plus real controls.
 var IGNORE = 'button, a, input, select, textarea, .videoOsdBottom, .upNextContainer, .skinHeader, .osdHeader';
-var STYLE_ID = 'gpuUpscaleDoubleTapStyle';
-var HINT_ID = 'gpuUpscaleSeekHint';
+var STYLE_ID = 'jellyfinPlusDoubleTapStyle';
+var HINT_ID = 'jellyfinPlusSeekHint';
 
 var CSS = [
     // Stops the browser treating the second tap as a page zoom.

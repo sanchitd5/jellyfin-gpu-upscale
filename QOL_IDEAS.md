@@ -265,7 +265,7 @@ which one they patch; several need both.
 - **Problem:** Our prefs live in `localStorage`, so they differ per browser/phone.
 - **Seam:** [V by subagent] `Jellyfin.Api/Controllers/DisplayPreferencesController.cs:48` GET, `:112` POST, `CustomPrefs` dictionary persisted (`ItemDisplayPreferences.cs:103` key `MaxLength(64)`).
 - **Client / server:** client.
-- **Patch shape:** read/write `CustomPrefs["gpuUpscale.*"]` through the stock endpoint at boot and on change; fall back to localStorage.
+- **Patch shape:** read/write `CustomPrefs["jellyfinPlus.*"]` through the stock endpoint at boot and on change; fall back to localStorage.
 - **Value / effort / risk:** low-med / S / low.
 
 ### 33. Dashboard: tag management page (rename / merge / delete)

@@ -197,7 +197,7 @@ module structure, documented where it is maintained rather than duplicated here:
 root for the full module/export/import list, and `WEB_PANEL_DESIGN.md` section 9/9.1 for how it got
 there. In one line: `web/src/{lib,model,controller,view}/*.js` and `web/src/bootstrap.js` are real
 ES modules, bundled by esbuild (build-time only, see `scripts/build-web-panel.sh`) into the single
-plain IIFE (`web/gpu-upscale.js`) that `scripts/jellyfin-gpuupscale-webinject` publishes - no ES
+plain IIFE (`web/jellyfin-plus.js`) that `scripts/jellyfin-plus-webinject` publishes - no ES
 module support is needed, or used, at runtime in the browser.
 
 ## Deployment: binary selection is per-invocation, not per-restart

@@ -132,4 +132,4 @@ export var state = {
     prefs: Object.assign({}, DEFAULT_PREFS)
 };
 
-window.__gpuUpscale = state;
+window.__jellyfinPlus = state;
