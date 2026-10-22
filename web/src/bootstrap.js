@@ -9,6 +9,7 @@ import { probeServer } from './controller/probe.js';
 import { tryRequireShim } from './controller/live-apply.js';
 import { watchSearchPage } from './controller/search-exclude.js';
 import { installSearchScopeFix } from './controller/search-scope.js';
+import { installSearchFilterBar } from './view/search-filter-sheet.js';
 import { installSearchGrid } from './view/search-grid.js';
 import { installImageZoom } from './view/image-zoom.js';
 import { installPlayAllFix } from './controller/play-all.js';
@@ -50,6 +51,7 @@ function feature(name, install) {
         watchPlaybackInfoDialog();
         feature('search page', watchSearchPage);
         feature('search scope', installSearchScopeFix);
+        feature('search sort & filter', installSearchFilterBar);
         feature('search grid', installSearchGrid);
         feature('image zoom', installImageZoom);
         feature('card actions', installCardActions);
