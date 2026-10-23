@@ -15,11 +15,25 @@ import { toGroups, withPrimary } from '../model/smart-tags.js';
 
 var TTL_MS = 10 * 60 * 1000;
 var FAIL_TTL_MS = 60 * 1000;
-var cache = {}; // scope -> { at, ttl, list, promise }
+var cache = {}; // userId|scope ->{ at, ttl, list, promise }
 
 function client() {
     var c = window.ApiClient;
     return c && typeof c.getUrl === 'function' && typeof c.ajax === 'function' ? c : null;
+}
+
+function userId() {
+    try {
+        var c = window.ApiClient;
+        return c && typeof c.getCurrentUserId === 'function' ? String(c.getCurrentUserId() || '') : '';
+    } catch (e) {
+        return '';
+    }
+}
+
+/* The cache key: the user too, so a user switch without a page reload never shows the previous user's answer. */
+function keyOf(parentId) {
+    return userId() + '|' + scopeOf(parentId);
 }
 
 function scopeOf(parentId) {
@@ -27,19 +41,25 @@ function scopeOf(parentId) {
 }
 
 export function getCategories(parentId) {
-    var scope = scopeOf(parentId);
-    var e = cache[scope];
-    if (e && (e.promise || Date.now() - e.at < e.ttl)) {
-        return e.promise || Promise.resolve(e.list);
+    var key = keyOf(parentId);
+    var e = cache[key];
+    if (e && !e.promise && Date.now() - e.at < e.ttl) {
+        return Promise.resolve(e.list);
+    }
+
+    // Stale-while-revalidate: past the TTL the old list stays in use while the refetch runs.
+    if (e && e.promise) {
+        return e.list ? Promise.resolve(e.list) : e.promise;
     }
 
     var c = client();
     if (!c) {
-        return Promise.resolve(withPrimary([]));
+        return Promise.resolve(e && e.list ? e.list : withPrimary([]));
     }
 
-    var entry = { at: 0, ttl: TTL_MS, list: null, promise: null };
-    cache[scope] = entry;
+    var scope = scopeOf(parentId);
+    var entry = { at: 0, ttl: TTL_MS, list: e ? e.list : null, promise: null };
+    cache[key] = entry;
     var params = scope ? { parentId: scope } : {};
     entry.promise = Promise.resolve(c.ajax({ type: 'GET', url: c.getUrl('JellyfinPlus/Tags/Categories', params), dataType: 'json' }))
         .then(function (body) {
@@ -47,7 +67,7 @@ export function getCategories(parentId) {
         }, function (err) {
             log('smart tags: categories unavailable', err);
             entry.ttl = FAIL_TTL_MS;
-            return withPrimary([]);
+            return entry.list || withPrimary([]);
         })
         .then(function (list) {
             entry.list = list;
@@ -55,12 +75,16 @@ export function getCategories(parentId) {
             entry.promise = null;
             return list;
         });
-    return entry.promise;
+    return entry.list && e ? Promise.resolve(entry.list) : entry.promise;
 }
 
 export function categoriesNow(parentId) {
-    var e = cache[scopeOf(parentId)];
-    if (e && e.list && Date.now() - e.at < e.ttl) {
+    var e = cache[keyOf(parentId)];
+    if (e && e.list) {
+        if (!e.promise && Date.now() - e.at >= e.ttl) {
+            getCategories(parentId);
+        }
+
         return e.list;
     }
 

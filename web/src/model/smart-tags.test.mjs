@@ -35,10 +35,10 @@ t('parseCategories keeps well-formed entries and drops junk', function () {
     assert.deepEqual(parseCategories(undefined), []);
 });
 
-t('toGroups: prefix family -> { name, prefix }, facets -> { name, tags }', function () {
+t('toGroups: prefix family -> { name, prefix, tags (the server\'s names) }, facets -> { name, tags }', function () {
     var g = toGroups(ROUTE);
     assert.deepEqual(g[0], { id: 'smart:exclusive:00ff', name: 'Group A', kind: 'exclusive', tags: ['Apple', 'river', 'stone', 'cloud'] });
-    assert.deepEqual(g[1], { id: 'smart:prefix:tint', name: 'Tint', kind: 'prefix', prefix: 'tint' });
+    assert.deepEqual(g[1], { id: 'smart:prefix:tint', name: 'Tint', kind: 'prefix', prefix: 'tint', tags: ['tintalpha', 'tintbravo'] });
     assert.deepEqual(g[3].tags, ['common']);
 });
 
@@ -56,6 +56,8 @@ if (quick && typeof quick.parseSuggested === 'function') {
         var s = quick.parseSuggested(toGroups(ROUTE));
         assert.equal(s.length, 4);
         assert.equal(s[1].prefix, 'tint');
+        assert.deepEqual(s[1].tags, ['tintalpha', 'tintbravo']);
+        assert.deepEqual(quick.chipsFor(s[1], null, []).map(function (c) { return c.label; }), ['alpha', 'bravo']);
         assert.deepEqual(s[0].tags, ['Apple', 'river', 'stone', 'cloud']);
         assert.ok(s.every(function (x) { return typeof x.name === 'string' && x.name.length > 0; }));
     });

@@ -90,4 +90,30 @@ await t('a source returning garbage is ignored', async function () {
     assert.ok(Array.isArray(shown));
 });
 
-console.log(passed + ' passed' + (process.exitCode ? ', with failures' : ''));
+await t('suggestion cache is keyed by user: a switch refetches, not reuses', async function () {
+    var seen = 0;
+    var uid = 'userA';
+    globalThis.window.ApiClient = { getCurrentUserId: function () { return uid; } };
+    q.registerGroupSource(function (parentId) {
+        if (parentId !== 'libU') { return Promise.resolve([]); }
+        seen++;
+        return Promise.resolve([{ name: 'U' + uid, tags: ['x'], id: 'u:1' }]);
+    });
+    var a = await q.loadSuggested('libU');
+    assert.equal(a[0].name, 'UuserA');
+    uid = 'userB';
+    assert.equal(q.suggestedNow('libU'), null, 'user B has nothing cached yet');
+    var b = await q.loadSuggested('libU');
+    assert.equal(b[0].name, 'UuserB');
+    assert.equal(seen, 2);
+});
+
+await t('namesFresh: fixed groups are always fresh, an unfetched prefix group is not; namesNow of a fixed group is []', async function () {
+    assert.equal(q.namesFresh({ tags: ['a'], prefix: '' }), true);
+    assert.equal(q.namesFresh({ tags: [], prefix: 'never-fetched' }), false);
+    assert.equal(q.namesNow({ tags: [], prefix: 'never-fetched' }), null);
+    assert.deepEqual(q.namesNow({ tags: ['a'], prefix: 'p' }), []);
+    assert.deepEqual(await q.resolveNames({ tags: ['a'], prefix: 'p' }), [], 'a fixed group (with a prefix) never fetches');
+});
+
+console.log(passed +' passed' + (process.exitCode ? ', with failures' : ''));
