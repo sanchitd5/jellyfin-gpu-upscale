@@ -23,6 +23,7 @@ import { installBulkTags } from './controller/bulk-tags.js';
 import { installSearchCensus } from './controller/search-census.js';
 import { installLibraryFilterHooks } from './controller/library-filters.js';
 import { installLibraryFilterPanel } from './view/library-filter-panel.js';
+import { installPrefsSync } from './controller/prefs-sync.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -65,6 +66,7 @@ function feature(name, install) {
         feature('detail related', installDetailRelated);
         feature('person videos', installPersonVideos);
         feature('bulk tags', installBulkTags);
+        feature('prefs sync', installPrefsSync);
         probeServer();
         state.installed = true;
         log('bootstrap install: end, installed on', state.globals.join(', '));

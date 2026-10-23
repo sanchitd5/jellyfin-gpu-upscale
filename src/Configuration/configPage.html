@@ -680,6 +680,62 @@
                     <tbody id="activityBody"></tbody>
                 </table>
             </div>
+
+            <div class="verticalSection" id="jpMaintenance">
+                <h2 class="sectionTitle">Library maintenance</h2>
+                <p class="fieldDescription">
+                    Starts Jellyfin's own scheduled tasks from here instead of Dashboard, Scheduled Tasks. Nothing
+                    new runs: each button posts to the stock task endpoint and shows that task's state.
+                </p>
+                <div id="jpTaskRows"></div>
+            </div>
+
+            <div class="verticalSection" id="jpTags">
+                <h2 class="sectionTitle">Tags</h2>
+                <p class="fieldDescription">
+                    Every tag with the number of items that carry it. Tick tags, choose what to do, press Preview to see
+                    how many items would change, then Apply. Case and punctuation variants are separate rows here (the
+                    <em>spellings</em> note marks tags Jellyfin's filters treat as one): tick them all and merge them to
+                    one spelling. Items whose Tags field is locked are never touched. Nothing is written until Apply.
+                </p>
+                <div class="inputContainer">
+                    <input is="emby-input" type="search" id="jpTagQuery" label="Search tags" />
+                </div>
+                <div class="selectContainer">
+                    <select is="emby-select" id="jpTagOrder" label="Order">
+                        <option value="count">Most used first</option>
+                        <option value="name">Name</option>
+                    </select>
+                </div>
+                <div style="overflow-x:auto">
+                    <table style="width:100%;text-align:left">
+                        <thead><tr><th></th><th>Tag</th><th>Items</th><th></th></tr></thead>
+                        <tbody id="jpTagBody"></tbody>
+                    </table>
+                </div>
+                <p class="fieldDescription" id="jpTagPaging"></p>
+                <div>
+                    <button is="emby-button" type="button" class="emby-button" id="jpTagPrev"><span>Previous</span></button>
+                    <button is="emby-button" type="button" class="emby-button" id="jpTagNext"><span>Next</span></button>
+                </div>
+                <p class="fieldDescription" id="jpTagSelected"></p>
+                <div class="selectContainer">
+                    <select is="emby-select" id="jpTagOp" label="Action">
+                        <option value="rename">Rename the selected tag</option>
+                        <option value="merge">Merge the selected tags into one</option>
+                        <option value="delete">Delete the selected tags from every item</option>
+                    </select>
+                </div>
+                <div class="inputContainer" id="jpTagToBox">
+                    <input is="emby-input" type="text" id="jpTagTo" label="New name" maxlength="200" />
+                </div>
+                <div>
+                    <button is="emby-button" type="button" class="raised emby-button" id="jpTagPreview"><span>Preview</span></button>
+                    <button is="emby-button" type="button" class="raised button-submit emby-button" id="jpTagApply" disabled><span>Apply</span></button>
+                    <button is="emby-button" type="button" class="emby-button" id="jpTagClear"><span>Clear selection</span></button>
+                </div>
+                <p class="fieldDescription" id="jpTagResult"></p>
+            </div>
         </div>
     </div>
 
@@ -957,6 +1013,280 @@
                 });
                 return false;
             });
+        })();
+
+        // Library maintenance (stock scheduled-task buttons) and tag management. Kept in its own scope and
+        // off the settings form, so nothing here can touch the load/save script above.
+        (function () {
+            var pageEl = document.querySelector('#JellyfinPlusConfigPage');
+            function q(sel) { return pageEl.querySelector(sel); }
+            function api(method, path, params, body) {
+                var o = { type: method, url: ApiClient.getUrl(path, params || undefined) };
+                if (body !== undefined) {
+                    o.data = JSON.stringify(body);
+                    o.contentType = 'application/json';
+                    o.dataType = 'json';
+                } else if (method === 'GET') {
+                    o.dataType = 'json';
+                }
+                return ApiClient.ajax(o);
+            }
+            // A rejected ApiClient.ajax carries the fetch Response; turn it into a short sentence.
+            function failText(err) {
+                if (err && typeof err.text === 'function') {
+                    return err.text().then(function (t) {
+                        return 'HTTP ' + err.status + (t ? ': ' + t.slice(0, 200) : '');
+                    }, function () { return 'HTTP ' + err.status; });
+                }
+                return Promise.resolve(String((err && err.message) || err || 'failed'));
+            }
+            function setText(el, t) { el.textContent = t; }
+
+            // ---- Library maintenance. Tasks are found by Key, never by id: the id is derived per server.
+            var TASKS = [
+                { key: 'RefreshPeople', label: 'Validate people',
+                  note: 'Refreshes and removes orphaned people (Dashboard, Scheduled Tasks: Scan people).', confirm: false },
+                { key: 'OptimizeDatabaseTask', label: 'Optimize database',
+                  note: 'Vacuums and analyses the Jellyfin database. It can hold the database busy for a while, so run it when nobody is watching.', confirm: true }
+            ];
+            var taskTimer = null;
+
+            function taskState(t) {
+                if (!t) { return 'Not available on this server.'; }
+                if (t.State === 'Running' || t.State === 'Cancelling') {
+                    var p = t.CurrentProgressPercentage;
+                    return t.State + (p == null ? '' : ' ' + Math.round(p) + '%') + '.';
+                }
+                var r = t.LastExecutionResult;
+                if (!r) { return 'Idle. Never run.'; }
+                return 'Idle. Last run: ' + r.Status + (r.EndTimeUtc ? ' at ' + r.EndTimeUtc.replace('T', ' ').slice(0, 19) + ' UTC' : '') + '.';
+            }
+
+            function renderTasks(list) {
+                var byKey = {};
+                (list || []).forEach(function (t) { byKey[t.Key] = t; });
+                var host = q('#jpTaskRows');
+                host.innerHTML = '';
+                var running = false;
+                TASKS.forEach(function (def) {
+                    var t = byKey[def.key];
+                    if (t && (t.State === 'Running' || t.State === 'Cancelling')) { running = true; }
+                    var row = document.createElement('div');
+                    row.className = 'inputContainer';
+                    var btn = document.createElement('button', { is: 'emby-button' });
+                    btn.setAttribute('type', 'button');
+                    btn.className = 'raised emby-button';
+                    var span = document.createElement('span');
+                    span.textContent = def.label;
+                    btn.appendChild(span);
+                    btn.disabled = !t || t.State !== 'Idle';
+                    btn.addEventListener('click', function () {
+                        if (def.confirm && !window.confirm(def.label + '? ' + def.note)) { return; }
+                        btn.disabled = true;
+                        api('POST', 'ScheduledTasks/Running/' + encodeURIComponent(t.Id)).then(function () {
+                            loadTasks();
+                        }, function (err) {
+                            failText(err).then(function (m) { setText(note, 'Could not start: ' + m); });
+                            btn.disabled = false;
+                        });
+                    });
+                    var note = document.createElement('div');
+                    note.className = 'fieldDescription';
+                    note.textContent = def.note + ' ' + taskState(t);
+                    row.appendChild(btn);
+                    row.appendChild(note);
+                    host.appendChild(row);
+                });
+                // While anything runs, refresh every 3 s; the timer stops when it is idle or the page is left.
+                clearTimeout(taskTimer);
+                if (running) { taskTimer = setTimeout(loadTasks, 3000); }
+            }
+
+            function loadTasks() {
+                clearTimeout(taskTimer);
+                api('GET', 'ScheduledTasks').then(renderTasks, function () {
+                    var host = q('#jpTaskRows');
+                    host.textContent = 'Scheduled tasks could not be read.';
+                });
+            }
+
+            // ---- Tag management
+            var PAGE = 100;
+            var tags = { offset: 0, total: 0, query: '', order: 'count' };
+            var selected = new Map();   // exact tag name -> item count when ticked
+            var preview = null;         // { changedItems } of the last successful dry run for the current choice
+            var queryTimer = null;
+
+            function resetPreview() {
+                preview = null;
+                q('#jpTagApply').disabled = true;
+            }
+
+            function renderSelected() {
+                var names = Array.from(selected.keys());
+                var el = q('#jpTagSelected');
+                if (names.length === 0) { setText(el, 'No tags selected.'); return; }
+                var shown = names.slice(0, 6).map(function (n) { return '“' + n + '”'; }).join(', ');
+                setText(el, 'Selected ' + names.length + ': ' + shown + (names.length > 6 ? ', and ' + (names.length - 6) + ' more' : '') + '.');
+            }
+
+            function renderTags(page) {
+                tags.total = page.total;
+                var body = q('#jpTagBody');
+                body.innerHTML = '';
+                (page.items || []).forEach(function (r) {
+                    var tr = document.createElement('tr');
+                    var c0 = document.createElement('td');
+                    var cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.checked = selected.has(r.name);
+                    cb.addEventListener('change', function () {
+                        if (cb.checked) { selected.set(r.name, r.count); } else { selected.delete(r.name); }
+                        resetPreview();
+                        renderSelected();
+                        syncTarget();
+                    });
+                    c0.appendChild(cb);
+                    var c1 = document.createElement('td');
+                    c1.textContent = r.name;
+                    var c2 = document.createElement('td');
+                    c2.textContent = String(r.count);
+                    var c3 = document.createElement('td');
+                    c3.className = 'fieldDescription';
+                    c3.textContent = r.variants > 1 ? r.variants + ' spellings' : '';
+                    tr.appendChild(c0); tr.appendChild(c1); tr.appendChild(c2); tr.appendChild(c3);
+                    body.appendChild(tr);
+                });
+                var from = page.total === 0 ? 0 : page.offset + 1;
+                var to = Math.min(page.offset + PAGE, page.total);
+                setText(q('#jpTagPaging'), page.total === 0 ? 'No tags match.' : 'Tags ' + from + ' to ' + to + ' of ' + page.total + '.');
+                q('#jpTagPrev').disabled = page.offset <= 0;
+                q('#jpTagNext').disabled = page.offset + PAGE >= page.total;
+            }
+
+            function loadTags() {
+                api('GET', 'JellyfinPlus/Tags', { q: tags.query, order: tags.order, limit: PAGE, offset: tags.offset }).then(renderTags, function (err) {
+                    failText(err).then(function (m) { setText(q('#jpTagPaging'), 'Tags could not be read: ' + m); });
+                });
+            }
+
+            function currentOp() { return q('#jpTagOp').value; }
+
+            // Merge needs a target; offer the most used selected spelling. Delete has none.
+            function syncTarget() {
+                var op = currentOp();
+                q('#jpTagToBox').style.display = op === 'delete' ? 'none' : '';
+                var to = q('#jpTagTo');
+                if (op === 'rename' && selected.size === 1 && !to.dataset.touched) {
+                    to.value = Array.from(selected.keys())[0];
+                } else if (op === 'merge' && selected.size > 0 && !to.dataset.touched) {
+                    var best = null;
+                    selected.forEach(function (n, name) { if (best === null || n > selected.get(best)) { best = name; } });
+                    to.value = best;
+                }
+            }
+
+            function request(dryRun) {
+                var op = currentOp();
+                var from = Array.from(selected.keys());
+                var to = q('#jpTagTo').value.trim();
+                if (from.length === 0) { return { error: 'Tick at least one tag first.' }; }
+                if (op === 'rename' && from.length !== 1) { return { error: 'Rename takes exactly one ticked tag; use Merge for several.' }; }
+                if (op !== 'delete' && !to) { return { error: 'Type the new name.' }; }
+                var body = { op: op, from: from, dryRun: dryRun };
+                if (op !== 'delete') { body.to = to; }
+                return { body: body, op: op, from: from, to: to };
+            }
+
+            function describe(r) {
+                var what = r.op === 'delete' ? 'Delete ' + r.from.length + ' tag(s) from' : (r.op === 'merge' ? 'Merge ' + r.from.length + ' tag(s) into “' + r.to + '” on' : 'Rename “' + r.from[0] + '” to “' + r.to + '” on');
+                return what;
+            }
+
+            function doPreview() {
+                var r = request(true);
+                var out = q('#jpTagResult');
+                if (r.error) { setText(out, r.error); return; }
+                setText(out, 'Counting...');
+                api('POST', 'JellyfinPlus/Tags/Edit', null, r.body).then(function (res) {
+                    preview = { changedItems: res.changedItems };
+                    var msg = describe(r) + ' ' + res.changedItems + ' item(s). ' + res.matchedItems + ' carry the tag(s)' +
+                        (res.lockedSkipped ? ', ' + res.lockedSkipped + ' skipped because their Tags field is locked' : '') + '.';
+                    setText(out, res.changedItems === 0 ? msg + ' Nothing to do.' : msg + ' Press Apply to do it.');
+                    q('#jpTagApply').disabled = res.changedItems === 0;
+                }, function (err) {
+                    failText(err).then(function (m) { setText(out, 'Preview failed: ' + m); });
+                });
+            }
+
+            function doApply() {
+                var r = request(false);
+                var out = q('#jpTagResult');
+                if (r.error || !preview) { setText(out, r.error || 'Preview first.'); return; }
+                if (!window.confirm(describe(r) + ' ' + preview.changedItems + ' item(s)? This writes to the library.')) { return; }
+                r.body.expectChanged = preview.changedItems;
+                q('#jpTagApply').disabled = true;
+                setText(out, 'Applying...');
+                api('POST', 'JellyfinPlus/Tags/Edit', null, r.body).then(function (res) {
+                    setText(out, 'Done: ' + res.changedItems + ' item(s) changed' +
+                        (res.lockedSkipped ? ', ' + res.lockedSkipped + ' skipped (locked)' : '') +
+                        (res.notLoaded ? ', ' + res.notLoaded + ' could not be loaded' : '') + '.');
+                    selected.clear();
+                    preview = null;
+                    q('#jpTagTo').value = '';
+                    delete q('#jpTagTo').dataset.touched;
+                    renderSelected();
+                    loadTags();
+                }, function (err) {
+                    var conflict = err && err.status === 409;
+                    failText(err).then(function (m) {
+                        setText(out, conflict ? 'The library changed since the preview, nothing was written. Press Preview again.' : 'Apply failed: ' + m);
+                    });
+                    resetPreview();
+                });
+            }
+
+            var wired = false;
+            function wire() {
+                if (wired) { return; }
+                wired = true;
+                q('#jpTagQuery').addEventListener('input', function () {
+                    clearTimeout(queryTimer);
+                    queryTimer = setTimeout(function () {
+                        tags.query = q('#jpTagQuery').value.trim();
+                        tags.offset = 0;
+                        loadTags();
+                    }, 300);
+                });
+                q('#jpTagOrder').addEventListener('change', function () {
+                    tags.order = q('#jpTagOrder').value;
+                    tags.offset = 0;
+                    loadTags();
+                });
+                q('#jpTagPrev').addEventListener('click', function () { tags.offset = Math.max(0, tags.offset - PAGE); loadTags(); });
+                q('#jpTagNext').addEventListener('click', function () { tags.offset += PAGE; loadTags(); });
+                q('#jpTagOp').addEventListener('change', function () { resetPreview(); syncTarget(); });
+                q('#jpTagTo').addEventListener('input', function () { q('#jpTagTo').dataset.touched = '1'; resetPreview(); });
+                q('#jpTagPreview').addEventListener('click', doPreview);
+                q('#jpTagApply').addEventListener('click', doApply);
+                q('#jpTagClear').addEventListener('click', function () {
+                    selected.clear();
+                    delete q('#jpTagTo').dataset.touched;
+                    q('#jpTagTo').value = '';
+                    resetPreview();
+                    renderSelected();
+                    loadTags();
+                });
+            }
+
+            pageEl.addEventListener('pageshow', function () {
+                wire();
+                renderSelected();
+                syncTarget();
+                loadTasks();
+                loadTags();
+            });
+            pageEl.addEventListener('pagehide', function () { clearTimeout(taskTimer); });
         })();
     </script>
 </div>

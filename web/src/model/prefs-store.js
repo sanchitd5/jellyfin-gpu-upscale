@@ -4,7 +4,7 @@ import { DEFAULT_PREFS, SR_ALIASES } from './controls-data.js';
 var STORE = 'jellyfinPlusPrefs';
 
 // Loaded once, at module init, exactly as the pre-module build loaded it once at IIFE start.
-(function loadPrefs() {
+function loadPrefs() {
     try {
         var saved = window.localStorage && window.localStorage.getItem(STORE);
         if (saved) {
@@ -39,7 +39,11 @@ var STORE = 'jellyfinPlusPrefs';
             }
         }
     } catch (e) { /* defaults stand */ }
-})();
+}
+loadPrefs();
+
+// Re-reads the stored preferences into state, for when the sync layer has adopted a newer copy from the server.
+export function reloadPrefs() { loadPrefs(); }
 
 export function savePrefs() {
     try {

@@ -53,6 +53,10 @@ setting, a control in the page, or "remove the plugin or script".
 | Clip Up Next | Client | "Next video in N s" card for queued clips | On, no switch |
 | Play-all fixes | Client | Play all and Shuffle queue up to 1000 items; Home Videos folders queue videos | On, no switch |
 | Bulk tag add/remove, Edit tags | Client | Extra rows in the selection menu and the item menu (administrators) | On for administrators |
+| Tag counts and count order on `/Items/Filters` | Server patch | `jpTagOrder=count` orders the tag list most-used first; `jpTagCounts=1` adds the counts in a header | Only when the request sends the parameter; counts only from the filter cache (section 7.5) |
+| Tag management (config page) | Server route + config page | Dashboard, Plugins, Jellyfin Plus: list tags with item counts, rename, merge, delete across items, with a dry run first | Administrators only; nothing is written without Apply (section 6) |
+| Maintenance task buttons (config page) | Config page | Start "Scan people" and "Optimize database" from the plugin page | Administrators only; stock endpoints (section 6) |
+| Preference sync across devices | Client | Enhance panel choices and search paging choices follow the viewer to other browsers | On, no switch; falls back to localStorage alone if jellyfin-web's settings object is not found (section 6) |
 
 ## 1. GPU upscaling and enhancement
 
@@ -361,6 +365,78 @@ back and every protected field is compared; a difference is reported as a failur
 Series, Season and MusicAlbum are refused (saving them pushes ratings and tags to children). Allowed
 types: Video, Movie, Trailer, Episode, Folder, BoxSet, Photo, Book. Saves run 3 at a time.
 
+**Normalisation on save (QOL_IDEAS 29): already stock, nothing added.** Checked against the 12.1
+assemblies: `ItemUpdateController.UpdateItem` does `request.Tags.Select(Trim).Distinct(OrdinalIgnoreCase)`
+(first casing kept), and the item persistence layer drops blank values when it writes `ItemValues`.
+So `Foo`, `foo ` and `foo` already end up as one tag on any save through the editor or the bulk dialog.
+What stock does not do is clean up tags that already exist (case or punctuation variants on different
+items); the tag management page below does that.
+
+### Tag management (config page and `/JellyfinPlus/Tags`)
+
+`src/TagAdminController.cs`, the "Tags" section of `src/Configuration/configPage.html`.
+Administrators only (`RequiresElevation` on the whole controller; the page itself is the dashboard's).
+
+- **List.** Every stored tag spelling that at least one item carries, with its item count, searchable
+  (case-insensitive substring), ordered by count or name, 100 per page. "Foo" and "foo" are separate rows;
+  the `spellings` note marks tags that share Jellyfin's cleaned form (lower case, no punctuation) with
+  another row, which is what the filters treat as one tag. The list is read from `ItemValues` /
+  `ItemValuesMap` (one grouped query, about 0.15 to 0.6 s on 15,000 tags and 2.3 M map rows) and kept in
+  memory for 2 minutes or until an item changes.
+- **Edit.** Rename (one source), Merge (one or more sources into a target spelling) and Delete (remove
+  from every item), always matched by exact stored spelling. The page does Preview first: a dry run that
+  returns how many items carry the tags, how many would change, and how many are skipped because `Tags`
+  is in their `LockedFields`. Apply sends the same request with `dryRun: false` and the previewed count;
+  if the live count differs the server answers 409 and writes nothing. `dryRun` defaults to true, so a
+  request that forgets the flag only counts.
+- **How it writes.** The new tag array of every changed item is computed first, then applied and saved
+  with one `ILibraryManager.UpdateItemsAsync` (a single repository transaction, update reason
+  `MetadataEdit`, the path the stock editor takes), not one save per item. The parent passed is the
+  items' shared parent when they have one, otherwise none (it is only reported on the `ItemUpdated`
+  event). If the call throws, the in-memory items are restored. One edit runs at a time (409 otherwise),
+  at most 20,000 items, the target may not contain `|` (it separates names in a `tags=` filter) or
+  control characters. An item that would carry the target twice keeps one, spelled as the target.
+  Because `UpdateItemsAsync` runs the metadata savers, a server set to write NFO files rewrites the NFO
+  of every changed item.
+- **Series and albums** are edited as items in their own right; stock's editor pushes tag changes down
+  to children, this does not need to, since every child carrying the tag is matched itself.
+
+### Maintenance buttons (config page)
+
+"Library maintenance" under the tags section: buttons for the stock scheduled tasks `RefreshPeople`
+("Scan people": validates people and removes orphans) and `OptimizeDatabaseTask`. Tasks are found by
+`Key` in `GET /ScheduledTasks`, started with `POST /ScheduledTasks/Running/{id}` (both stock,
+administrator-only), and the state (Idle, Running with percent, last result) is shown and polled every 3 s
+while one runs. Optimize asks for confirmation. There is no "collection cleanup" button: the 12.1
+assemblies have no such task (the closest are `CleanupUserDataTask` and the people task above), so the
+idea's third button was not built. Adding another is one entry in `TASKS` in the page script.
+
+### Preference sync (client)
+
+`web/src/controller/prefs-sync.js`, `web/src/model/prefs-sync.js`. The Enhance panel's choices
+(`jellyfinPlusPrefs`, minus the panel position, which stays per device), the search page size
+(`jellyfinPlus.searchPageSize`) and the paged/infinite choice (`jellyfinPlus.searchPaging`) are mirrored
+to the viewer's `DisplayPreferences.CustomPrefs` (`jellyfinPlus.prefs`, `jellyfinPlus.searchPageSize`,
+`jellyfinPlus.searchPaging`), so they follow the viewer to another browser.
+
+- **Local first.** Modules still read and write localStorage exactly as before; the page boots with no
+  extra request. After login the server copy jellyfin-web already holds is compared with the local one in a
+  `setTimeout`, so nothing waits on it.
+- **Writes go through jellyfin-web's own `userSettings` object**, found by shape (an instance with
+  `setUserInfo`, `get`, `set`, `loadQuerySettings`) in the module exports like the query client. Reason:
+  the stock `POST /DisplayPreferences` deletes every custom pref not in the body and jellyfin-web posts its
+  cached copy on each of its own saves, so a write made behind its back would be erased by its next save.
+  Not found: nothing syncs, a log line says so (when debug logging is on), preferences stay in localStorage.
+- **Conflicts: the most recent write wins, per key.** Each server value is `{"t": <ms>, "v": <value>}`.
+  This device keeps the time of its own last write per user (`jellyfinPlus.syncMeta`). On login (and on a
+  user switch) a newer server value is adopted into localStorage (the local panel position is kept and the
+  panel state reloaded), a newer local value is pushed, equal values do nothing, and a tie goes to the
+  server. A value this device has no time for loses to a recorded server value. A change made on this
+  device is pushed 1.5 s after the last edit, and is never given a time earlier than the server's copy it
+  last saw. Position-only changes (dragging the panel) are not changes. Clocks are the devices' own.
+- Deliberately not synced: the committed search filters and exclude box (query state), the panel's open
+  sections, the debug flag, the name cache.
+
 ## 7. Harmony patch reference
 
 All patches are installed by `UpscalePatches.Apply` / `ApplyOptional` (`src/patcher/UpscalePatches.cs`)
@@ -555,6 +631,20 @@ a subclass's extra property. With neither parameter, or an unusable one, the res
 Installed even when the cache is unavailable; if the controller cannot be resolved the full list is
 served.
 
+Tag counts and count order (same postfixes, QOL_IDEAS 31): `jpTagOrder=count` puts the tags in count
+descending order (name ordinal within equal counts) before `jpTagQuery` and `jpTagLimit` are applied, so
+`jpTagOrder=count&jpTagLimit=50` is the 50 most used tags. `jpTagCounts=1` (implied by `jpTagOrder=count`)
+adds header `X-JellyfinPlus-TagCounts`: the item counts of the returned tags, comma-separated, in the
+order of `Tags`, only when 1000 tags or fewer are returned. The count is the sum of the cache's
+per-(library, item type) counts, which is a distinct-item count because an item has one library and one
+type; it is as stale as the cache is allowed to be (a build-time snapshot; on the real 12,210-tag library
+198 keys differed from a live count). Counts exist ONLY when the filter cache answered the request: the
+cache prefixes stash them for the request (`HttpContext.Items`), so they carry the cache's access
+guarantees (no restricted users, only libraries the user can open) and a request answered by stock gets
+none. Then the list stays in name order and header `X-JellyfinPlus-TagOrder` says `name` instead of
+`count` (it is sent whenever `jpTagOrder` was given, so the client can tell). No client sends these yet:
+the library filter popover is not changed by this item.
+
 ### 7.6 Search index: FTS5 trigram over names and tags (`FtsIndexEngine.cs`, `src/FtsIndex.cs`)
 
 Three plugin-owned tables in `jellyfin.db`, created with `IF NOT EXISTS` (Jellyfin's schema is never touched):
@@ -606,6 +696,9 @@ All under the Jellyfin API root. "Administrator" is the `RequiresElevation` poli
 | `GET /JellyfinPlus/Search/Facets` | Any authenticated user | People, studios or tags credited on the items a search matches: `[{id, name, roles, count}]`, count descending then name. Parameters in section 9. 400 for a bad `kind` or no resolvable user; 403 if a non-administrator asks for another user's view; 404 for an unknown user or a `parentId` the user cannot see; an empty array when `searchTerm` is blank. Sets a `Server-Timing` header. |
 | `GET /JellyfinPlus/Library/Census[?userId=..]` | Any authenticated user | Which item kinds the user has: `{counts: {Movie: n, Person: n, ...}}`, absent kinds omitted. Library-resident kinds are counted under the libraries the user can open; kinds stored outside libraries (people, studios, genres, artists, playlists, collections, live TV) are counted library-wide, so they can overstate for a restricted user, never understate. Cached per user (5 minutes, dropped on item add or remove). 403 for another user's view unless administrator; 404 for an unknown user. |
 
+| `GET /JellyfinPlus/Tags[?q=..&order=count\|name&limit=100&offset=0]` | Administrator | Every stored tag spelling with its item count: `{total, offset, items: [{name, count, clean, variants}]}`. `limit` 1 to 500. Used by the config page. |
+| `POST /JellyfinPlus/Tags/Edit` | Administrator | `{op: rename\|merge\|delete, from: [..], to: "..", dryRun: true, expectChanged: n}` -> `{dryRun, committed, op, matchedItems, changedItems, lockedSkipped, notLoaded}`. `dryRun` defaults to true. 400 for a bad request or more than 20,000 items; 409 when another edit is running or `expectChanged` no longer matches (nothing written). Section 6. |
+
 The plugin also serves its configuration page (Dashboard, Plugins, Jellyfin Plus) from an embedded
 resource (`src/Configuration/configPage.html`); changing it needs a rebuild and a Jellyfin restart.
 
@@ -623,6 +716,8 @@ server without the plugin sees no error.
 | `tagMatch` | `all` makes stock's `tags` list an AND (needs 2+ tags) | Same as above | `library-filter-marks.js`, `model/search-filters.js` |
 | `jpTagLimit` | Return at most this many tags (1 to 5000) from `/Items/Filters` or `/Items/Filters2`; the match count comes back in header `X-JellyfinPlus-TagTotal` | `FilterController` postfixes (`FilterCachePatches.cs`) | `controller/tag-window.js`, `library-filters.js` |
 | `jpTagQuery` | Return only tags containing this text (case- and diacritic-insensitive) | Same | `controller/tag-window.js` |
+| `jpTagOrder` | `count`: order `/Items/Filters` tags most-used first (needs the filter cache; header `X-JellyfinPlus-TagOrder` reports `count` or `name`) | `FilterController` postfixes (`FilterCachePatches.cs`) | none yet |
+| `jpTagCounts` | `1`: add header `X-JellyfinPlus-TagCounts` (counts aligned with the returned tags, at most 1000 tags, cache path only) | Same | none yet |
 | `jpMinRuntime`, `jpMaxRuntime` | Whole minutes, inclusive, digits only | Same as above | `model/search-filters.js` (`filterPairs`) |
 | `jpMinDateAdded`, `jpMaxDateAdded` | `YYYY-MM-DD`, UTC day, inclusive | Same | `model/search-filters.js` |
 | `jpResolution` | Comma list of `sd`, `hd`, `4k` | Same | `model/search-filters.js` |
@@ -662,6 +757,13 @@ keys once.
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
+| `jellyfinPlus.syncMeta` | JSON `{userId: {localKey: ms}}`: when this device last changed each synced key, per user | `controller/prefs-sync.js` |
+
+Synced keys: `jellyfinPlusPrefs` (without `pos`), `jellyfinPlus.searchPageSize` and `jellyfinPlus.searchPaging`
+are mirrored to the server (section 11); `controller/prefs-sync.js` watches writes to them through a wrapper
+on `Storage.prototype.setItem` / `removeItem` (the original always runs first).
+jellyfin-web's own `userSettings` also keeps a copy of each synced value under `<userId>-<name>` in
+localStorage, because the sync writes through `userSettings.set`.
 
 Keys that belong to jellyfin-web but are read or written by Jellyfin Plus:
 `<viewType> - <parentId>` (the library tab's own settings object; the extra marker entries ride in its
@@ -674,6 +776,7 @@ only, by Clip Up Next).
 |---|---|---|
 | Filter key cache | Two tables in Jellyfin's `jellyfin.db`: `JellyfinPlus_FilterKeys(LibraryId, Kind, ItemType, CleanValue, Value, ItemCount, RefId)` and `JellyfinPlus_FilterKeysMeta(LibraryId, Kind, BuiltAtUtc, SourceItemCount, KeyCount, Fingerprint)`. Created with `CREATE TABLE IF NOT EXISTS` by raw SQL; Jellyfin's own schema and migrations are never touched. One row per distinct key per library per item type. Kinds: tags, genres, years, ratings, genre entities. | Rebuild: `POST /JellyfinPlus/FilterCache/Rebuild` or the scheduled task. A forced rebuild deletes and rewrites each library's rows in one transaction, so readers see old or new rows, never a mix. Rows of libraries that no longer exist are removed on each rebuild. Nothing in the plugin drops the tables, including on uninstall. To remove them, stop Jellyfin, back up `jellyfin.db`, and drop both tables by hand (not exercised here; the engine recreates them on its next run). |
 | Search index | Three objects in `jellyfin.db`: virtual tables `JellyfinPlus_FtsNames`, `JellyfinPlus_FtsTags` (FTS5, trigram) and `JellyfinPlus_FtsMeta(Key, Value)`, holding the signature the index was built at. Created with `IF NOT EXISTS`; Jellyfin's schema is untouched. About 45 MB on an 80k-item library. | Rebuild: `POST /JellyfinPlus/FtsIndex/Rebuild` or the scheduled task. Safe to drop by hand with Jellyfin stopped (search falls back to the stock queries; the engine recreates and rebuilds it). Nothing in the plugin drops the tables, including on uninstall. |
+| Synced preferences | The viewer's own `DisplayPreferences` (display preferences id `usersettings`, client `emby`), as three `CustomPrefs` entries: `jellyfinPlus.prefs`, `jellyfinPlus.searchPageSize`, `jellyfinPlus.searchPaging`, each `{"t": ms, "v": value}`. Written through jellyfin-web's `userSettings.set`, so Jellyfin stores them in its `CustomItemDisplayPreferences` table (key length limit 64; ours are 27 or fewer). | Delete the entries by saving display preferences without them, or ignore them: nothing on the server reads them. Removing the plugin leaves them as inert strings. |
 | Plugin settings | XML at `plugins/configurations/Jellyfin.Plugin.Plus.xml` under Jellyfin's data directory (`/var/lib/jellyfin/plugins/configurations/` in the install scripts). On first start the constructor copies `Jellyfin.Plugin.GpuUpscale.xml` over if the new file is absent. | Edit on the dashboard page; changes are pushed to the patches live. Delete the file with Jellyfin stopped to return to the defaults in section 1. |
 | Shader cache | `ShaderCacheDirectory`, default `/var/cache/jellyfin/jellyfin-plus-shaders`: composed shader files named `<level>+<level>.glsl`, and a `plcache/` subdirectory where libplacebo keeps its compiled-shader scratch files. A composed file is rewritten if any input shader is newer. | Safe to delete the contents; composed files are rebuilt on demand and libplacebo recompiles, so the first sessions afterwards start slower (inferred from the code, not timed). |
 | Shaders and models (inputs) | `ShaderDirectory` `/usr/share/jellyfin-shaders`; neural models, DLSS runtime, depth model, DLPP and VSR DLL paths under `/usr/lib/jellyfin-ffmpeg-oidn/` (all configurable). Not shipped with the plugin. | `scripts/install-shaders.sh`; see INSTALL.md |

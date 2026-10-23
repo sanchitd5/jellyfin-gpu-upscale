@@ -201,19 +201,101 @@ namespace Jellyfin.Plugin.Plus.Patcher
             var hasLimit = int.TryParse(query["jpTagLimit"].ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var limit) && limit > 0;
             var needle = query["jpTagQuery"].ToString();
             var clean = string.IsNullOrWhiteSpace(needle) ? null : needle.GetCleanValue();
-            if (!hasLimit && clean == null)
+            var byCount = string.Equals(query["jpTagOrder"].ToString(), "count", StringComparison.OrdinalIgnoreCase);
+            var wantCounts = WantsCounts(query);
+            if (!hasLimit && clean == null && !wantCounts)
             {
                 return false;
             }
 
+            // Counts exist only when the filter cache served this request (see StashTagCounts); on the stock
+            // path the list stays in name order and the order header says so.
+            var counts = http.Items.TryGetValue(CountsItemKey, out var stashed) ? stashed as Dictionary<string, int> : null;
+            var ordered = byCount && counts != null;
+            IReadOnlyList<string> source = ordered ? OrderByCount(tags, counts) : tags;
+
             limit = hasLimit ? Math.Min(limit, MaxTagLimit) : int.MaxValue;
-            windowed = Window(tags, clean, limit, out var total);
+            windowed = Window(source, clean, limit, out var total);
             if (!http.Response.HasStarted)
             {
                 http.Response.Headers[TagTotalHeader] = total.ToString(CultureInfo.InvariantCulture);
+                if (byCount)
+                {
+                    http.Response.Headers[TagOrderHeader] = ordered ? "count" : "name";
+                }
+
+                var header = counts == null ? null : CountsHeader(windowed, counts);
+                if (header != null)
+                {
+                    http.Response.Headers[TagCountsHeader] = header;
+                }
             }
 
             return true;
+        }
+
+        // ---- counts and count ordering (jpTagOrder=count, jpTagCounts=1)
+
+        /// <summary>Response header: item counts for the returned tags, comma-separated, in the order of <c>Tags</c>.</summary>
+        internal const string TagCountsHeader = "X-JellyfinPlus-TagCounts";
+
+        /// <summary>Response header: <c>count</c> or <c>name</c>, the order the tags are really in (sent when jpTagOrder was given).</summary>
+        internal const string TagOrderHeader = "X-JellyfinPlus-TagOrder";
+
+        /// <summary>The counts header is only sent for this many tags or fewer (a long header is worse than none).</summary>
+        internal const int MaxTagsWithCounts = 1000;
+
+        private const string CountsItemKey = "JellyfinPlus.TagCounts";
+
+        internal static bool WantsCounts(IQueryCollection query)
+            => string.Equals(query["jpTagOrder"].ToString(), "count", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(query["jpTagCounts"].ToString(), "1", StringComparison.Ordinal);
+
+        /// <summary>
+        /// Called by the cache-served prefixes. Keeps the per-tag counts for this request only (HttpContext.Items),
+        /// and only when the request asked for them. Counts therefore come from the cache path, which already
+        /// holds the access guarantees; a request answered by stock gets none.
+        /// </summary>
+        private static void StashTagCounts(List<(string Clean, string Value, string RefId, int Count)> rows)
+        {
+            try
+            {
+                var http = _http.HttpContext;
+                if (http == null || !WantsCounts(http.Request.Query))
+                {
+                    return;
+                }
+
+                var d = new Dictionary<string, int>(rows.Count, StringComparer.Ordinal);
+                foreach (var r in rows)
+                {
+                    d[r.Value] = d.TryGetValue(r.Value, out var old) ? old + r.Count : r.Count;
+                }
+
+                http.Items[CountsItemKey] = d;
+            }
+            catch (Exception ex)
+            {
+                Warn(ex);
+            }
+        }
+
+        /// <summary>Count descending, then name ordinal ascending (the stock order within equal counts). A tag with no count sorts as 0.</summary>
+        internal static string[] OrderByCount(IReadOnlyList<string> tags, IReadOnlyDictionary<string, int> counts)
+            => tags
+                .OrderByDescending(t => t != null && counts.TryGetValue(t, out var n) ? n : 0)
+                .ThenBy(t => t, StringComparer.Ordinal)
+                .ToArray();
+
+        /// <summary>The counts header value for the returned tags, or null when there are too many to send.</summary>
+        internal static string CountsHeader(IReadOnlyList<string> returned, IReadOnlyDictionary<string, int> counts)
+        {
+            if (returned.Count > MaxTagsWithCounts)
+            {
+                return null;
+            }
+
+            return string.Join(",", returned.Select(t => (t != null && counts.TryGetValue(t, out var n) ? n : 0).ToString(CultureInfo.InvariantCulture)));
         }
 
         /// <summary>The first <paramref name="limit"/> tags whose clean value contains <paramref name="cleanNeedle"/> (all when null), in list order; <paramref name="total"/> counts every match.</summary>
@@ -251,7 +333,9 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     return true;
                 }
 
-                var tags = scope.Read(FilterCacheEngine.Kind.Tag);
+                var tagRows = scope.ReadCounted(FilterCacheEngine.Kind.Tag);
+                StashTagCounts(tagRows);
+                var tags = tagRows;
                 var genres = scope.Read(FilterCacheEngine.Kind.Genre);
                 var years = scope.Read(FilterCacheEngine.Kind.Year);
                 var ratings = scope.Read(FilterCacheEngine.Kind.Rating);
@@ -282,7 +366,9 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     return true;
                 }
 
-                __result = scope.Read(FilterCacheEngine.Kind.Tag).Select(t => t.Value).OrderBy(v => v, StringComparer.Ordinal).ToArray();
+                var tagRows = scope.ReadCounted(FilterCacheEngine.Kind.Tag);
+                StashTagCounts(tagRows);
+                __result = tagRows.Select(t => t.Value).OrderBy(v => v, StringComparer.Ordinal).ToArray();
                 scope.Served("tags");
                 return false;
             }
@@ -362,6 +448,9 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
             public List<(string Clean, string Value, string RefId)> Read(FilterCacheEngine.Kind kind)
                 => FilterCacheEngine.ReadKeys(_conn, Libs, kind, Types);
+
+            public List<(string Clean, string Value, string RefId, int Count)> ReadCounted(FilterCacheEngine.Kind kind)
+                => FilterCacheEngine.ReadKeysCounted(_conn, Libs, kind, Types);
 
             public void Dispose() => _db.Dispose();
         }
