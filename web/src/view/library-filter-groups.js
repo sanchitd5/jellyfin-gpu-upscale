@@ -4,7 +4,7 @@ import { parseTags } from '../model/library-filter-marks.js';
 import { chipsFor, isSelected, toggleSelection, selectedIn } from '../model/quick-tags.js';
 import { menuChips, pickedLabel } from '../model/quick-tags-menu.js';
 import { readFilters, updateTagState } from '../controller/library-filters.js';
-import { groupsFor, namesNow, resolveNames, onGroupsChanged } from '../controller/quick-tags.js';
+import { groupsFor, namesNow, namesFresh, resolveNames, onGroupsChanged } from '../controller/quick-tags.js';
 import { refreshQuickTags } from './quick-tags.js';
 
 /*
@@ -207,7 +207,7 @@ export function syncGroupSections(paper, ctx, getCtx, again) {
     var found = groupsFor(ctx.parentId);
     var groups = found.ready ? found.groups : [];
     groups.forEach(function (g) {
-        if (!g.tags.length && !namesNow(g)) {
+        if (!g.tags.length && !namesFresh(g)) {
             resolveNames(g).then(function () { again(); });
         }
     });
