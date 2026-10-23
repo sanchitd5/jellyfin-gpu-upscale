@@ -257,10 +257,15 @@ function onEnter(e) {
 
 function buildBox() {
     var row = el('div', BOX_CLASS + ' searchFieldsInner flex align-items-center justify-content-center');
-    row.style.marginTop = '0.5em';
+    row.style.marginTop = '0.25em';
 
-    var icon = el('span', 'searchfields-icon material-icons block');
-    icon.setAttribute('aria-hidden', 'true');
+    // Quiet by default: a one-line text toggle. The input stays in the DOM (hidden) so
+    // submitSearch() always reads it; it opens by itself while an exclusion is stored.
+    var toggle = el('button', 'jellyfinPlusExcludeToggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', 'Exclude tags');
+    toggle.style.cssText = 'flex:1 1 auto;text-align:left;background:none;border:0;color:inherit;opacity:0.75;'
+        + 'font:inherit;font-size:0.9em;min-height:var(--jp-tap, 44px);padding:0;cursor:pointer;';
 
     var wrap = el('div', 'inputContainer flex-grow');
     wrap.style.marginBottom = '0';
@@ -296,10 +301,26 @@ function buildBox() {
     button.lastChild.style.marginLeft = '0.3em';
     button.addEventListener('click', function () { submitSearch(); });
 
+    function setOpen(open) {
+        wrap.style.display = open ? '' : 'none';
+        toggle.style.flex = open ? '0 0 auto' : '1 1 auto';
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        toggle.textContent = (open ? '\u25BE ' : '\u25B8 ') + 'Exclude tags'
+            + (!open && excludeText() ? ' (' + excludeText().split(/[,|]/).filter(function (t) { return t.trim(); }).length + ')' : '');
+    }
+
+    toggle.addEventListener('click', function () {
+        var open = wrap.style.display === 'none';
+        setOpen(open);
+        if (open) {
+            input.focus();
+        }
+    });
     wrap.appendChild(input);
-    row.appendChild(icon);
+    row.appendChild(toggle);
     row.appendChild(wrap);
     row.appendChild(button);
+    setOpen(!!excludeText());
     return row;
 }
 
