@@ -36,7 +36,7 @@ var CSS = [
     '#' + HINT_ID + ' .material-icons, #' + BAR_ID + ' .material-icons { font-family: "Material Icons";'
         + ' font-feature-settings: "liga"; font-size: 2em; line-height: 1; }',
 
-    '#' + PILL_ID + ' { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 1em); left: 50%;'
+    '#' + PILL_ID + ' { position: fixed; top: calc(max(env(safe-area-inset-top, 0px), 12px) + 1em); left: 50%;'
         + ' transform: translateX(-50%); padding: 0.35em 0.9em; border-radius: 1.5em; color: #fff;'
         + ' background: rgba(0,0,0,0.6); font-size: 1.1em; font-weight: 600; letter-spacing: 0.05em;'
         + ' pointer-events: none; z-index: 99998; opacity: 0; transition: opacity 0.12s; }',
@@ -46,8 +46,11 @@ var CSS = [
         + ' align-items: center; justify-content: center; pointer-events: none; z-index: 99998;'
         + ' opacity: 0; transition: opacity 0.15s; }',
     '#' + BAR_ID + '.show { opacity: 1; }',
-    '#' + BAR_ID + '.volume { right: env(safe-area-inset-right, 0px); }',
-    '#' + BAR_ID + '.brightness { left: env(safe-area-inset-left, 0px); }',
+    // Inset by the notch / rounded corner / gesture bar, and never less than 12px (P12).
+    '#' + BAR_ID + '.volume { right: max(env(safe-area-inset-right, 0px), 12px); }',
+    '#' + BAR_ID + '.brightness { left: max(env(safe-area-inset-left, 0px), 12px); }',
+    '#' + BAR_ID + ' { padding-top: max(env(safe-area-inset-top, 0px), 12px);'
+        + ' padding-bottom: max(env(safe-area-inset-bottom, 0px), 12px); box-sizing: border-box; }',
     '#' + BAR_ID + ' .pill { display: flex; flex-direction: column; align-items: center;'
         + ' padding: 0.7em 0.6em; border-radius: 1.5em; color: #fff; background: rgba(0,0,0,0.55); }',
     '#' + BAR_ID + ' .track { position: relative; width: 0.5em; height: 30vh; margin: 0.5em 0;'

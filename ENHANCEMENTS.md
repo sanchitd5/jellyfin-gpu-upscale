@@ -1370,3 +1370,14 @@ Enhancement (from README.md, "Limitations and risks", and the code):
 
 Not verified by this document: behaviour on a running server. Everything above was read from the
 source, not exercised.
+
+**Touch OSD, portrait player, rotate, lock, favourite** (`web/src/view/portrait-osd.js`,
+`controller/player-rotate.js`, `controller/player-favorite.js`, `controller/player-item.js`; P4, P12).
+Chip moves bottom-left above the OSD controls and (landscape) shows only with the OSD; OSD buttons 44px
+on a coarse pointer; portrait pulls the controls under the picture (`html.jp-portrait-osd`); the gesture
+arbiter has a 24px edge dead zone (`THRESHOLDS.EDGE_DEAD_PX`, touch only, judged on screen coordinates);
+a lock (`html.jp-player-locked`) turns the gestures and stock tap-to-toggle off; a rotate button
+(phone/tablet) tries `screen.orientation.lock`, else rotates `<body>` by CSS (`html[data-jp-rot]`, pointer
+coordinates mapped by `toContent`); a heart toggles `UserData.IsFavorite` via `ApiClient.updateFavoriteStatus`.
+No storage keys: rotation and lock are per play session and reset on item change / leaving the page.
+Off switch: `jp-theme-off` (rotate and lock excluded too). TV untouched.

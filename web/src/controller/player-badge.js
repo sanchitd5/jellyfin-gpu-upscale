@@ -41,13 +41,22 @@ var REFRESH_EVERY_TICKS = 5;
 
 var CSS = [
     '#' + CHIP_ID + ' { position: fixed; z-index: 99990; box-sizing: border-box;'
-        + ' top: calc(env(safe-area-inset-top, 0px) + 3.75em); left: calc(env(safe-area-inset-left, 0px) + 1em);'
-        + ' max-width: min(32em, calc(100vw - 2em - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));'
+        // Bottom-left, just above the OSD controls (never in the header band, so it cannot hit the
+        // title). --jp-osd-clear is the height of the controls, measured by view/portrait-osd.js;
+        // the fallback is where stock's .videoOsdBottom controls end.
+        + ' bottom: calc(var(--jp-osd-clear, 9em) + 8px); left: calc(max(env(safe-area-inset-left, 0px), 12px) + 4px);'
+        + ' max-width: min(32em, calc(100vw - 2em - max(env(safe-area-inset-left, 0px), 12px) - max(env(safe-area-inset-right, 0px), 12px)));'
         + ' padding: 0.25em 0.8em; border: 0; border-radius: 1em; font: inherit; font-size: 0.85em;'
         + ' color: #fff; background: rgba(0,0,0,0.55); white-space: nowrap; overflow: hidden;'
         + ' text-overflow: ellipsis; cursor: pointer; opacity: 0; visibility: hidden;'
         + ' transition: opacity 0.2s, visibility 0.2s; }',
     '#' + CHIP_ID + '.show { opacity: 1; visibility: visible; }',
+    // Landscape: the chip is only there while the OSD is (the degraded exception below is for
+    // portrait, where the dock under the picture has room for it).
+    '@media (orientation: landscape) { #' + CHIP_ID + ':not([data-osd="1"]) { opacity: 0; visibility: hidden; } }',
+    // A finger-sized target.
+    '@media (pointer: coarse) { #' + CHIP_ID + ' { min-height: var(--jp-tap, 44px); display: inline-flex;'
+        + ' flex-direction: column; justify-content: center; } }',
     '#' + CHIP_ID + '[data-key="active"] { background: rgba(0,128,96,0.75); }',
     '#' + CHIP_ID + '[data-key="off"], #' + CHIP_ID + '[data-key="unavailable"] { background: rgba(110,70,0,0.7); }',
     '#' + CHIP_ID + '.show[data-key="waiting"] { opacity: 0.7; }',
@@ -196,11 +205,24 @@ function show() {
     });
 }
 
+/* "Degraded": the server says it is NOT doing what was asked. Worth keeping on screen. */
+function degraded() {
+    var k = chip && chip.getAttribute('data-key');
+    return k === 'off' || k === 'unavailable';
+}
+
 function onOsd(e, showing) {
     try {
         if (showing && !isTv() && onVideoPage()) {
             show();
+            if (chip) { chip.setAttribute('data-osd', '1'); }
+        } else if (!showing && !isTv() && onVideoPage() && timer && chip
+            && chip.classList.contains('show') && degraded()) {
+            // The OSD went away but the stream is degraded: the chip stays (and keeps polling;
+            // tick() hides it when the video page goes away). Landscape CSS hides it anyway.
+            chip.setAttribute('data-osd', '0');
         } else {
+            if (chip) { chip.setAttribute('data-osd', '0'); }
             hide();
         }
     } catch (err) {

@@ -1,5 +1,6 @@
 import { log } from '../lib/log.js';
-import { createArbiter, THRESHOLDS } from '../model/player-gesture.js';
+import { createArbiter, THRESHOLDS, toContent } from '../model/player-gesture.js';
+import { cssRotation } from './player-rotate.js';
 import { ensureHudStyle } from '../view/player-hud.js';
 import {
     seekBy, holdStart, holdEnd, swipeStart, swipeMove, swipeEnd, installBrightness
@@ -48,6 +49,10 @@ var swallowDblUntil = 0;  // performance.now() until which a dblclick is swallow
 
 function isTv() {
     return document.documentElement.classList.contains('layout-tv');
+}
+
+function contentPoint(e) {
+    return toContent(cssRotation(), e.clientX, e.clientY, window.innerWidth, window.innerHeight);
 }
 
 function snapshot(e) {
@@ -148,11 +153,26 @@ function onPointerDown(e) {
             return;
         }
 
+        // The player lock (view/portrait-osd.js) turns every gesture off for pocketing the phone.
+        if (document.documentElement.classList.contains('jp-player-locked')) {
+            arb.forgetTaps();
+            return;
+        }
+
         var now = performance.now();
+        // Rotate video (player-rotate.js): the page is turned, so map the screen point to the
+        // picture's own axes. The page's client size is already in those axes.
+        var c = contentPoint(e);
         var r = arb.down({
-            t: now, x: e.clientX, y: e.clientY,
+            t: now, x: c.x, y: c.y, sx: e.clientX, swidth: window.innerWidth,
             width: page.clientWidth || window.innerWidth, touch: touch
         });
+        if (r.edge) {
+            // The OS back-swipe starts here. Not swallowed: stock sees the press as it always did.
+            current = null;
+            return;
+        }
+
         current = {
             id: e.pointerId, target: target, page: page, init: snapshot(e), holdTimer: 0,
             height: page.clientHeight || window.innerHeight
@@ -195,7 +215,8 @@ function mine(e) {
 function onPointerMove(e) {
     try {
         if (!mine(e)) { return; }
-        perform(arb.move({ t: performance.now(), x: e.clientX, y: e.clientY }));
+        var c = contentPoint(e);
+        perform(arb.move({ t: performance.now(), x: c.x, y: c.y }));
         // While a hold plays at 2x a moving mouse must not pop the OSD (stock shows it on a
         // 10 px move), and a swipe is ours alone.
         var ph = arb.phase();

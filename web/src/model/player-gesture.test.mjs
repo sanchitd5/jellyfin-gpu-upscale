@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import {
     THRESHOLDS as T, HOLD_RATE, createArbiter, zoneOf, swipeKind, swipeLevel,
-    brightnessToLevel, levelToBrightness, parseBrightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX
+    brightnessToLevel, levelToBrightness, parseBrightness, BRIGHTNESS_MIN, BRIGHTNESS_MAX,
+    inEdgeZone, toContent
 } from './player-gesture.js';
 
 var passed = 0;
@@ -273,6 +274,103 @@ t('a stored brightness is trusted only inside the range', function () {
     assert.equal(parseBrightness('abc'), 1);
     assert.equal(parseBrightness('0.05'), 1);
     assert.equal(parseBrightness('7'), 1);
+});
+
+t('the edge dead zone is 24 px on both sides', function () {
+    assert.equal(T.EDGE_DEAD_PX, 24);
+    assert.equal(inEdgeZone(0, W), true);
+    assert.equal(inEdgeZone(23, W), true);
+    assert.equal(inEdgeZone(24, W), false);
+    assert.equal(inEdgeZone(W - 24, W), false);
+    assert.equal(inEdgeZone(W - 23, W), true);
+    assert.equal(inEdgeZone(5, 0), false, 'no width: never an edge');
+});
+
+t('a touch in the edge zone is passed: no hold, no swipe, no double tap', function () {
+    var a = createArbiter();
+    assert.deepEqual(a.down(touch(10, 200)), { doubleTap: 0, continuing: false, edge: true });
+    assert.equal(a.phase(), 'passed');
+    assert.equal(a.holdTimeout(), null, 'the hold timer does nothing');
+    assert.equal(a.move({ t: 50, x: 10, y: 60 }), null, 'a vertical drag from the edge is not a brightness swipe');
+    assert.equal(a.up(), null);
+    assert.equal(a.phase(), 'idle');
+    var b = createArbiter();
+    assert.equal(b.down(touch(W - 5, 200)).edge, true, 'right edge too');
+});
+
+t('an edge press breaks a tap chain; a mouse at the edge is unaffected', function () {
+    var a = createArbiter();
+    a.down(touch(40, 200, 0)); a.up();
+    assert.equal(a.down(touch(10, 200, 100)).doubleTap, 0, 'edge never seeks');
+    a.up();
+    assert.equal(a.down(touch(40, 200, 200)).doubleTap, 0, 'the edge press reset the chain');
+    var m = createArbiter();
+    assert.equal(m.down(mouse(5, 200)).edge, undefined);
+    assert.equal(m.phase(), 'pending');
+});
+
+t('just inside the zone a swipe still works', function () {
+    var a = createArbiter();
+    a.down(touch(24, 300));
+    assert.deepEqual(a.move({ t: 50, x: 24, y: 250 }), { type: 'swipe-start', kind: 'brightness' });
+});
+
+// Rotate video: a 400x800 portrait viewport, the page turned by +90 / -90 degrees.
+var VW = 400, VH = 800;
+
+t('toContent is the identity at 0 and inverts both rotations', function () {
+    assert.deepEqual(toContent(0, 30, 40, VW, VH), { x: 30, y: 40 });
+    // forward map for +90: content (cx, cy) shows at screen (VW - cy, cx)
+    var c = { x: 120, y: 90 };
+    var s90 = { x: VW - c.y, y: c.x };
+    assert.deepEqual(toContent(90, s90.x, s90.y, VW, VH), c);
+    // forward map for -90: content (cx, cy) shows at screen (cy, VH - cx)
+    var s_90 = { x: c.y, y: VH - c.x };
+    assert.deepEqual(toContent(-90, s_90.x, s_90.y, VW, VH), c);
+    assert.deepEqual(toContent(45, 1, 2, VW, VH), { x: 1, y: 2 }, 'unknown angle: identity');
+});
+
+t('rotated: a finger moving up as the viewer sees it is a swipe up', function () {
+    [90, -90].forEach(function (rot) {
+        // The viewer's up is content -y. Walk a content-space line upward and project it to the screen.
+        var cx = 600, cy0 = 300;
+        function toScreen(x, y) {
+            return rot === 90 ? { x: VW - y, y: x } : { x: y, y: VH - x };
+        }
+        var a = createArbiter();
+        var s0 = toScreen(cx, cy0), c0 = toContent(rot, s0.x, s0.y, VW, VH);
+        a.down({ t: 0, x: c0.x, y: c0.y, sx: s0.x, swidth: VW, width: VH, touch: true });
+        var s1 = toScreen(cx, cy0 - 120), c1 = toContent(rot, s1.x, s1.y, VW, VH);
+        assert.deepEqual(a.move({ t: 40, x: c1.x, y: c1.y }), { type: 'swipe-start', kind: 'volume' }, 'right half of the viewer\'s picture');
+        var s2 = toScreen(cx, cy0 - 240), c2 = toContent(rot, s2.x, s2.y, VW, VH);
+        var m = a.move({ t: 80, x: c2.x, y: c2.y });
+        assert.equal(m.type, 'swipe');
+        assert.ok(m.dy < 0, 'up is negative dy at rot ' + rot);
+        assert.ok(swipeLevel(0.5, m.dy, VW) > 0.5, 'and raises the level');
+    });
+});
+
+t('rotated: left and right thirds are the viewer\'s left and right', function () {
+    [90, -90].forEach(function (rot) {
+        function toScreen(x, y) { return rot === 90 ? { x: VW - y, y: x } : { x: y, y: VH - x }; }
+        var s = toScreen(100, 200);           // content: left third of an 800-wide picture
+        var c = toContent(rot, s.x, s.y, VW, VH);
+        assert.equal(zoneOf(c.x, VH), -1, 'left at rot ' + rot);
+        s = toScreen(700, 200);
+        c = toContent(rot, s.x, s.y, VW, VH);
+        assert.equal(zoneOf(c.x, VH), 1, 'right at rot ' + rot);
+    });
+});
+
+t('rotated: the OS edge is judged on the screen, not the picture', function () {
+    var a = createArbiter();
+    // content x 400 (middle) but the screen x is 5: the OS edge, so it is passed
+    assert.equal(a.down({ t: 0, x: 400, y: 200, sx: 5, swidth: VW, width: VH, touch: true }).edge, true);
+    var b = createArbiter();
+    // content x 5 (the picture's left edge) but the screen x is mid-screen: ours
+    var r = b.down({ t: 0, x: 5, y: 200, sx: 200, swidth: VW, width: VH, touch: true });
+    assert.equal(r.edge, undefined);
+    assert.equal(b.phase(), 'pending');
 });
 
 console.log(passed + ' passed');

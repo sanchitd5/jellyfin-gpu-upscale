@@ -23,6 +23,7 @@ import { installPlayerSpeed } from './controller/player-speed.js';
 import { installPlayerBadge } from './controller/player-badge.js';
 import { installClientUpscale } from './controller/client-upscale.js';
 import { installClipUpNext } from './controller/clip-upnext.js';
+import { installPortraitOsd } from './view/portrait-osd.js';
 import { installDetailRelated } from './controller/detail-related.js';
 import { installPersonVideos } from './controller/person-videos.js';
 import { installBulkTags } from './controller/bulk-tags.js';
@@ -103,6 +104,7 @@ function feature(name, install) {
         // touches a request: it watches <video> media events only.
         feature('client upscale', installClientUpscale);
         feature('clip up next', installClipUpNext);
+        feature('player touch osd', installPortraitOsd);
         feature('detail related', installDetailRelated);
         feature('person videos', installPersonVideos);
         feature('bulk tags', installBulkTags);
