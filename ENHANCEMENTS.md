@@ -400,8 +400,19 @@ answer and ids (FNV-1a, never `GetHashCode`), whatever the row order.
   (`TopParentIds`) or under a folder (`AncestorIds`); a parent the user cannot see is a 404. Only map rows
   of those ids are counted, so no category, chip or count comes from an item the user cannot see.
 - **Cache.** Per user + access digest (folders, BlockedTags, AllowedTags, unrated, rating, missing
-  episodes) + parent, 30 minutes, at most 100 entries; dropped on any library item event, and a result
-  computed while the library changed is not stored. One computation per key at a time.
+  episodes) + parent, at most 300 entries. An entry is *due* for a refresh when a library item event happened
+  and it is older than 10 minutes, or when it is within 5 minutes of 30; a due entry is still served
+  (stale-while-revalidate) while a background refresh runs, and only an entry past 60 minutes is a miss, so
+  the route blocks on a computation only for a key that was never computed. A result computed while the
+  library changed is stamped with the generation read before computing. One computation per key at a time.
+- **Precompute** (`src/SmartTagPrecompute.cs`, hosted service). 60 s after start, then every minute, it
+  computes the missing or due entries for every enabled user: the no-parent scope and each library that user
+  can see. Each is computed as that user through the route's own `SmartTagsCore.ComputeAsync`
+  (`InternalItemsQuery(user)`) and stored under the route's key, so the route hits the cache and no entry is
+  ever shared across access digests. Computations run one at a time (a lock shared with stale-hit
+  refreshes), 2 s apart, at most 40 per cycle, and a cycle is skipped, and an unfinished one stops, while
+  `ILibraryManager.IsScanRunning`. A cycle that computed anything logs
+  `smart tag precompute cycle computed N entries in M ms`. Cold cost it removes: about 5 s per entry.
 - **Cost** (profiling copy, 47,621 videos, 2.03M item-tag rows): load 0.86-0.92 s warm DB (1.8 s first),
   algorithm 55-180 ms; a cached answer under 1 ms, about 6 KB of JSON. `Server-Timing: tagcats`.
 - **Client.** Fetched once per library scope (from the hash's `parentId`/`topParentId`), cached 10 minutes,
@@ -1276,7 +1287,7 @@ All under the Jellyfin API root. "Administrator" is the `RequiresElevation` poli
 | `GET /JellyfinPlus/Session/{playSessionId}` | Any authenticated user | What the server actually did for one play session. The id `probe` returns the capability lists with no session (used by the client probe); `dashboard` is used by the config page. A session recorded for a different user is reported as unknown. If either side has no user id (for example an API key), it answers as before the check existed. |
 | `GET /JellyfinPlus/FilterCache/Status` | Administrator | Per-library, per-kind cache state: built time, key counts, dirty flag, run state, last error, and outcome counters. |
 | `POST /JellyfinPlus/FilterCache/Rebuild?force=true` | Administrator | Starts a background rebuild and returns 202 with the status JSON. `force` (default true) rebuilds every library, not only stale ones. 409 when a rebuild is running or the cache is not ready. |
-| `GET /JellyfinPlus/Tags/Categories[?parentId=..&userId=..]` | Any authenticated user (another user's `userId`: administrators only) | Smart tag categories over the user's visible items (section 3): `[{id, label, kind, prefix?, primary, coverage, tags: [{name, label, count}]}]`. 404 for a parent the user cannot see. Cached per user, access digest and parent. |
+| `GET /JellyfinPlus/Tags/Categories[?parentId=..&userId=..]` | Any authenticated user (another user's `userId`: administrators only) | Smart tag categories over the user's visible items (section 3): `[{id, label, kind, prefix?, primary, coverage, tags: [{name, label, count}]}]`. 404 for a parent the user cannot see. Cached per user, access digest and parent; kept warm in the background (section 3). |
 | `GET /JellyfinPlus/FtsIndex/Status` | Administrator | Search index state: usable now, verified, dirty, pending items, row counts, signature, built time, last refresh kind and duration, unsupported reason (no FTS5 trigram in this SQLite), outcome counters (`name:fts`, `tag:fts`, `wild-name:fts`, fallbacks). |
 | `POST /JellyfinPlus/FtsIndex/Rebuild?force=true` | Administrator | Rebuilds the search index in the background; 202 with the status JSON, 409 when a run is in flight or the index is off. |
 | `GET /JellyfinPlus/Search/Facets` | Any authenticated user | People, studios or tags credited on the items a search matches: `[{id, name, roles, count}]`, count descending then name. Parameters in section 9. 400 for a bad `kind` or no resolvable user; 403 if a non-administrator asks for another user's view; 404 for an unknown user or a `parentId` the user cannot see; an empty array when `searchTerm` is blank. Sets a `Server-Timing` header. |
@@ -1422,6 +1433,13 @@ Search:
   movies, tvshows, music, livetv, books, boxsets and playlists keep stock behaviour.
 
 Library and filters:
+- **Smart tag precompute is bounded, not exhaustive.** At most 40 entries per one-minute cycle, one at a
+  time with a 2 s pause, none during a library scan; many users times libraries takes several cycles to
+  warm, and the cache holds 300 entries (the oldest is evicted past that). While a recorder ingests, the
+  generation changes constantly, so every entry is recomputed about every 10 minutes (about 5 s of
+  database and CPU each, on the GPU box). Per-thread priority is not lowered (the work is async); the
+  pause and the serial lock are the only throttle. An entry for a user whose access settings just changed
+  is a miss until its next cycle (the key carries the digest).
 - Tag windowing applies to lists over 300 tags; the full list stays in the script. Library-popover
   exclude and match-all are not offered on artist, album artist, author and studio tabs.
 - The filter key cache is bypassed for restricted users, narrowed queries and sub-library scopes

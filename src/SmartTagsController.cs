@@ -32,16 +32,17 @@ namespace Jellyfin.Plugin.Plus
     /// parent - stock user-access filtering (folders, BlockedTags, AllowedTags, parental rating, unrated blocks) - and
     /// only their tags are counted, so no category, chip or count is built from an item the user cannot see.
     ///
-    /// CACHE. Per user + access digest + parent, dropped on any library item event (and after 30 minutes); the
-    /// generation is read before computing so a change racing the computation is never stored. One computation per
-    /// key at a time.
+    /// CACHE. Per user + access digest + parent. Due for a refresh after a library item event (past 10 minutes) or
+    /// within 5 minutes of 30; a due entry is still served while a background refresh runs (hard expiry 60 minutes).
+    /// The generation is read before computing so a change racing the computation is never stored as newer. One
+    /// computation per key at a time. <see cref="SmartTagPrecomputeService"/> keeps every user's entries warm.
     /// </summary>
     [ApiController]
     [Authorize]
     [Route("JellyfinPlus/Tags")]
     public class SmartTagsController : ControllerBase
     {
-        private static readonly BaseItemKind[] Types =
+        internal static readonly BaseItemKind[] Types =
         {
             BaseItemKind.Movie, BaseItemKind.Series, BaseItemKind.Episode, BaseItemKind.Video, BaseItemKind.MusicVideo,
         };
@@ -85,11 +86,19 @@ namespace Jellyfin.Plugin.Plus
                 }
             }
 
-            var key = user.Id.ToString("N", CultureInfo.InvariantCulture) + "|" + SmartTagCache.AccessDigest(user) + "|"
-                + (parentId ?? Guid.Empty).ToString("N", CultureInfo.InvariantCulture);
+            var key = SmartTagCache.KeyFor(user, parentId);
             var gen = SmartTagCache.Generation;
-            if (SmartTagCache.TryGet(key, gen, out var cached))
+            if (SmartTagCache.Lookup(key, gen, out var cached, out var due))
             {
+                if (due)
+                {
+                    // Stale-while-revalidate: answer with the entry we have, refresh behind the response.
+                    var refreshUser = user;
+                    var refreshParent = parent;
+                    _ = Task.Run(() => SmartTagCache.RefreshAsync(
+                        key, ct => SmartTagsCore.ComputeAsync(_libraryManager, _dbFactory, refreshUser, refreshParent, ct), CancellationToken.None));
+                }
+
                 Response.Headers["Server-Timing"] = "tagcats;dur=" + clock.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture) + ", tagcats-cache;dur=0";
                 return Ok(cached);
             }
@@ -100,55 +109,12 @@ namespace Jellyfin.Plugin.Plus
             {
                 // Another request may have finished the same key while this one waited.
                 gen = SmartTagCache.Generation;
-                if (SmartTagCache.TryGet(key, gen, out cached))
+                if (SmartTagCache.Lookup(key, gen, out cached, out _))
                 {
                     return Ok(cached);
                 }
 
-                var query = new InternalItemsQuery(user)
-                {
-                    IncludeItemTypes = Types,
-                    Recursive = true,
-                    EnableTotalRecordCount = false,
-                    CollapseBoxSetItems = false,
-                };
-                // Recursive scope under the parent. A library (CollectionFolder) is its physical folders as
-                // TopParentIds, as the stock library views and FilterCacheEngine scope it; any other folder is an
-                // ancestor. ParentId alone would match direct children only. Without a parent the library manager
-                // scopes the query to the user's own libraries (AddUserToQuery).
-                if (parent is CollectionFolder library)
-                {
-                    query.TopParentIds = library.PhysicalFolderIds.ToArray();
-                    if (query.TopParentIds.Length == 0)
-                    {
-                        return Ok(new List<SmartTagCategory>());
-                    }
-                }
-                else if (parent != null)
-                {
-                    query.AncestorIds = new[] { parent.Id };
-                }
-
-                var blockedUnrated = user.GetPreferenceValues<UnratedItem>(PreferenceKind.BlockUnratedItems);
-                if (blockedUnrated != null)
-                {
-                    query.BlockUnratedItems = blockedUnrated;
-                }
-
-                if (!user.DisplayMissingEpisodes)
-                {
-                    query.IsMissing = false;
-                }
-
-                var ids = _libraryManager.GetItemIds(query);
-                var idsMs = clock.ElapsedMilliseconds;
-                List<SmartTagCategory> cats;
-                var db = await _dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-                await using (db.ConfigureAwait(false))
-                {
-                    var rows = await SmartTagsCore.LoadAsync(db, ids, SmartTagOptions.Default, cancellationToken).ConfigureAwait(false);
-                    cats = SmartTagCategories.Build(rows.ItemCount, rows.Rows);
-                }
+                var (cats, idsMs) = await SmartTagsCore.ComputeAsync(_libraryManager, _dbFactory, user, parent, cancellationToken).ConfigureAwait(false);
 
                 SmartTagCache.Put(key, gen, cats);
                 Response.Headers["Server-Timing"] = "tagcats;dur=" + clock.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)
@@ -203,6 +169,60 @@ namespace Jellyfin.Plugin.Plus
     /// <summary>The database half: no HTTP, no library manager, so it runs on a bare DbContext in the harness.</summary>
     internal static class SmartTagsCore
     {
+        /// <summary>
+        /// The categories of everything <paramref name="user"/> can see under <paramref name="parent"/> (null: everywhere).
+        /// The one computation both the route and the background precompute run, always as the given user through
+        /// <see cref="InternalItemsQuery"/>, so no entry is ever built from another user's access.
+        /// </summary>
+        internal static async Task<(List<SmartTagCategory> Cats, long IdsMs)> ComputeAsync(
+            ILibraryManager libraryManager, IDbContextFactory<JellyfinDbContext> dbFactory, DbUser user, BaseItem parent, CancellationToken ct)
+        {
+            var clock = Stopwatch.StartNew();
+            var query = new InternalItemsQuery(user)
+            {
+                IncludeItemTypes = SmartTagsController.Types,
+                Recursive = true,
+                EnableTotalRecordCount = false,
+                CollapseBoxSetItems = false,
+            };
+            // Recursive scope under the parent. A library (CollectionFolder) is its physical folders as
+            // TopParentIds, as the stock library views and FilterCacheEngine scope it; any other folder is an
+            // ancestor. ParentId alone would match direct children only. Without a parent the library manager
+            // scopes the query to the user's own libraries (AddUserToQuery).
+            if (parent is CollectionFolder library)
+            {
+                query.TopParentIds = library.PhysicalFolderIds.ToArray();
+                if (query.TopParentIds.Length == 0)
+                {
+                    return (new List<SmartTagCategory>(), 0);
+                }
+            }
+            else if (parent != null)
+            {
+                query.AncestorIds = new[] { parent.Id };
+            }
+
+            var blockedUnrated = user.GetPreferenceValues<UnratedItem>(PreferenceKind.BlockUnratedItems);
+            if (blockedUnrated != null)
+            {
+                query.BlockUnratedItems = blockedUnrated;
+            }
+
+            if (!user.DisplayMissingEpisodes)
+            {
+                query.IsMissing = false;
+            }
+
+            var ids = libraryManager.GetItemIds(query);
+            var idsMs = clock.ElapsedMilliseconds;
+            var db = await dbFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
+            await using (db.ConfigureAwait(false))
+            {
+                var rows = await LoadAsync(db, ids, SmartTagOptions.Default, ct).ConfigureAwait(false);
+                return (SmartTagCategories.Build(rows.ItemCount, rows.Rows), idsMs);
+            }
+        }
+
         /// <summary>
         /// The tag rows of exactly <paramref name="visibleIds"/>: map rows of any other item are dropped here, before
         /// anything is counted. Tags that differ only in case/diacritics (one clean value) are merged under the most used
@@ -310,9 +330,17 @@ namespace Jellyfin.Plugin.Plus
     /// <summary>Memory cache of finished category answers (see <see cref="SmartTagsController"/>).</summary>
     internal static class SmartTagCache
     {
-        internal const int MaxEntries = 100;
+        internal const int MaxEntries = 300;
         internal static readonly TimeSpan Ttl = TimeSpan.FromMinutes(30);
         internal static readonly TimeSpan MinFresh = TimeSpan.FromMinutes(10);
+        internal static readonly TimeSpan RefreshMargin = TimeSpan.FromMinutes(5);
+        internal static readonly TimeSpan HardTtl = TimeSpan.FromMinutes(60);
+
+        /// <summary>Clock in ms; replaceable so the harness can age entries.</summary>
+        internal static Func<long> Now = () => Environment.TickCount64;
+
+        /// <summary>Background computations run one at a time, whoever asked (the precompute loop or a stale hit).</summary>
+        internal static readonly SemaphoreSlim ComputeLock = new SemaphoreSlim(1, 1);
 
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, (long Gen, long Ticks, List<SmartTagCategory> Rows)> Map = new Dictionary<string, (long, long, List<SmartTagCategory>)>(StringComparer.Ordinal);
@@ -369,9 +397,21 @@ namespace Jellyfin.Plugin.Plus
             }
         }
 
-        internal static bool TryGet(string key, long gen, out List<SmartTagCategory> rows)
+        internal static string KeyFor(DbUser user, Guid? parentId)
+            => user.Id.ToString("N", CultureInfo.InvariantCulture) + "|" + AccessDigest(user) + "|"
+                + (parentId ?? Guid.Empty).ToString("N", CultureInfo.InvariantCulture);
+
+        internal static bool TryGet(string key, long gen, out List<SmartTagCategory> rows) => Lookup(key, gen, out rows, out _);
+
+        /// <summary>
+        /// Finds an entry. <paramref name="due"/> says it should be recomputed now: the generation changed and the
+        /// entry is past MinFresh, or it is within <see cref="RefreshMargin"/> of Ttl. A due entry is still returned
+        /// (stale-while-revalidate); only an entry past <see cref="HardTtl"/> is a miss.
+        /// </summary>
+        internal static bool Lookup(string key, long gen, out List<SmartTagCategory> rows, out bool due)
         {
             rows = null;
+            due = false;
             lock (Gate)
             {
                 if (!Map.TryGetValue(key, out var e))
@@ -380,17 +420,63 @@ namespace Jellyfin.Plugin.Plus
                 }
 
                 // Item events arrive continuously while a recorder ingests, so a generation bump alone does
-                // not expire an answer younger than MinFresh: categories follow the tag distribution, which a
-                // handful of new items barely moves. Past MinFresh a change expires it; past Ttl, always.
-                var age = Environment.TickCount64 - e.Ticks;
-                if (age > (long)Ttl.TotalMilliseconds || (e.Gen != gen && age > (long)MinFresh.TotalMilliseconds))
+                // not make an answer younger than MinFresh due: categories follow the tag distribution, which a
+                // handful of new items barely moves.
+                var age = Now() - e.Ticks;
+                if (age > (long)HardTtl.TotalMilliseconds)
                 {
                     Map.Remove(key);
                     return false;
                 }
 
+                due = age > (long)(Ttl - RefreshMargin).TotalMilliseconds || (e.Gen != gen && age > (long)MinFresh.TotalMilliseconds);
                 rows = e.Rows;
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// Recomputes one key in the background. Skips when another computation of the key is running or the entry
+        /// is no longer due; computations from every caller run one at a time (<see cref="ComputeLock"/>).
+        /// </summary>
+        internal static async Task<bool> RefreshAsync(string key, Func<CancellationToken, Task<(List<SmartTagCategory> Cats, long IdsMs)>> compute, CancellationToken ct)
+        {
+            try
+            {
+                var gate = GateFor(key);
+                if (!await gate.WaitAsync(0, ct).ConfigureAwait(false))
+                {
+                    return false;
+                }
+
+                try
+                {
+                    var gen = Generation;
+                    if (Lookup(key, gen, out _, out var due) && !due)
+                    {
+                        return false;
+                    }
+
+                    await ComputeLock.WaitAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        var result = await compute(ct).ConfigureAwait(false);
+                        Put(key, gen, result.Cats);
+                        return true;
+                    }
+                    finally
+                    {
+                        ComputeLock.Release();
+                    }
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }
+            catch (Exception) when (!ct.IsCancellationRequested)
+            {
+                return false; // the entry stays as it was; the next request or cycle tries again
             }
         }
 
@@ -407,7 +493,7 @@ namespace Jellyfin.Plugin.Plus
                     Map.Remove(oldest);
                 }
 
-                Map[key] = (gen, Environment.TickCount64, rows);
+                Map[key] = (gen, Now(), rows);
             }
         }
     }
