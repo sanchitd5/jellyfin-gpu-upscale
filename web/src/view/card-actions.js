@@ -1,5 +1,6 @@
 import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
+import { apiClient, sameServer, cardInfo, onCardInfo, watchCard } from '../controller/card-data.js';
 
 /*
  * FAVOURITE / MORE / PLAY ON EVERY CARD, ON A PHONE.
@@ -23,7 +24,8 @@ import { el } from '../lib/dom.js';
  *    that is not even loaded on a phone), so it makes the same call that element makes,
  *    ApiClient.updateFavoriteStatus(), through the page's ApiClient (the repo already uses
  *    window.ApiClient in probe.js). Cards carry no favourite flag, so the heart state is read in
- *    small batches for the cards that scroll into view.
+ *    small batches for the cards that scroll into view (controller/card-data.js, which the card
+ *    badges share: one lookup serves both).
  *
  * The row ignores pointer events except on the buttons themselves, so a tap anywhere else on the
  * card still opens it, and a long press anywhere (including on a button) still starts the stock
@@ -39,10 +41,6 @@ var CONTAINER_SELECTOR = '.itemsContainer, [is="emby-itemscontainer"]';
 
 // Cards that are not library items a user can favourite / open a context menu for.
 var SKIP_TYPES = ['Program', 'Timer', 'SeriesTimer', 'Channel', 'TvChannel', 'CollectionFolder', 'UserView'];
-
-// How many ids one userdata lookup carries, and how long ids are collected before it is sent.
-var LOOKUP_BATCH = 40;
-var LOOKUP_DELAY_MS = 150;
 
 var TAP_TARGET = '40px';
 
@@ -68,32 +66,22 @@ var CSS = [
     // at once would sit on top of each other.
     'html.layout-mobile .card[data-gpu-actions] .cardOverlayButton-br { display: none !important; }',
     // Multi-select is active on this card: a tap there must select it, not favourite it.
-    '.card:has(.withMultiSelect) .' + ROW_CLASS + ' { display: none !important; }'
+    '.card:has(.withMultiSelect) .' + ROW_CLASS + ' { display: none !important; }',
+
+    // QOL_IDEAS #17, the rest of the phone tap targets under 40 px: the stock selection bar's two
+    // buttons and the bulk tag dialog's suggestion chips and buttons (view/bulk-tags-dialog.js, whose
+    // own sizes suit a mouse). Padding and min sizes only; nothing is hidden or moved.
+    'html.layout-mobile .selectionCommandsPanel .btnCloseSelectionPanel,'
+        + ' html.layout-mobile .selectionCommandsPanel .btnSelectionPanelOptions { min-width: 44px; min-height: 44px; }',
+    'html.layout-mobile .gubtChip { display: inline-flex; align-items: center; min-height: 40px; padding: 0 14px; }',
+    'html.layout-mobile .gubtBtn { min-height: 44px; min-width: 88px; }'
 ].join('\n');
 
 // id -> boolean. The favourite state, learned from lookups and from the taps made here.
 var favState = new Map();
-var pendingLookup = new Set();
-var lookupTimer = null;
-var visibility = null;
 
 function isMobileLayout() {
     return document.documentElement.classList.contains('layout-mobile');
-}
-
-function apiClient() {
-    var c = window.ApiClient;
-    return c && typeof c.getCurrentUserId === 'function' ? c : null;
-}
-
-/* The card's server is the one ApiClient talks to (a multi-server setup is left alone). */
-function sameServer(serverId) {
-    var c = apiClient();
-    try {
-        return !!c && (typeof c.serverId !== 'function' || !serverId || c.serverId() === serverId);
-    } catch (err) {
-        return false;
-    }
 }
 
 function paintFavourite(id) {
@@ -111,73 +99,15 @@ function paintFavourite(id) {
     }
 }
 
-function flushLookup() {
-    lookupTimer = null;
-    var c = apiClient();
-    if (!c || typeof c.getItems !== 'function' || !pendingLookup.size) {
-        pendingLookup.clear();
-        return;
+/* A looked-up record arrived (controller/card-data.js): adopt its favourite flag unless a tap set it. */
+function adopt(id, info) {
+    if (info && !favState.has(id)) {
+        favState.set(id, !!info.fav);
     }
 
-    var ids = Array.from(pendingLookup).filter(function (id) { return !favState.has(id); });
-    pendingLookup.clear();
-    for (var i = 0; i < ids.length; i += LOOKUP_BATCH) {
-        var chunk = ids.slice(i, i + LOOKUP_BATCH);
-        try {
-            // A plain item query: UserData is in the default DTO, so no Fields are needed.
-            Promise.resolve(c.getItems(c.getCurrentUserId(), {
-                Ids: chunk.join(','),
-                EnableImages: false,
-                EnableTotalRecordCount: false,
-                Limit: chunk.length
-            })).then(function (res) {
-                ((res && res.Items) || []).forEach(function (it) {
-                    if (it && it.Id && !favState.has(it.Id)) {
-                        favState.set(it.Id, !!(it.UserData && it.UserData.IsFavorite));
-                        paintFavourite(it.Id);
-                    }
-                });
-            }).catch(function (err) { log('card actions: favourite lookup failed', err); });
-        } catch (err) {
-            log('card actions: favourite lookup threw', err);
-        }
-    }
-}
-
-function wantState(id) {
     if (favState.has(id)) {
         paintFavourite(id);
-        return;
     }
-
-    pendingLookup.add(id);
-    if (!lookupTimer) {
-        lookupTimer = setTimeout(flushLookup, LOOKUP_DELAY_MS);
-    }
-}
-
-/* Look the state up only for cards that are (about to be) on screen. */
-function observeForState(card, id) {
-    if (typeof IntersectionObserver === 'undefined') {
-        wantState(id);
-        return;
-    }
-
-    if (!visibility) {
-        visibility = new IntersectionObserver(function (entries) {
-            entries.forEach(function (en) {
-                if (en.isIntersecting) {
-                    visibility.unobserve(en.target);
-                    var id2 = en.target.getAttribute('data-id');
-                    if (id2) {
-                        wantState(id2);
-                    }
-                }
-            });
-        }, { rootMargin: '300px 0px' });
-    }
-
-    visibility.observe(card);
 }
 
 function onFavouriteTap(e) {
@@ -248,6 +178,7 @@ function decorate(card) {
     var id = card.getAttribute('data-id');
     var serverId = card.getAttribute('data-serverid');
     var row = el('div', ROW_CLASS);
+    var hasFavourite = false;
 
     // Favourite: only where a heart can be kept in step with the server.
     if (sameServer(serverId)) {
@@ -256,7 +187,7 @@ function decorate(card) {
         fav.setAttribute('aria-pressed', 'false');
         fav.addEventListener('click', onFavouriteTap);
         row.appendChild(fav);
-        observeForState(card, id);
+        hasFavourite = true;
     }
 
     // More: the stock context menu, executed by shortcuts.js through data-action.
@@ -279,6 +210,12 @@ function decorate(card) {
 
     card.setAttribute('data-gpu-actions', '1');
     scalable.appendChild(row);
+
+    if (hasFavourite) {
+        // Already looked up (a redrawn card), or looked up once it is near the screen.
+        adopt(id, cardInfo(id));
+        watchCard(card);
+    }
 }
 
 var queue = [];
@@ -343,6 +280,7 @@ export function installCardActions() {
             }
         });
         observer.observe(document.documentElement, { childList: true, subtree: true });
+        onCardInfo(adopt);
 
         // The layout class can be applied after the first cards were drawn.
         new MutationObserver(function () {

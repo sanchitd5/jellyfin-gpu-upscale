@@ -23,6 +23,8 @@ import { installBulkTags } from './controller/bulk-tags.js';
 import { installSearchCensus } from './controller/search-census.js';
 import { installLibraryFilterHooks } from './controller/library-filters.js';
 import { installLibraryFilterPanel } from './view/library-filter-panel.js';
+import { installCardBadges } from './view/card-badges.js';
+import { installSelectAll } from './controller/select-all.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -60,6 +62,9 @@ function feature(name, install) {
         feature('search pager', installSearchPager);
         feature('image zoom', installImageZoom);
         feature('card actions', installCardActions);
+        feature('card badges', installCardBadges);
+        // Observes list responses only (never changes a request), so its place in the chain does not matter.
+        feature('select all', installSelectAll);
         feature('double-tap seek', installDoubleTapSeek);
         feature('clip up next', installClipUpNext);
         feature('detail related', installDetailRelated);

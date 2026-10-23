@@ -49,6 +49,9 @@ setting, a control in the page, or "remove the plugin or script".
 | Person and studio pages list Videos | Client | A "Videos" section appears on person and studio pages | On, no switch |
 | Poster zoom | Client | Tap the details poster to open it full size | On, no switch |
 | Mobile card actions | Client | Always-visible favourite, more and play buttons on phone cards | On, no switch |
+| Card badges | Client | Resolution, runtime and the first two tags on video cards, looked up lazily for the cards on screen | On; `localStorage jellyfinPlus.cardBadges = off` (not on TV) |
+| Select all N results | Client | "Select all N results" in the selection menu, for Add tags / Remove tags across pages (administrators) | On for administrators; offered only when the list can be identified |
+| Phone tap targets | Client | Selection-bar buttons and the bulk tag dialog's chips and buttons at least 40 px | On, no switch (phone layout) |
 | Double-tap seek | Client | Double-tap the side thirds of the video page to seek 10 s | On, no switch (touch only) |
 | Clip Up Next | Client | "Next video in N s" card for queued clips | On, no switch |
 | Play-all fixes | Client | Play all and Shuffle queue up to 1000 items; Home Videos folders queue videos | On, no switch |
@@ -322,7 +325,66 @@ close with the X, the backdrop, or Escape.
 favourite, more and play buttons on each card in an items container (stock shows favourite and more
 only in a desktop hover overlay). More and Play use the stock `itemAction` handlers; Favourite calls
 `ApiClient.updateFavoriteStatus`, with the heart state read in small batches for cards that scroll into
-view. Tap targets are 40 px. The row is hidden during multi-select.
+view. Tap targets are 40 px. The row is hidden during multi-select. The heart state comes from the
+shared lookup in `controller/card-data.js` (below), which also feeds the badges, so one request serves
+both. Beyond the row, the same file gives the stock selection bar's two buttons a 44 px minimum and the
+bulk tag dialog's suggestion chips and buttons 40 / 44 px under `html.layout-mobile` (padding and
+minimum sizes only; QOL_IDEAS #17). Not changed: tablets that report the desktop layout still have no
+always-visible card buttons, and the footer "more" button some cardLayout lists draw is left in place
+next to the row's own (checked against the v12.1 sources, not on a device).
+
+**Card badges** (`web/src/view/card-badges.js`, `web/src/controller/card-data.js`,
+`web/src/model/card-badges.js`; QOL_IDEAS #41). On Video, Movie, Episode, MusicVideo and Trailer cards:
+a chip group at the top left of the thumbnail ("1080p" and the runtime, "12:34" or "1:02:03") and one
+footer line under the title with the first two tags ("tag one - tag two"). Resolution is judged on
+both pixel sides (1920x800 is 1080p, a vertical 1080x1920 clip is too): 4K, 1440p, 1080p, 720p, 480p,
+SD. The chips ignore pointer events; a card with no footer under the thumbnail gets no tag line. Not
+on TV layouts.
+- **Data is NOT added to list requests.** A card is watched with an IntersectionObserver (300 px
+  margin); near the screen, its id joins a batch of up to 40 that goes out after 150 ms as one plain
+  `Users/{id}/Items?Ids=..&Fields=Tags,Width,Height&EnableImages=false&EnableTotalRecordCount=false`.
+  `UserData` and `RunTimeTicks` are in the default DTO. The answer is reduced to a small record and
+  cached for the page (4000 records), so redrawn cards (virtual chunks, React re-render) cost nothing.
+- **Measured why.** On the real library (46,375 of 47,622 videos carry tags, 44 on average) the
+  `Tags` array alone is 635 bytes per item as JSON (95th percentile 1.0 KB, maximum 2.5 KB): about
+  65 KB on a random 100-card page (three samples: 64.9, 65.6, 65.9 KB), against about 2.5 KB for
+  `Width` + `Height`. The server does no extra work for it (`BaseItemMapper` maps the `Tags` column
+  onto the DTO on every read; `Fields` only gates serialisation), so the cost is bytes on the wire and
+  parsing, paid on every page view if it rode on the list request. Looked up per visible card, only
+  what scrolls into view is paid for. Estimated from the database, not measured as a served response.
+- **Caveat.** Tags are shown in stored order, and an item has 44 on average, so "the first two" is
+  whatever was stored first, not the most informative.
+- **Off switch.** `localStorage jellyfinPlus.cardBadges` = `off` (read at load): no badges, and the
+  lookup then asks for no extra `Fields` (the favourite hearts still use it).
+
+**Select all N results** (`web/src/controller/select-all.js`, `web/src/model/select-all.js`;
+QOL_IDEAS #42; administrators only, because the only thing that reads it is the bulk tag flow). Stock
+"Select all" ticks the cards that are drawn. With cards ticked, the selection menu gains "Select all N
+results" under it when N is more than what is ticked. Choosing it re-asks the list's own query, page by
+page (200 at a time), for ids only and holds them; a banner under the selection bar reads "All N
+results selected for Add tags / Remove tags" with Clear. "Add tags" / "Remove tags" then run over all N
+(dialog note "All N results of this list") instead of the ticked cards, through the same careful
+per-item flow as section 6.
+- **Finding the list.** XHR and fetch responses of list queries (GET `.../Items` with a page size, no
+  `ids`, not a one-item cut or a tag-window request) are read on a side branch, never altered, into at
+  most 12 "groups": the request's final url without its paging (`xhr.responseURL`, `response.url`, so
+  every other hook's rewrite is in it), the ids its pages brought and `TotalRecordCount`. The ticked
+  ids pick the most recent group holding all of them. No match (the list came from React Query's
+  cache and never crossed the network here) or no more results than ticked: the row is not offered and
+  stock behaviour is untouched.
+- **Collecting.** Only paging and payload change: `startIndex`, `limit=200`,
+  `enableTotalRecordCount=false`, `enableImages=false`, `enableUserData=false`, no `Fields`, and
+  `jpInf=1` so the search page's own rewrite and response watchers ignore the request (the same way
+  `fetchMore` does). A `Random` sort without a `jpSeed` becomes `SortName` (reshuffling between pages
+  would drop and repeat items; the set is the same); a seeded one is kept. The run must return at least
+  the counted total, or nothing is selected and the banner says how many it got.
+- **Limits.** At most 5000 results: over that nothing is selected and the banner says to narrow the list
+  (a partial selection presented as "all" would tag the wrong set). The selection is dropped when a
+  card is ticked or unticked, Clear is tapped, the selection bar closes, or the page changes. The other
+  commands in the same menu (playlist, delete, mark played, group versions) are stock and still act on
+  the ticked cards only: nothing here pretends to tick them. In the all-types search the ids include
+  types the tag editor refuses (Series, Season, MusicAlbum, People ...); the run reports those as skipped.
+  Remove-tag suggestions read the tags of every selected item, at most 4 requests at a time.
 
 **Double-tap seek** (`web/src/controller/double-tap-seek.js`). On the video page, touch only: a double
 tap on the left third seeks back 10 s, the right third forward 10 s; more taps on the same side within
@@ -629,7 +691,7 @@ server without the plugin sees no error.
 | `jpSeed` | Positive integer seeding the `Random` sort; same seed and ids give the same order | `SearchManager.GetSearchResultsAsync` (needs `sortBy=Random`) | `model/search-filters.js`; a new seed on each Apply |
 | `jpPaged` | `true`: widen the candidate pool to 5000 so the total is meaningful from page 1 | `SearchManager.GetSearchResultsAsync` | `model/search-paging.js` (`rewritePagedUrl`) |
 | `jpPersonMatch` | `all`: with 2+ `personIds`, every person must be credited (stock is any-of) | `SearchManager.GetSearchResultsAsync` | `model/search-filters.js` |
-| `jpInf` | `1`: marks the client's own follow-up request in infinite mode | Nothing on the server (the plugin never reads it); the client uses it to skip its own rewrite and response watchers | `controller/search-pager.js` (`fetchMore`) |
+| `jpInf` | `1`: marks the client's own follow-up request in infinite mode | Nothing on the server (the plugin never reads it); the client uses it to skip its own rewrite and response watchers | `controller/search-pager.js` (`fetchMore`), `controller/select-all.js` (id collection; those requests also carry `enableImages=false` and `enableUserData=false`, which is how the recorder tells them from list pages) |
 | `swapfrom` | Old `PlaySessionId` on the renegotiation a live-apply triggers | `UpscalePatches.BuildVerdict`, swap patches | `controller/network.js` (`wireParams`) |
 | `upscale`, `sr`, `deblur`, `denoise`, `deblock`, `neural`, `game`, `refine`, `chroma`, `deband`, `kernel`, `jitter`, `depth`, `reactive` | The 14 enhancement axes (section 1). `maxHeight` is a legacy synonym for numeric `upscale`. | `UpscaleEngine.Decide` | `controller/network.js` |
 
@@ -661,6 +723,7 @@ keys once.
 | `jellyfinPlus.searchFilters` | JSON: committed Sort and filter state | `model/search-filters.js` |
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
+| `jellyfinPlus.cardBadges` | `off` switches the card badges off (read at load; never written by the script) | `controller/card-data.js`, `view/card-badges.js` |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
 
 Keys that belong to jellyfin-web but are read or written by Jellyfin Plus:
@@ -728,8 +791,10 @@ Item pages and playback:
   item 38, an unverified note from a delegated reader); whether they route through the rewritten
   request was not checked here, so Play all on the Videos tab should be treated as unverified.
 - Clip Up Next only announces; it does not advance playback. Double-tap seek is touch only, 10 s.
-- Bulk tag editing handles only the item types in section 6, only items still on the page, and only for
-  administrators.
+- Bulk tag editing handles only the item types in section 6 and only administrators. It edits the ticked
+  cards, or, after "Select all N results" (section 5), every result of the list up to 5000.
+- Card badges show the first two stored tags (a clip has 44 on average on the real library) and need a
+  looked-up record, so a card shows nothing until it has been near the screen for about 150 ms.
 
 Enhancement (from README.md, "Limitations and risks", and the code):
 - The patches match Jellyfin methods by name and can break on any Jellyfin upgrade; targets are pinned
