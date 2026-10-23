@@ -362,6 +362,16 @@ of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
   Picks are not pruned until every source has answered.
 - The one source registered (bootstrap, "smart tag groups") is the smart categories below, through
   `getSmartGroups(parentId)` in `controller/smart-tags.js`.
+- **In the filter menus.** The library Filter popover (a bottom sheet on phones) gets one collapsible
+  `<details>` section per group, same order as the chip row (own groups, then suggested, "auto" tagged),
+  header = name + count of picks (`web/src/view/library-filter-groups.js`, called from
+  `view/library-filter-panel.js`; pure `model/quick-tags-menu.js`). Body = tag chips (`aria-pressed`, 44 px);
+  a group with 12+ chips gets a search box, more than 20 shows the first 20 plus every picked chip and
+  "Show more". A tick writes the same `a` marker in `Filters.Tags` as the chip row (`updateTagState`), so the
+  request is the identical `jpTagAnyOf`, the chip row is nudged (`refreshQuickTags`), and Reset, the filter
+  dot, persistence and infinite scroll are the stock ones; menu and chip row are one state. No groups, groups
+  still loading, tabs with their own endpoint, no tab context or TV: no section. The search page's Sort &
+  filter sheet already lists suggested groups with the viewer's own (`loadVisible`), so nothing was added there.
 
 **Smart tag categories** (`src/SmartTagCategories.cs` pure algorithm, `src/SmartTagsController.cs` route +
 loader + cache, `web/src/controller/smart-tags.js` fetch, `web/src/model/smart-tags.js` adapter).

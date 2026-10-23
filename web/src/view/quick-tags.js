@@ -272,6 +272,12 @@ function schedule(delay) {
     }, wait);
 }
 
+/* Re-reads the picks into the chip row now (the filter menu calls this after a tick, the tab's state settles late). */
+export function refreshQuickTags() {
+    schedule(0);
+    setTimeout(function () { schedule(0); }, 150);
+}
+
 export function installQuickTags() {
     try {
         if (document.documentElement.classList.contains('layout-tv')) {
