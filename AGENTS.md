@@ -6,9 +6,18 @@ a test. Read the invariants before changing anything.
 
 ## What this is
 
-A Jellyfin plugin that injects a filter chain into transcodes for realtime super-resolution,
-sharpening and denoising. It works by runtime-patching Jellyfin with Harmony, because Jellyfin
-exposes no plugin hook for the video filter graph.
+**Jellyfin Plus** (renamed from GPU Upscale; same plugin GUID). Two halves, both by runtime-patching
+Jellyfin with Harmony plus one injected web-client script:
+
+1. **GPU video enhancement** - a filter chain injected into transcodes for realtime super-resolution,
+   sharpening and denoising (Jellyfin exposes no plugin hook for the video filter graph).
+2. **Search, browsing and library quality-of-life** - tag search and exclusion, wildcards, sort and
+   filters, pagination, a filter-key cache and an FTS5 search index in `jellyfin.db`, More Like This
+   for videos, bulk tag editing, mobile card actions.
+
+**[ENHANCEMENTS.md](ENHANCEMENTS.md) is the catalogue of every patch, route, request parameter,
+storage key and server-side table.** Update it in the same commit as the change it describes. The
+rest of this section is about the enhancement half.
 
 It started as libplacebo GLSL user shaders alone. It is now two things: those shaders, plus **five
 mandatory custom ffmpeg video filters** carried by a separately built binary beside the stock one.
@@ -22,8 +31,14 @@ part of the mandatory five, and NOT yet wired into the plugin's 5-place checklis
 Layout:
 
 ```
-src/                    plugin assembly (loads into Jellyfin's collectible ALC)
-src/patcher/            patcher assembly (loads into the DEFAULT ALC, this is where Harmony lives)
+src/                    plugin assembly (loads into Jellyfin's collectible ALC): plugin, controllers
+                        (UpscaleController, SearchFacetsController, LibraryCensusController),
+                        hosted/scheduled/post-scan services (FilterCache.cs, FtsIndex.cs)
+src/patcher/            patcher assembly (loads into the DEFAULT ALC, this is where Harmony lives):
+                        transcode patches (UpscalePatches/SwapPatches), search (SearchPatches,
+                        SearchSortPatches, SearchDeepPagePatches, SearchWildcard, ServerTimingPatches),
+                        library (LibraryFilterPatches, FilterCacheEngine/Patches, FtsIndexEngine,
+                        SimilarPatches), ScanTimingPatches (measurement only)
 src/Configuration/      settings class + the dashboard page
 web/src/                real ES modules (source); web/jellyfin-plus.js is the BUILT, gitignored
                         bundle of it (esbuild, scripts/build-web-panel.sh) - the injected browser
@@ -134,6 +149,45 @@ JavaScript. Adding the server side is the part that is easy to forget.
 hard-clamps to `[0, 2]` - a value above 2.0 silently does nothing. Any viewer-facing "low/medium/
 high" must map through that inversion or the labels lie.
 
+### Search, filter and library invariants
+
+**13. Never widen what a user can see.** Every patch that returns items keeps Jellyfin's own access
+filtering: reuse the provider's private filters by reflection (`ApplyUserAccessFilter`, type/media/
+parent/version filters) or go through `InternalItemsQuery(user)` / `GetItemIdsList`. Caches are
+per-user or gated on the user having no item-level restrictions (BlockedTags, AllowedTags,
+MaxParentalRating, BlockUnratedItems) and on `CollectionFolder.IsVisible(user)`. A permission leak
+is the worst outcome in this half of the project - worse than slow, worse than stale.
+
+**14. Faster must mean identical.** A prefilter, cache or index may only change *speed*. Prove it with
+a digest sweep against the previous implementation on the real database (hundreds of queries:
+terms of every shape, type filters on/off, excludes, limits, sorts, page offsets). The FTS index is
+a superset prefilter and the real predicate still decides; deep paging returns stock order and
+totals; the filter cache equals stock for unrestricted users. The one sanctioned difference is
+staleness in a *display list* (filter cache served up to 30 min stale while it rebuilds): a just-added
+value may be missing, nothing may ever appear that the user cannot see.
+
+**15. Fail soft to stock, always.** Each optional patch has its own try/catch and `Available` flag,
+installs in `UpscalePatches.ApplyOptional`, and falls back to the stock code path on any error, a
+stale index/cache, an unresolved target, or a Jellyfin signature change. Search must never get worse
+because of us.
+
+**16. Plugin-owned tables live in `jellyfin.db`, never touch Jellyfin's schema.** Prefix
+`JellyfinPlus_`, create with `CREATE TABLE IF NOT EXISTS` through Jellyfin's own connection
+(no shared cache), never alter Jellyfin tables or the EF model. They are not in Jellyfin's
+backup/restore; freshness checks (row count + newest `DateLastSaved` signatures) detect that and
+rebuild. Each cache/index has a status route and a scheduled-task rebuild.
+
+**17. Request parameters are a wire contract.** Non-stock params (`excludeTags`, `excludeTagNames`,
+`tagMatch`, `jp*`) are listed in ENHANCEMENTS.md section 9. Never reuse a name with different
+semantics (`excludeTags` is search's per-tag substring exclude; the library filter uses
+`excludeTagNames`). Client markers that ride inside stock fields (`gu:` entries in `Filters.Tags`)
+must be stripped from every outgoing URL.
+
+**18. No user library content in code, comments, commit messages, docs or tests.** Tag names,
+titles, people and paths from the real library never go into the repo - not even as examples, and
+not in git history (a squashed rewrite was needed once to remove one). Use neutral examples
+(`red*car`). Harness output that prints library content stays in the scratchpad.
+
 ## Verification standards
 
 **Building is not evidence. Logs are weak evidence. Probe the bytes.**
@@ -159,6 +213,28 @@ panel selection -> localStorage -> addParams writes the param -> param in Transc
 
 `journalctl -u jellyfin | grep libplacebo` prints the built command. That is the entire audit and it
 needs no harness. Check the reverse as well: an axis set to off must **not** appear in the command.
+
+### Verifying search, filter and database work
+
+- **Measure on the real database, never only on synthetic data.** A rewrite that was 10x faster on a
+  synthetic fixture was 45x *slower* on the real library (466 ms vs 10 ms) - plans depend on the real
+  data distribution and indexes. A read-only copy of the live DB (user consent given, for profiling
+  only) is kept at `~/.local/share/jellyfin-plus-profiling/jellyfin.db`. Take fresh copies with
+  `sqlite3 jellyfin.db ".backup /tmp/x.db"` on the server, compress with zstd before transferring
+  (972 MB plain scp timed out), check `pragma integrity_check` on arrival, and work on copies.
+- **Profiling harnesses compile the real patcher sources** against the server's DLLs (`jfbin`, a copy
+  of CT114's `/usr/lib/jellyfin/bin/*.dll`) and run the real `SqlSearchProvider` /
+  `BaseItemRepository`. Print `EXPLAIN QUERY PLAN` for every composed query you change.
+- **Prove identity with digests** (invariant 14), before and after, on the same DB copy.
+- **Live, use the plugin's own instrumentation:** `Server-Timing` on every `/Items?searchTerm=`
+  response (name, tags, sort, load, dto, deep-*), `GET /JellyfinPlus/FilterCache/Status` (Outcomes:
+  `served:*` / `stock:<reason>`), `GET /JellyfinPlus/FtsIndex/Status` (Usable, Verified, Outcomes).
+- **The library may be growing while you test** (a scan adds items continuously). Bracket every
+  count comparison with a total taken just before and after, or an off-by-one looks like a bug.
+- **Test the whole page, not just the endpoint.** The search page renders sections from a React
+  Query `Items` query whose queryFn closes over the other queries' data - invalidating them all at
+  once rebuilt the page from the previous data (one step behind). Correct behaviour at the API proved
+  nothing about the screen.
 
 When testing the browser script, drive the **real served files** rather than a simulation. A headless
 harness that mocks the webpack chunk loader will happily validate your assumptions instead of
@@ -239,6 +315,31 @@ Objective metrics disagree with each other on this content, and each can be game
   `/usr/lib/jellyfin/bin/` is how this got confirmed - cheap, and should be the default move before
   writing a Harmony patch target by name.
 
+- **An observer installed before `<body>` existed.** The script runs from `<head>`; a
+  `MutationObserver` on `document.body || document.documentElement` with `childList` only (not
+  `subtree`) never saw MUI's popover portal. The library filter panel never attached and the Tags
+  accordion rendered all 12,163 checkboxes (8.5 s freeze). Wait for `DOMContentLoaded` or observe
+  with `subtree: true`.
+- **A stock jellyfin-web search bug that looked like ours.** With `collectionType=homevideos` (the
+  toolbar search button inside a library), 12.1 disables the Videos query and its fallback type
+  list has no `Video`, so clips can never be found. `search-scope.js` drops the collectionType.
+  Read the stock source before assuming your patch broke something.
+- **A correlated EXISTS with LIKE per row.** `BaseItems.Where(e => e.ItemValues.Any(tag contains))`
+  cost ~1.3 s per search *even for a word with no matches*, because SQLite walked every item. Fix:
+  enumerate the matching tag values first, then their items. Also: an EF `Contains` over a list of
+  ids becomes N SQL parameters (~50 µs each); pass id lists with `EF.Parameter(...)`.
+- **The live database had a duplicated `BaseItems` row** (same Id twice), so five index entries were
+  missing and `REINDEX` failed with `UNIQUE constraint failed`. Index-driven lookups silently missed
+  rows. Fixed by deleting the older duplicate after a backup, then `REINDEX` + `integrity_check`.
+  If results look subtly wrong, run `pragma integrity_check` on a `.backup` copy first.
+- **A cache that was always stale.** A fingerprint check against a library that a scan keeps
+  changing marked the filter cache stale on every request, so every request paid the 8 s stock path.
+  Now stale-while-revalidate (display lists only) with a rebuild max-wait.
+- **Test logins via an API key.** jellyfin-web's running app overwrites `jellyfin_credentials` with
+  its own (logged-out) copy, and API keys get 400 on `/Users/Me`. Set the credentials from a
+  same-origin non-app page (e.g. `/System/Info/Public`), then navigate into `/web/`. API-key
+  sessions also produce harmless `GET /SyncPlay/List` "Guid can't be empty" errors.
+
 ## Operational care
 
 This runs on live servers, often sharing a GPU with other workloads.
@@ -249,6 +350,12 @@ This runs on live servers, often sharing a GPU with other workloads.
   playback. Stop your own sessions by id.
 - Changing `MaxConcurrent`, `RequireClientOptIn` or `ForceTranscodeForDirectPlay` changes GPU load
   for every viewer, not just yours.
+- Before any restart or database maintenance, check that no transcode is running (count `ffmpeg` in
+  `/sys/fs/cgroup/system.slice/jellyfin.service/cgroup.procs`) and wait for it rather than cut
+  someone off. Batch server changes so a batch costs one restart.
+- Database writes outside Jellyfin (REINDEX, row repairs) happen only with Jellyfin stopped, after a
+  timestamped backup next to `jellyfin.db`, with `integrity_check` as the gate and an automatic
+  restore on failure - and only with the user's explicit OK for that specific change.
 
 **Prefer shipping to proving.** Benchmarking has repeatedly been cut here in favour of working
 features, and rightly: an unverified feature that ships beats a measured harness that does not.

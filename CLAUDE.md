@@ -23,6 +23,14 @@ Consequences:
 
 ## What this project is made of now
 
+**Jellyfin Plus = GPU video enhancement + search/library quality-of-life.** The second half (tag
+search and wildcards, sort & filter sheet, pagination/infinite scroll, filter-key cache and FTS5
+index in `jellyfin.db`, More Like This, bulk tag edit, mobile card actions) is catalogued in
+**[ENHANCEMENTS.md](ENHANCEMENTS.md)** - every patch, route, request param, storage key and table,
+with its fail-soft and access guarantees. AGENTS.md invariants 13-18 govern that half: never widen
+access, faster must mean identical (digest-proved on the real DB), fail soft to stock, plugin tables
+only, params are a wire contract, no library content in the repo.
+
 Five custom ffmpeg filters live in a **separate patched binary** beside the stock one:
 `vf_oidn`, `vf_optix`, `vf_ort`, `vf_fsr2`, `vf_dlss`. The shim routes per session and asks the binary
 which filters it carries, stripping nodes it lacks - so a rebuild that drops a `vf_*.c` degrades
@@ -109,7 +117,16 @@ Adding a setting means touching all of these together, or the page breaks:
 | `web/src/bootstrap.js` | the entry point: imports the hooks above and runs the install try/catch |
 | `web/src/banner.txt` | the file's doc comment, injected as the bundle's banner (not a module) |
 
-Full list with every export/import, one line each: `context-map.md` at the repo root.
+Full list with every export/import, one line each: `context-map.md` at the repo root. The QoL modules
+(search page, library filters, cards, playback, detail pages, bulk tags) are listed there too, not in
+the table above.
+
+`bootstrap.js` installs each QoL feature through `feature(name, install)` - its own try/catch, so one
+failing installer cannot take the others down. **Order matters** for the request hooks:
+`storage-migrate.js` is the first import (before `prefs-store` reads prefs); `installSearchCensus`
+runs BEFORE `hookFetch`/`hookXhr` so it wraps innermost and judges the final URL; the play-all and
+library-filter hooks run AFTER them. The bundle is minified by default (`JP_NO_MINIFY=1
+scripts/build-web-panel.sh` for a readable build when debugging).
 
 Real imports surfaced the actual dependency graph the old `cat`-based split hid: several modules
 import each other in both directions (e.g. `model/effective.js` <-> `controller/network.js`,
@@ -214,6 +231,54 @@ together, and `web/src/lib/storage-migrate.js` carries the old `gpuUpscale*` loc
 
 The C# half and the config page need a rebuild and a restart to take effect. The client script does
 not: publish it and bump the buster.
+
+**`proxmox-build.sh` builds from GitHub, so it only deploys pushed commits.** To deploy unpushed work
+(e.g. to prove it on the box before pushing), build on the Mac against a copy of the server's DLLs
+and stage by hand:
+
+```bash
+# once per session: the server's assemblies, for building
+ssh -p 2298 root@192.168.1.2 "pct exec 114 -- bash -c 'cd /usr/lib/jellyfin/bin && tar -cf - *.dll'" | tar -C <scratch>/jfbin -xf -
+dotnet publish src         -c Release -p:JellyfinBin=<scratch>/jfbin -o out
+dotnet publish src/patcher -c Release -p:JellyfinBin=<scratch>/jfbin -o out-patcher
+scripts/build-web-panel.sh
+# on CT114: wait for no transcodes, then
+#   /usr/lib/jellyfin-plus/staged/ <- Jellyfin.Plugin.Plus.dll, .deps.json, .Patcher.dll, 0Harmony.dll
+#   /usr/local/sbin/jellyfin-plus-activate        (backup to previous/, swap, restart; --rollback)
+#   install jellyfin-plus.js into /usr/lib/jellyfin-plus/ and run /usr/local/sbin/jellyfin-plus-webinject
+```
+
+Transfer with `scp` to the Proxmox host, then `pct push 114`. Check the startup log for the
+`optional:` line (every optional patch listed) and `Loaded plugin: Jellyfin Plus`.
+
+## Working with parallel agents
+
+Most of the QoL work was built by parallel Sonnet agents, each in its own git worktree, then merged
+and deployed once by the main thread. What made that work:
+
+- **A shared brief in a file** (scratchpad), naming the wire contract, the environment (jfbin, Jellyfin
+  12.1 source checkouts, the real-DB copy), build/test commands and hard rules (no deploy, no SSH,
+  commit identity, no library content).
+- **Disjoint file ownership.** Shared files - `web/src/bootstrap.js`, `src/patcher/UpscalePatches.cs`
+  (`ApplyOptional`), `context-map.md`, `ENHANCEMENTS.md` - take minimal additive edits only; the main
+  thread resolves the trivial merge conflicts.
+- **Agents never deploy.** The main thread merges, builds, deploys once, and verifies live.
+- Agents commit with `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars (sanchitd5@live.com); the
+  `git -c user.email=...` form is refused by a hook in their sandbox.
+- Remove merged worktrees and branches promptly - an unmerged branch is history you may later need to
+  scrub (see AGENTS.md invariant 18).
+
+## Environment quirks (this Mac / this harness)
+
+- **The session scratchpad is wiped when the session restarts.** Anything that must survive (the
+  real-DB copy, harnesses you will reuse) belongs outside it, e.g. `~/.local/share/jellyfin-plus-*`.
+  `jfbin` and the Jellyfin source checkouts are cheap to recreate.
+- `ctx_*` tools refuse paths outside the repo root: use native Read/Grep for the scratchpad and the
+  Jellyfin source checkouts.
+- Inline interpreter code (`python3 -c`, heredoc to `python3`) is blocked: write a script file, then
+  run it. On CT114, push scripts with `pct push` rather than quoting them through two shells.
+- macOS has no `timeout`. And `pgrep -f <name>` inside `bash -c "..."` matches its own command line -
+  check a process another way.
 
 ## Two bugs that only surfaced by using it
 
