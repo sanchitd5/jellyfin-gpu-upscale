@@ -60,6 +60,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Mobile card actions | Client | Always-visible favourite, more and play buttons on phone cards | On, no switch |
 | Card badges | Client | Resolution, runtime and the first two tags on video cards, looked up lazily for the cards on screen | On; `localStorage jellyfinPlus.cardBadges = off` (not on TV) |
 | Select all N results | Client | "Select all N results" in the selection menu, for Add tags / Remove tags across pages (administrators) | On for administrators; offered only when the list can be identified |
+| Select mode entry | Client | A "Select" button on the library toolbar and a `jellyfinplus:select` window event (for the More sheet) arm a one-tap state; the tapped card starts stock multi-select. The selection bar moves to the bottom as a sheet header; the bulk tag dialog is a bottom sheet kept above the keyboard (`visualViewport`) | On; if the stock path does not start, a toast says "Press and hold a card" (`controller/select-mode.js`) |
 | Phone tap targets | Client | Selection-bar buttons and the bulk tag dialog's chips and buttons at least 40 px | On, no switch (phone layout) |
 | Double-tap seek | Client | Double-tap the side thirds of the video page to seek 10 s | On, no switch (touch only) |
 | Saved playback speed | Client | The speed picked in the player menu is remembered across browser sessions | On, no switch; plain 1x clears it |

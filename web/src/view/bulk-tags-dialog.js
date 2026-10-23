@@ -32,7 +32,13 @@ var CSS = '' +
     '.gubtBtn[disabled]{opacity:.4;cursor:default}' +
     '.gubtBox progress{width:100%;height:10px;margin:10px 0}' +
     '.gubtList{margin:8px 0 0;padding:0 0 0 18px;font-size:.88em;max-height:30vh;overflow:auto;word-break:break-word}' +
-    '.gubtBad{color:#ff8a80}';
+    '.gubtBad{color:#ff8a80}' +
+    // Phones: a bottom sheet whose buttons stay pinned at its foot (above the keyboard: see fitViewport).
+    '.gubtButtons{position:sticky;bottom:-18px;margin-bottom:-18px;padding:10px 0 18px;background:#202020}' +
+    '@media (max-width:599px){' +
+    '.gubtOverlay{align-items:flex-end;padding:0}' +
+    '.gubtBox{max-width:none;max-height:100%;border-radius:16px 16px 0 0;padding-bottom:calc(18px + env(safe-area-inset-bottom,0px))}' +
+    '.gubtButtons .gubtBtn{min-height:44px;flex:1}}';
 
 function injectStyle() {
     if (document.getElementById('jellyfinPlusBulkTagsCss')) { return; }
@@ -66,7 +72,24 @@ export function showTagDialog(opts) {
     var running = false;
     var stopRequested = false;
 
+    // The on-screen keyboard shrinks the visual viewport, not the layout one: follow it so the
+    // overlay (and the Save button at the sheet's foot) ends above the keyboard.
+    var vv = window.visualViewport;
+    function fitViewport() {
+        overlay.style.top = vv.offsetTop + 'px';
+        overlay.style.bottom = 'auto';
+        overlay.style.height = vv.height + 'px';
+    }
+    if (vv) {
+        vv.addEventListener('resize', fitViewport);
+        vv.addEventListener('scroll', fitViewport);
+    }
+
     function close() {
+        if (vv) {
+            vv.removeEventListener('resize', fitViewport);
+            vv.removeEventListener('scroll', fitViewport);
+        }
         document.removeEventListener('keydown', onKey, true);
         if (overlay.parentNode) { overlay.parentNode.removeChild(overlay); }
     }
@@ -295,6 +318,7 @@ export function showTagDialog(opts) {
     }
 
     document.body.appendChild(overlay);
+    if (vv) { fitViewport(); }
     buildForm();
 
     Promise.resolve(opts.suggest).then(function (list) {

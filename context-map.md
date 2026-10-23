@@ -97,6 +97,7 @@ esbuild) support natively.
 | `model/image-preload.js` | `PRELOAD_MARGIN`, `MAX_IN_FLIGHT`, `REMEMBER`, `PREF_KEY`, `isLazyLoaderClass()`, `isImageUrl()`, `enabled()`, `createQueue()` (nearest-first, deduplicated fetch queue; pure; unit-tested) | none (pure) |
 | `controller/card-data.js` | `BADGES_KEY`, `badgesEnabled()`, `apiClient()`, `sameServer()`, `cardInfo()`, `onCardInfo()`, `watchCard()` (lazy batched per-card lookup of favourite flag, resolution, runtime, tags for cards near the screen; cached) | `lib/log.js`, `model/card-badges.js` |
 | `controller/select-all.js` | `offerSelectAll()`, `startSelectAll()`, `extendedSelection()`, `installSelectAll()` ("Select all N results": records list responses by XHR/fetch side branch, collects ids page by page for the bulk tag flow) | `lib/log.js`, `lib/dom.js` (`el`), `model/select-all.js` |
+| `controller/select-mode.js` | `enterSelectMode()`, `pressAndHold()`, `selectableCards()`, `installSelectMode()` (explicit "Select" entry: arms a one-tap state, runs the stock long-press path via contextmenu then mousedown; library toolbar button; `jellyfinplus:select` window event; html.jp-selecting bottom-sheet bar CSS) | `lib/log.js`, `lib/dom.js` (`el`) |
 
 ## view/ - DOM rendering
 
