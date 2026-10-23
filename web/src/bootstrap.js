@@ -11,6 +11,7 @@ import { watchSearchPage } from './controller/search-exclude.js';
 import { installSearchScopeFix } from './controller/search-scope.js';
 import { installSearchFilterBar } from './view/search-filter-sheet.js';
 import { installSearchGrid } from './view/search-grid.js';
+import { installSearchRecent } from './view/search-recent.js';
 import { installSearchPager } from './view/search-pager.js';
 import { installImageZoom } from './view/image-zoom.js';
 import { installPlayAllFix } from './controller/play-all.js';
@@ -57,6 +58,7 @@ function feature(name, install) {
         feature('search scope', installSearchScopeFix);
         feature('search sort & filter', installSearchFilterBar);
         feature('search grid', installSearchGrid);
+        feature('search recent', installSearchRecent);
         feature('search pager', installSearchPager);
         feature('image zoom', installImageZoom);
         feature('card actions', installCardActions);

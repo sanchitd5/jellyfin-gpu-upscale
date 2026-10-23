@@ -41,6 +41,9 @@ setting, a control in the page, or "remove the plugin or script".
 | Search paging, infinite scroll, virtualised chunks | Both | Page size choice and Prev/Next on desktop; infinite scroll on phones | On; the Paged/Infinite toggle on the results |
 | Search result grid | Client | Results as a vertical grid on phone and desktop | On, no switch (TV untouched) |
 | Library-scope search fix | Client | Search from inside a Home Videos style library now returns clips | On, no switch |
+| Recent searches | Client | Chips of the last 12 submitted terms on the empty search page; tap to search, x to forget, Clear | On, no switch (not on TV layouts) |
+| Longer search box | Client | The search box takes 200 characters instead of 40 | On, no switch (not on TV layouts) |
+| Search suggestions include clips | Client | The empty page's Suggestions list also offers random Video items | On, no switch; a changed stock request is left alone |
 | Library filter: tag search, exclude, match-all | Both | Search box, per-tag exclude and "match ALL" switch in the filter popover | On, no switch |
 | Library filter: studios, people, resolution on Videos-like tabs | Client | Extra sections in the popover where stock hides them | On, no switch |
 | Filter key cache | Server patch + plugin services | Filter lists (tags, genres, years, ratings) load fast | On, no switch; see section 3 |
@@ -121,7 +124,7 @@ deblock, neural, game, refine and chroma defaults are all `off`. The README conf
 All of this applies to jellyfin-web's search page (`#/search`) and, for the server parts, to the
 requests it sends. The server cannot change what the page asks for, so most client modules rewrite the
 outgoing request URLs through the shared fetch and XHR hooks (`web/src/controller/network.js`,
-`markSearch`: exclude box, then Sort and filter, then paging).
+`markSearch`: the Suggestions clips rewrite, exclude box, then Sort and filter, then paging).
 
 **Tag matching** (`src/patcher/SearchPatches.cs`). Stock search matches item names only. This adds
 items whose tag contains the search term, as a case-insensitive, diacritic-insensitive substring
@@ -236,6 +239,37 @@ filter and paging have rewritten it.
 disable the Videos query and ask for a type list without `Video`, so clips can never match. The script
 drops `collectionType` for types other than movies, tvshows, music, livetv, books, boxsets and
 playlists, keeping `parentId`, so the search is scoped to that library and clips are returned.
+
+**Recent searches** (`web/src/view/search-recent.js`, `web/src/model/search-recent.js`). Every term the
+page commits (`?query=` in the hash; with search-on-submit that is exactly what was submitted) is kept,
+newest first, up to 12, de-duplicated ignoring case, terms of 2 to 200 characters. While no term is
+committed (the empty page that shows Suggestions) a row of chips sits under the search fields, below
+the exclude box and the Sort and filter bar. Tap a chip to search it (it goes through the same submit
+path as Enter, `runSearch()` in `search-exclude.js`); the x forgets one, "Clear" forgets all. Terms
+only: the exclude text and filters are not part of a recent search. The URL is read from the page's
+DOM mutations, not `hashchange`: react-router changes the hash with `pushState`, which fires no
+`hashchange`. Not on TV layouts (the alpha picker searches letter by letter). If storage is refused the
+row still works for the page view.
+
+**Search box length** (`view/search-recent.js`). Stock puts `maxLength={40}` on `#searchTextInput`.
+The script raises it to 200 on the element (React never rewrites the attribute; the next scan raises it
+again if React re-creates the input). The server has no limit on the term. Not on TV layouts.
+
+**Suggestions for clip libraries** (`web/src/model/search-suggest.js`, called from `markSearch` in
+`controller/network.js`). The empty search page's Suggestions asks for 20 random items, favourites
+first, of types Movie, Series and MusicArtist, so a Home Videos library gets an empty list. On the
+search page the script adds `Video` to that request's `includeItemTypes` and changes nothing else. The
+request is recognised by shape (an `/Items` path, no `searchTerm`, `sortBy` naming IsFavoriteOrLiked
+and Random, `includeItemTypes` naming all three types); any other request, or a changed stock request,
+is left exactly as it is. It adds `Video` in the form the request already uses (a repeated key, or one
+comma-separated value, which is the only form the server's binder splits). A mixed library keeps its
+movies and series. The server cost is a random-order query of 20 items; on the 47k-video real database
+a raw SQLite `ORDER BY random() LIMIT 20` over Video is about 35 ms.
+
+**Type filter and the People and Studios rows.** The Type filter steers only the two `/Items`
+queries. The People and Studios rows come from `/Persons` and `/Studios`, so they stay on screen
+under Type: Videos, and there is no People-only or Studios-only type. Not changed: it needs entries in
+`TYPES` and `typePlan` in `model/search-filters.js`.
 
 ## 3. Library browsing and filters
 
@@ -659,6 +693,7 @@ keys once.
 | `jellyfinPlusDebug` | Any value switches on console debug logging (the old `gpuUpscaleDebug` is also read) | `lib/log.js` |
 | `jellyfinPlus.searchExclude` | The text of the search page's exclude box | `controller/search-exclude.js` |
 | `jellyfinPlus.searchFilters` | JSON: committed Sort and filter state | `model/search-filters.js` |
+| `jellyfinPlus.searchRecent` | JSON array of up to 12 recent search terms, newest first | `model/search-recent.js` |
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |

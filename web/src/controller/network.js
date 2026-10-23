@@ -5,13 +5,29 @@ import { resetUpscaleForNewSource } from './playback-hooks.js';
 import { markSearchUrl } from './search-exclude.js';
 import { markSearchFilters } from './search-filters.js';
 import { markSearchPaging, watchPagedXhr, watchPagedFetch } from './search-pager.js';
+import { suggestVideoUrl } from '../model/search-suggest.js';
 import { log } from '../lib/log.js';
 
 /* The search page's own markings, in order: the exclude box, Sort & filter, then paging (last, so
  * it can see which queries the filters cut down to a discarded one-item request). All of them
- * leave any url that is not a search request exactly as it came. */
+ * leave any url that is not a search request exactly as it came. The empty page's Suggestions
+ * request carries no search term, so the others never touch it; suggestVideoUrl() is the only
+ * one that does, and only on the search page. */
 function markSearch(url) {
-    return markSearchPaging(markSearchFilters(markSearchUrl(url)));
+    return markSearchPaging(markSearchFilters(markSearchUrl(markSuggestions(url))));
+}
+
+function markSuggestions(url) {
+    if (!/^#\/search(\?|$)/.test(window.location.hash || '')) {
+        return url;
+    }
+
+    var out = suggestVideoUrl(url);
+    if (out !== url) {
+        log('markSuggestions: ' + url + ' -> ' + out);
+    }
+
+    return out;
 }
 
 /*

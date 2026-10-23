@@ -225,6 +225,25 @@ function submitSearch() {
     }
 }
 
+/*
+ * Puts `term` in the search box and submits it, as typing it and pressing Enter would (used by the
+ * recent-searches chips, view/search-recent.js). The value goes in through the prototype setter, not
+ * `main.value = ...`: React's value tracker wraps the instance property, and bypassing it leaves
+ * the tracker on the old text, so the replayed `input` event in submitSearch() reads as a change.
+ * False when the box is not on the page.
+ */
+export function runSearch(term) {
+    var main = document.querySelector(SEARCH_INPUT);
+    var desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (!main || !desc || typeof desc.set !== 'function') {
+        return false;
+    }
+
+    desc.set.call(main, term);
+    submitSearch();
+    return true;
+}
+
 function onEnter(e) {
     if (e.key === 'Enter') {
         e.preventDefault();
