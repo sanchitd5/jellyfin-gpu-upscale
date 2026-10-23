@@ -1,5 +1,6 @@
 import { el } from '../lib/dom.js';
 import { log } from '../lib/log.js';
+import { openSheet, closeSheet, isBottomSheet } from './sheet.js';
 import { state } from '../model/state.js';
 import { CONTROLS, DEFAULT_PREFS } from '../model/controls-data.js';
 import {
@@ -93,8 +94,67 @@ var CSS = [
     'border-left:1px solid rgba(255,255,255,.12);}',
     '.gpuup-live div{display:flex;gap:.5em;margin:.15em 0;}',
     '.gpuup-live b{flex:0 0 7.5em;font-weight:400;opacity:.65;}',
-    '.gpuup-live span{flex:1 1 auto;}'
+    '.gpuup-live span{flex:1 1 auto;}',
+    // SHEET MODE (a phone): the same panel, laid out as the body of view/sheet.js. The floating
+    // panel's position, width, scroll box and chrome are all handed to the sheet; chips and
+    // selects become tap-sized, and the Live block plus Apply now are pinned to the sheet's foot.
+    '#' + PANEL_ID + '.gpuup-in-sheet{position:static;width:auto;max-width:none;max-height:none;overflow:visible;',
+    'background:none;border:0;border-radius:0;padding:0;box-shadow:none;font-size:1em;',
+    '-webkit-backdrop-filter:none;backdrop-filter:none;color:inherit;}',
+    '.gpuup-in-sheet>div{padding:.3em 1.1em 0;}',
+    '.gpuup-in-sheet .gpuup-head{cursor:default;}',
+    '.gpuup-in-sheet .gpuup-chip{min-height:var(--jp-tap,44px);padding:0 1em;font-size:1em;}',
+    '.gpuup-in-sheet .gpuup-sel{min-height:var(--jp-tap,44px);font-size:16px;padding:0 .6em;}',
+    '.gpuup-in-sheet .gpuup-more>summary{display:flex;align-items:center;min-height:var(--jp-tap,44px);}',
+    '.gpuup-in-sheet .gpuup-chips{gap:.45em;}',
+    '.gpuup-in-sheet .gpuup-chip.on{background:var(--jp-accent,#00a4dc);border-color:var(--jp-accent,#00a4dc);',
+    'color:var(--jp-on-accent,#fff);}',
+    '.gpuup-in-sheet .gpuup-foot{position:sticky;bottom:0;margin:.6em -1.1em 0;',
+    'padding:.5em 1.1em calc(.6em + var(--jp-safe-bottom,env(safe-area-inset-bottom,0px)));',
+    'background:var(--jp-surface,#202020);border-top:1px solid var(--jp-border,rgba(128,128,128,.4));',
+    'max-height:34vh;max-height:34dvh;overflow-y:auto;overscroll-behavior:contain;}',
+    '.gpuup-in-sheet .gpuup-foot h3{margin:.2em 0 .2em;}',
+    '.gpuup-in-sheet .gpuup-foot .gpuup-apply{display:block;width:100%;min-height:48px;margin-top:.5em;',
+    'border-radius:24px;font-size:1em;font-weight:600;color:var(--jp-on-accent,#fff);',
+    'background:var(--jp-accent,#00a4dc);border-color:var(--jp-accent,#00a4dc);}'
 ].join('');
+
+/*
+ * WHEN THE PANEL IS A SHEET. On a phone the floating, draggable panel is a poor fit: it covers
+ * the picture, is 44 em wide, and is moved by a pointer-sized grip. There it is mounted in the
+ * shared bottom sheet instead; everywhere else (tablet, desktop, TV) it is exactly what it was.
+ * The theme's off switch (html.jp-theme-off) also returns the stock floating panel.
+ */
+function useSheet() {
+    var cl = document.documentElement.classList;
+    return !cl.contains('layout-tv') && !cl.contains('jp-theme-off') && isBottomSheet(['phone']);
+}
+
+/*
+ * Mounts a freshly made panel element and says whether it went into a sheet. The caller renders
+ * into `panel` afterwards either way: renderPanel reads the class this sets.
+ */
+export function mountPanel(panel) {
+    if (useSheet()) {
+        panel.classList.add('gpuup-in-sheet');
+        // The sheet is the dialog; a second one nested inside it would be announced twice.
+        panel.removeAttribute('role');
+        panel.removeAttribute('aria-label');
+        openSheet({
+            title: 'Enhance',
+            content: panel,
+            flush: true,
+            tiers: ['phone'],
+            // However the sheet closes (swipe, Back, backdrop, Escape) the panel's own teardown
+            // runs: the live poll stops and the focus goes back to whatever opened it.
+            onClose: function () { closePanel(); }
+        });
+        return true;
+    }
+
+    (document.body || document.documentElement).appendChild(panel);
+    return false;
+}
 
 export function panelEl() {
     return document.getElementById(PANEL_ID);
@@ -805,10 +865,17 @@ function gripButton() {
 export function renderPanel(panel, caps) {
     state.caps = caps;
     var body = el('div');
+    // One render function, a flag for the sheet: the sheet has its own title, close button and
+    // grip, so the drag header, its grip and the close button are skipped, and Apply now moves
+    // to the pinned foot below.
+    var inSheet = panel.classList.contains('gpuup-in-sheet');
 
     var head = el('div', 'gpuup-head');
-    head.appendChild(gripButton());
-    head.appendChild(el('div', 'gpuup-title', 'Enhance'));
+    if (!inSheet) {
+        head.appendChild(gripButton());
+        head.appendChild(el('div', 'gpuup-title', 'Enhance'));
+    }
+
     head.appendChild(el('div', 'gpuup-sum', summaryText()));
     if (state.applying) {
         head.appendChild(el('div', 'gpuup-applying', state.applying));
@@ -822,12 +889,15 @@ export function renderPanel(panel, caps) {
     var apply = el('button', 'gpuup-apply', 'Apply now');
     apply.title = 'Reload the current video at this position with the settings above';
     apply.onclick = applyNow;
-    head.appendChild(apply);
+    if (!inSheet) {
+        head.appendChild(apply);
 
-    var x = el('button', 'gpuup-x', '×');
-    x.title = 'Close';
-    x.onclick = closePanel;
-    head.appendChild(x);
+        var x = el('button', 'gpuup-x', '×');
+        x.title = 'Close';
+        x.onclick = closePanel;
+        head.appendChild(x);
+    }
+
     body.appendChild(head);
 
     // THE ONE LINE A VIEWER WANTS, AND IT COMES FROM THE SERVER. Everything else in this panel
@@ -976,9 +1046,18 @@ export function renderPanel(panel, caps) {
               + ' and open it again to ask.'));
     }
 
-    body.appendChild(liveSection());
     // Client-side upscaling: this browser only, never sent to the server (its own module).
-    body.appendChild(deviceSection(rerender));
+    if (inSheet) {
+        body.appendChild(deviceSection(rerender));
+        // Pinned to the sheet's foot: what the server is doing, and the guaranteed Apply now.
+        var foot = el('div', 'gpuup-foot');
+        foot.appendChild(liveSection());
+        foot.appendChild(apply);
+        body.appendChild(foot);
+    } else {
+        body.appendChild(liveSection());
+        body.appendChild(deviceSection(rerender));
+    }
 
     // The panel re-renders itself every few seconds to follow the session record. On a
     // television that would throw the focus away three times a minute, so the focused
@@ -993,8 +1072,10 @@ export function renderPanel(panel, caps) {
 
     panel.innerHTML = '';
     panel.appendChild(body);
-    makeDraggable(head);
-    applyPanelPos(panel);
+    if (!inSheet) {
+        makeDraggable(head);
+        applyPanelPos(panel);
+    }
 
     if (focusIndex >= 0) {
         try {
@@ -1026,8 +1107,15 @@ export function closePanel() {
         }
 
         var p = document.getElementById(PANEL_ID);
+        var wasSheet = !!(p && p.classList.contains('gpuup-in-sheet'));
         if (p && p.parentNode) {
             p.parentNode.removeChild(p);
+        }
+
+        // The sheet shell goes with the panel. Only when the panel was in it: another feature's
+        // sheet is not ours to close. (Re-entrant from the sheet's own onClose, which is a no-op.)
+        if (wasSheet) {
+            closeSheet('panel');
         }
 
         if (state.panelKeyHandler) {
