@@ -41,6 +41,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Search paging, infinite scroll, virtualised chunks | Both | Page size choice and Prev/Next on desktop; infinite scroll on phones | On; the Paged/Infinite toggle on the results |
 | Search result grid | Client | Results as a vertical grid on phone and desktop | On, no switch (TV untouched) |
 | Library-scope search fix | Client | Search from inside a Home Videos style library now returns clips | On, no switch |
+| Home Videos opens on Videos | Client | Clicking a Home Videos library shows its videos, not folders | On; Settings > Home "default screen" per library overrides it |
 | Recent searches | Client | Chips of the last 12 submitted terms on the empty search page; tap to search, x to forget, Clear | On, no switch (not on TV layouts) |
 | Longer search box | Client | The search box takes 200 characters instead of 40 | On, no switch (not on TV layouts) |
 | Search suggestions include clips | Client | The empty page's Suggestions list also offers random Video items | On, no switch; a changed stock request is left alone |
@@ -272,6 +273,16 @@ under Type: Videos, and there is no People-only or Studios-only type. Not change
 `TYPES` and `typePlan` in `model/search-filters.js`.
 
 ## 3. Library browsing and filters
+
+**Home Videos libraries open on Videos** (`web/src/controller/library-landing.js`,
+`web/src/model/library-landing.js`): stock `getDefaultViewIndex()` reads the per-library default
+screen from this device's localStorage (`<userId>-landing-<libraryId>`, the key the Settings > Home
+"default screen" select writes) and otherwise opens Folders. Once per user per page load the client
+reads `/UserViews` and the server copy of the user's settings (`DisplayPreferences/usersettings`,
+client `emby`), and writes that key for every Home Videos library where this device has none: the
+user's server-side choice if there is one, else `videos`. A stored value is never overwritten, so
+picking Folders in Settings > Home sticks. If the library page was already open on its stock default
+when the key got seeded, it switches to the Videos tab (`&tab=3`) once. Fails soft to stock.
 
 **Filter popover additions** (`web/src/view/library-filter-panel.js`,
 `web/src/controller/library-filters.js`, `web/src/model/library-filter-marks.js`):

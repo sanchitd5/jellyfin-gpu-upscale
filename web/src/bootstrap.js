@@ -24,6 +24,7 @@ import { installBulkTags } from './controller/bulk-tags.js';
 import { installSearchCensus } from './controller/search-census.js';
 import { installLibraryFilterHooks } from './controller/library-filters.js';
 import { installLibraryFilterPanel } from './view/library-filter-panel.js';
+import { installLibraryLanding } from './controller/library-landing.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -52,6 +53,7 @@ function feature(name, install) {
         feature('play-all fix', installPlayAllFix);
         feature('library filter hooks', installLibraryFilterHooks);
         feature('library filter panel', installLibraryFilterPanel);
+        feature('library landing', installLibraryLanding);
         tryRequireShim();
         watchPlaybackInfoDialog();
         feature('search page', watchSearchPage);
