@@ -12,6 +12,7 @@ import { savePrefs } from '../model/prefs-store.js';
 import { requestRestream, applyNow, activeState, APPLY_LABEL, APPLY_FAILED_TEXT } from '../controller/live-apply.js';
 import { liveLines } from '../controller/live-block.js';
 import { axisControls, controlNote } from '../controller/probe.js';
+import { deviceSection } from './client-upscale-panel.js';
 
 /*
  * ONE SURFACE. Quality first, then the three axes worth interrupting a film for, then one
@@ -976,6 +977,8 @@ export function renderPanel(panel, caps) {
     }
 
     body.appendChild(liveSection());
+    // Client-side upscaling: this browser only, never sent to the server (its own module).
+    body.appendChild(deviceSection(rerender));
 
     // The panel re-renders itself every few seconds to follow the session record. On a
     // television that would throw the focus away three times a minute, so the focused

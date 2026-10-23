@@ -60,6 +60,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Saved playback speed | Client | The speed picked in the player menu is remembered across browser sessions | On, no switch; plain 1x clears it |
 | Hold for 2x | Client | Press and hold the video (touch or primary mouse button) to play at 2x until release | On, no switch (not on TV layout) |
 | Enhance badge in the OSD | Client | A chip under the OSD top bar saying what the server is doing for this stream; tap opens Enhance | On, hidden when the plugin does not answer (not on TV layout) |
+| Client-side upscaling | Client | When the stream is shown at 1.15x its decoded size or more, this browser upscales it on its own GPU (WebGL2: deblock + deband, then FSR 1 EASU + RCAS); the badge says "This device: ..." | Auto by default; Off / Auto / Always per device in Enhance > "On this device" (not on TV layout) |
 | Swipe volume and brightness | Client | Vertical swipe on the right half of the video changes volume, on the left half brightness | On, no switch (touch only, not on TV layout; volume off where the device ignores it) |
 | Clip Up Next | Client | "Next video in N s" card for queued clips | On, no switch |
 | Play-all fixes | Client | Play all and Shuffle queue up to 1000 items; Home Videos folders queue videos | On, no switch |
@@ -519,7 +520,41 @@ the panel's selection. Long text is clipped with an ellipsis and carried in full
 opens the Enhance panel (`openEnhancePanel`). It refreshes when the OSD appears, when the play session id
 changes (playback start and landed live applies, with a few one-second follow-ups while the server
 writes its record), and every 5 s while shown, using `GET /JellyfinPlus/Session/{id}` (section 8); it
-is hidden when the probe does not answer fully, off the video page and on the TV layout.
+is hidden when the probe does not answer fully, off the video page and on the TV layout. Client-side
+upscaling (below) adds its own line, always worded "This device: ...", and can be the chip's only line
+when the plugin does not answer (client upscaling needs no server).
+
+**Client-side upscaling** (`web/src/controller/client-upscale.js`, `controller/client-upscale-gl.js`,
+`model/client-upscale.js`, `model/shaders/fsr1.js`, `model/shaders/cleanup.js`,
+`view/client-upscale-panel.js`). For low-bandwidth viewing: when the decoded video is meaningfully
+smaller than its on-screen size in device pixels, the viewer's own GPU upscales it. Nothing reaches the
+server: no request parameter, not a server axis, no restream. The bitrate stays the viewer's choice.
+- *Pipeline*, WebGL2, driven by `requestVideoFrameCallback` (fallback `requestAnimationFrame` plus a
+  `currentTime` check, only while playing): `texImage2D(video)` -> deblock (8px block edges, both sides
+  flat and a small step only) -> deband (4-tap random cross, threshold, sub-LSB dither), both at source
+  resolution -> FSR 1 EASU to output resolution -> FSR 1 RCAS -> the canvas. FSR 1 is ported from AMD's
+  `ffx_fsr1.h` (MIT, header kept in `fsr1.js`); the cleanup shaders are this project's own.
+- *Placement*: a `<canvas>` inserted directly after `video.htmlvideoplayer` in the same parent, sized to
+  the `object-fit` content rect (contain letterbox, cover crop) in device pixels, capped at 3840x2160
+  pixels. The video keeps playing under it (it is covered, never hidden, so decode and frame callbacks
+  continue). Subtitle layers jellyfin-web appends after the video stay above it; the OSD is above all of
+  it. The brightness swipe's filter applies to the canvas too.
+- *Auto rule* (`decide()`): on when the displayed scale is >= 1.15 on either axis (Always: > 1.0); never
+  when it would minify. A server that already sends display-sized frames leaves Auto off by itself.
+  Re-evaluated on the video's `resize`/`loadedmetadata`, a ResizeObserver on the video and its
+  container, window resize, text-track changes, PiP and fullscreen events, and a 1 s watchdog.
+- *Governor*: per ~48-frame window it counts frames the render loop missed (`presentedFrames` gaps),
+  dropped frames (`getVideoPlaybackQuality()`) and, where available, GPU time
+  (`EXT_disjoint_timer_query_webgl2`). Two bad windows (>8% lost, or GPU > 85% of the frame interval)
+  step down: drop cleanup, then RCAS, then off; twenty good windows step back up. Off stays off for that
+  video. The badge says "(reduced: GPU too slow)" / "off (GPU too slow)".
+- *Fail soft*: no WebGL2, a shader/GL error, a lost context (restored on `webglcontextrestored`), a
+  `texImage2D` that throws (cross-origin without CORS), iOS native fullscreen, Picture-in-Picture, a
+  native (`::cue`) text track showing, the TV layout: the canvas is hidden, the stock video shows, the
+  reason is logged once and named in the badge. Mode Off and the TV layout attach nothing at all.
+- *Settings*: "On this device" in the Enhance panel, below the server section: Upscale here Off / Auto /
+  Always, Cleanup Off / Low / High, Sharpness Strong / Default / Gentle / Light (RCAS 0 / 0.25 / 0.5 / 1
+  stops). Applied at once, stored per device (section 10), never synced.
 
 **Clip Up Next** (`web/src/controller/clip-upnext.js`). Stock shows its Up Next card only for Episodes
 of 10 minutes or more. For items of type `Video` with a next item in the queue, a small card appears
@@ -879,6 +914,7 @@ keys once.
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
 | `jellyfinPlusPlaybackRate` | The saved playback speed, a number from 0.25 to 4; absent means 1x | `controller/player-speed.js` |
 | `jellyfinPlusBrightness` | The swipe brightness, 0.3 to 1.5; absent means 1 (no filter) | `controller/player-actions.js` |
+| `jellyfinPlusClientUpscale` | JSON `{mode: off\|auto\|always, cleanup: off\|low\|high, sharpness: "0"\|"0.25"\|"0.5"\|"1"}`; absent means Auto, Low, 0.25. Per device on purpose (a GPU capability), never sent to the server | `model/client-upscale.js`, `controller/client-upscale.js` |
 
 Browser `sessionStorage` (per tab, gone when the tab closes; also in try/catch):
 
@@ -960,6 +996,15 @@ Item pages and playback:
   not 1. The badge sits on `<body>`, so it does not move with the header's slide animation.
 - Bulk tag editing handles only the item types in section 6 and only administrators. It edits the ticked
   cards, or, after "Select all N results" (section 5), every result of the list up to 5000.
+- **Client-side upscaling** was measured in desktop Chrome (headless, real GPU and SwiftShader) on
+  synthetic clips only, not yet on a phone or in Safari. Native (`::cue`) subtitles switch it off
+  while they show, because they render inside the `<video>` the canvas covers; custom-element, ASS
+  (libass) and PGS/VobSub subtitles stay above it. Picture-in-Picture and iOS native fullscreen show
+  the stock video. An UNTAGGED source can show a colour difference against stock (Chrome's WebGL
+  upload and its compositor assume different matrices for untagged video); BT.709-tagged streams,
+  which is what a transcode carries, matched exactly in the test. The governor cannot tell a slow GPU
+  from a busy main thread: both read as "GPU too slow". Once it reaches off it stays off until the next
+  item (or reload).
 - Card badges show the first two stored tags (a clip has 44 on average on the real library) and need a
   looked-up record, so a card shows nothing until it has been near the screen for about 150 ms.
 
