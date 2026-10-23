@@ -360,6 +360,52 @@ of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
   the viewer's groups, marked "auto"; in the editor each can be pinned (copied into the viewer's own
   groups, then editable), hidden, or renamed (choices in `jellyfinPlus.quickTagsAuto`, at most 50 each).
   Picks are not pruned until every source has answered.
+- The one source registered (bootstrap, "smart tag groups") is the smart categories below, through
+  `getSmartGroups(parentId)` in `controller/smart-tags.js`.
+
+**Smart tag categories** (`src/SmartTagCategories.cs` pure algorithm, `src/SmartTagsController.cs` route +
+loader + cache, `web/src/controller/smart-tags.js` fetch, `web/src/model/smart-tags.js` adapter).
+`GET /JellyfinPlus/Tags/Categories[?parentId=]` derives filter categories from the tag vocabulary of the
+items the requesting user can see, and answers `[{id, label, kind: prefix|exclusive|popular, prefix?,
+primary, coverage, tags: [{name, label, count}]}]`. Deterministic: the same vocabulary gives the same
+answer and ids (FNV-1a, never `GetHashCode`), whatever the row order.
+- **Pool.** Tags on at least max(3, 0.2% of the items) - about 600 tags on a 47k-video library, carrying
+  98% of the item-tag rows; below that the tail is 14k+ tags with one or two items each, which no filter
+  row could show. At most 800. Tags spelled differently but with one clean value are one tag (the most
+  used spelling shown).
+- **Name-like tags.** A tag whose words appear, as whole words, in a folder of the path (or the name) of
+  at least 80% of a sample of 25 of its items, is name-derived, at the most common folder depth. A depth
+  that more than 12 tags name is a list of names (people, series, uploaders) and is dropped; a depth that
+  12 or fewer tags name is a taxonomy the library is organised by, and is kept (on the profiling copy,
+  130 such tags at one depth were dropped and 4 at another kept: the 4 are the library's primary facet).
+  Names (item titles) are always dropped.
+- **Prefix families.** Every pool tag proposes its prefixes of 4 to (length - 3) characters; a prefix
+  shared by 3 or more is closed to the members' longest common prefix, so `attr value`, `attr: value`
+  and `attrvalue` spellings are all found. Kept when the prefix is not itself a tag, the family covers at
+  least 1% of items, and its members rarely stack: items carrying any member / sum of members' counts is at
+  least 0.5 (values of one attribute, not a word stem shared by unrelated tags; on the profiling copy the
+  real families score 0.94-1.0, word-stem groups 0.3-0.7). Overlapping families: larger coverage wins.
+  The heading is the prefix, prettified; each chip is labelled with the remainder.
+- **Exclusive facets.** Among the remaining pool, two tags are exclusive when the items carrying both are
+  under 2% of the smaller one. From each seed (count order) a set grows greedily, in count order, by every
+  tag exclusive with all members; a set of 2+ covering at least 50% of items, its largest member under 90%
+  of that, is a facet. The best-covering set is taken, its tags removed, repeated (at most 3). Named
+  "Group A", "Group B".. in coverage order (renamable per viewer through the quick-tags editor). The
+  facet with the largest coverage is `primary: true` (the card pill, section 5).
+- **Popular.** The 30 largest remaining pool tags, last. Order: everything else by coverage, then id; at
+  most 8 categories, 30 chips each.
+- **Access (invariant 13).** The items are `ILibraryManager.GetItemIds(new InternalItemsQuery(user))`
+  (videos, movies, series, episodes, music videos; recursive; BlockedTags, AllowedTags, parental rating,
+  unrated blocks and folder access applied by stock), scoped to the library's physical folders
+  (`TopParentIds`) or under a folder (`AncestorIds`); a parent the user cannot see is a 404. Only map rows
+  of those ids are counted, so no category, chip or count comes from an item the user cannot see.
+- **Cache.** Per user + access digest (folders, BlockedTags, AllowedTags, unrated, rating, missing
+  episodes) + parent, 30 minutes, at most 100 entries; dropped on any library item event, and a result
+  computed while the library changed is not stored. One computation per key at a time.
+- **Cost** (profiling copy, 47,621 videos, 2.03M item-tag rows): load 0.86-0.92 s warm DB (1.8 s first),
+  algorithm 55-180 ms; a cached answer under 1 ms, about 6 KB of JSON. `Server-Timing: tagcats`.
+- **Client.** Fetched once per library scope (from the hash's `parentId`/`topParentId`), cached 10 minutes,
+  a failure (old server, no route) cached as "none" for a minute. Fail soft: no route, no categories.
 
 **Date added filter on library tabs** (`web/src/view/date-sheet.js`, the "Date" chip in `view/quick-tags.js`,
 pure part `model/date-added.js`; server part is only `jpMinDateAdded` / `jpMaxDateAdded`, section 7.4 - no
@@ -568,6 +614,13 @@ footer line under the title with the first two tags ("tag one - tag two"). Resol
 both pixel sides (1920x800 is 1080p, a vertical 1080x1920 clip is too): 4K, 1440p, 1080p, 720p, 480p,
 SD. The chips ignore pointer events; a card with no footer under the thumbnail gets no tag line. Not
 on TV layouts.
+- **Category pill.** The item's tag from the PRIMARY smart category (section 3, "Smart tag categories":
+  the exclusive facet covering the most items; `primaryTagOf(itemTags, categories)` in
+  `model/smart-tags.js`) is an accent pill (`--jp-accent`) at the end of the top-left chip group, clear of
+  the bottom-right heart/more row and of a title drawn over the image; on a `.listItem` row (phone/tablet
+  list view) it sits after the row text. When a card has one, it replaces the "first two tags" footer line.
+  The categories are fetched once per library scope; until they arrive, or without a route, a primary facet
+  or a matching tag, nothing extra is drawn. The lookup now keeps up to 200 of the item's tags (`all`).
 - **Data is NOT added to list requests.** A card is watched with an IntersectionObserver (300 px
   margin); near the screen, its id joins a batch of up to 40 that goes out after 150 ms as one plain
   `Users/{id}/Items?Ids=..&Fields=Tags,Width,Height&EnableImages=false&EnableTotalRecordCount=false`.
@@ -1223,6 +1276,7 @@ All under the Jellyfin API root. "Administrator" is the `RequiresElevation` poli
 | `GET /JellyfinPlus/Session/{playSessionId}` | Any authenticated user | What the server actually did for one play session. The id `probe` returns the capability lists with no session (used by the client probe); `dashboard` is used by the config page. A session recorded for a different user is reported as unknown. If either side has no user id (for example an API key), it answers as before the check existed. |
 | `GET /JellyfinPlus/FilterCache/Status` | Administrator | Per-library, per-kind cache state: built time, key counts, dirty flag, run state, last error, and outcome counters. |
 | `POST /JellyfinPlus/FilterCache/Rebuild?force=true` | Administrator | Starts a background rebuild and returns 202 with the status JSON. `force` (default true) rebuilds every library, not only stale ones. 409 when a rebuild is running or the cache is not ready. |
+| `GET /JellyfinPlus/Tags/Categories[?parentId=..&userId=..]` | Any authenticated user (another user's `userId`: administrators only) | Smart tag categories over the user's visible items (section 3): `[{id, label, kind, prefix?, primary, coverage, tags: [{name, label, count}]}]`. 404 for a parent the user cannot see. Cached per user, access digest and parent. |
 | `GET /JellyfinPlus/FtsIndex/Status` | Administrator | Search index state: usable now, verified, dirty, pending items, row counts, signature, built time, last refresh kind and duration, unsupported reason (no FTS5 trigram in this SQLite), outcome counters (`name:fts`, `tag:fts`, `wild-name:fts`, fallbacks). |
 | `POST /JellyfinPlus/FtsIndex/Rebuild?force=true` | Administrator | Rebuilds the search index in the background; 202 with the status JSON, 409 when a run is in flight or the index is off. |
 | `GET /JellyfinPlus/Search/Facets` | Any authenticated user | People, studios or tags credited on the items a search matches: `[{id, name, roles, count}]`, count descending then name. Parameters in section 9. 400 for a bad `kind` or no resolvable user; 403 if a non-administrator asks for another user's view; 404 for an unknown user or a `parentId` the user cannot see; an empty array when `searchTerm` is blank. Sets a `Server-Timing` header. |

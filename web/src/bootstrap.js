@@ -35,6 +35,8 @@ import { installSearchCensus } from './controller/search-census.js';
 import { installLibraryFilterHooks } from './controller/library-filters.js';
 import { installLibraryFilterPanel } from './view/library-filter-panel.js';
 import { installQuickTags } from './view/quick-tags.js';
+import { registerGroupSource } from './controller/quick-tags.js';
+import { getSmartGroups } from './controller/smart-tags.js';
 import { installLibraryGrid } from './view/library-grid.js';
 import { installLibraryLanding } from './controller/library-landing.js';
 import { installCardBadges } from './view/card-badges.js';
@@ -82,6 +84,8 @@ function feature(name, install) {
         feature('library filter panel', installLibraryFilterPanel);
         // Quick tag chips above library lists; the picks ride in Filters.Tags markers rewritten by the hooks above.
         feature('quick tags', installQuickTags);
+        // Smart categories (GET /JellyfinPlus/Tags/Categories) as suggested quick tag groups; fail soft to none.
+        feature('smart tag groups', function () { registerGroupSource(getSmartGroups); });
         feature('library grid', installLibraryGrid);
         feature('library landing', installLibraryLanding);
         feature('list requests', installListRequests);

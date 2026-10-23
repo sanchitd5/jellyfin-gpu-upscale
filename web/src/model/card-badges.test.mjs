@@ -1,6 +1,6 @@
 // Run: node web/src/model/card-badges.test.mjs   (no framework; exits non-zero on failure)
 import assert from 'node:assert/strict';
-import { resolutionLabel, runtimeLabel, badgeInfo, badgeType, tagsText, TAG_COUNT } from './card-badges.js';
+import { resolutionLabel, runtimeLabel, badgeInfo, badgeType, tagsText, TAG_COUNT, ALL_TAGS_MAX } from './card-badges.js';
 
 var passed = 0;
 function t(name, fn) {
@@ -61,13 +61,22 @@ t('badgeInfo keeps the first tags only, trimmed, no blanks', function () {
     assert.equal(i.res, '1080p');
     assert.equal(i.runtime, '10:00');
     assert.equal(i.fav, true);
+    assert.deepEqual(i.all, ['a', 'b', 'c', 'd']);
+});
+
+t('badgeInfo keeps every tag (capped) for the category pill', function () {
+    var many = [];
+    for (var k = 0; k < ALL_TAGS_MAX + 50; k++) { many.push('t' + k); }
+    var i = badgeInfo({ Tags: many });
+    assert.equal(i.all.length, ALL_TAGS_MAX);
+    assert.deepEqual(i.tags, ['t0', 't1']);
 });
 
 t('badgeInfo survives a sparse or odd dto', function () {
     assert.equal(badgeInfo(null), null);
     assert.equal(badgeInfo('x'), null);
     var i = badgeInfo({});
-    assert.deepEqual(i, { fav: false, res: '', runtime: '', tags: [], type: '' });
+    assert.deepEqual(i, { fav: false, res: '', runtime: '', tags: [], all: [], type: '' });
     assert.deepEqual(badgeInfo({ Tags: [1, null, 'ok'] }).tags, ['ok']);
     assert.deepEqual(badgeInfo({ Tags: 'not a list' }).tags, []);
 });

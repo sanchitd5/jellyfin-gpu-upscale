@@ -9,6 +9,7 @@
  */
 
 export var TAG_COUNT = 2;
+export var ALL_TAGS_MAX = 200;
 
 // Item types a resolution / runtime / tags badge means something for.
 var BADGE_TYPES = { Video: 1, Movie: 1, Episode: 1, MusicVideo: 1, Trailer: 1 };
@@ -66,12 +67,14 @@ export function badgeInfo(dto) {
         return null;
     }
 
-    var tags = [];
+    // `all` (capped) is what the primary-category pill is looked up in (model/smart-tags.js primaryTagOf);
+    // `tags` is the footer line's first TAG_COUNT.
+    var all = [];
     var list = Array.isArray(dto.Tags) ? dto.Tags : [];
-    for (var i = 0; i < list.length && tags.length < TAG_COUNT; i++) {
+    for (var i = 0; i < list.length && all.length < ALL_TAGS_MAX; i++) {
         var t = typeof list[i] === 'string' ? list[i].trim() : '';
         if (t) {
-            tags.push(t);
+            all.push(t);
         }
     }
 
@@ -79,7 +82,8 @@ export function badgeInfo(dto) {
         fav: !!(dto.UserData && dto.UserData.IsFavorite),
         res: resolutionLabel(dto.Width, dto.Height),
         runtime: runtimeLabel(dto.RunTimeTicks),
-        tags: tags,
+        tags: all.slice(0, TAG_COUNT),
+        all: all,
         type: dto.Type || ''
     };
 }

@@ -2,6 +2,8 @@ import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
 import { badgeType, tagsText } from '../model/card-badges.js';
 import { badgesEnabled, cardInfo, onCardInfo, watchCard } from '../controller/card-data.js';
+import { categoriesNow, getCategories } from '../controller/smart-tags.js';
+import { primaryTagOf, scopeFromHash } from '../model/smart-tags.js';
 
 /*
  * CARD BADGES (QOL_IDEAS #41): resolution, runtime and the first two tags on video cards.
@@ -25,12 +27,22 @@ import { badgesEnabled, cardInfo, onCardInfo, watchCard } from '../controller/ca
  * Like card-actions.js this finds cards by the stable .card[data-id][data-serverid] markup that both
  * the legacy cardBuilder lists and the modern library views emit, with a MutationObserver. If a card
  * has no .cardScalable (the markup changed) it is left alone.
+ *
+ * THE CATEGORY PILL. The item's tag from the PRIMARY smart category (the exclusive facet covering the most
+ * items, GET /JellyfinPlus/Tags/Categories via controller/smart-tags.js, fetched once per library scope and
+ * cached) is an accent pill: on a card it joins the top-left chips (clear of the bottom-right heart/more row
+ * and of a title drawn over the image), on a list row (.listItem, phone/tablet list view) it sits after the
+ * row's text. When a card has one, it replaces the footer's "first two tags" line. No route, no primary facet
+ * or an item without one of its tags: nothing extra is drawn.
  */
 
 var STYLE_ID = 'jellyfinPlusCardBadgesStyle';
 var CHIPS = 'jpCardChips';
 var TAGS = 'jpCardTags';
+var CAT = 'jpChipCat';
+var LIST_CAT = 'jpListCat';
 var CARD_SELECTOR = '.card[data-id][data-serverid]';
+var LIST_SELECTOR = '.listItem[data-id][data-serverid]';
 
 var CSS = [
     '.' + CHIPS + ' { position: absolute; left: 0; top: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 3px;'
@@ -39,24 +51,101 @@ var CSS = [
         + ' color: #fff; font-size: 0.72em; font-weight: 600; line-height: 1.5; letter-spacing: 0.02em; white-space: nowrap;'
         + ' font-variant-numeric: tabular-nums; }',
     '.' + CHIPS + ' > .jpChipRes { background: rgba(0,0,0,0.82); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.55); }',
-    '.' + TAGS + ' { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.8em; opacity: 0.75; }'
+    '.' + TAGS + ' { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.8em; opacity: 0.75; }',
+    // The category pill: the theme's accent (fallbacks for the theme switched off), clipped, never wider than the card.
+    '.' + CHIPS + ' > .' + CAT + ', .' + LIST_CAT + ' { background: var(--jp-accent, #5ccfff); color: var(--jp-on-accent, #0b1a22);'
+        + ' border-radius: 999px; padding: 1px 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }',
+    '.' + LIST_CAT + ' { display: inline-block; flex: none; align-self: center; margin: 0 6px; font-size: 0.75em; font-weight: 600;'
+        + ' line-height: 1.6; white-space: nowrap; max-width: 40%; pointer-events: none; }'
 ].join('\n');
 
 function isTv() {
     return document.documentElement.classList.contains('layout-tv');
 }
 
+/* The item's primary-category tag ({ name, label }) when the scope's categories are loaded, else null. */
+function categoryOf(info) {
+    if (!info || !info.all || !info.all.length) {
+        return null;
+    }
+
+    var scope = scopeFromHash(window.location.hash);
+    var cats = categoriesNow(scope);
+    if (!cats && !waiting[scope]) {
+        // First card of this scope: once the categories arrive, every painted card gets its pill.
+        waiting[scope] = true;
+        getCategories(scope).then(function () {
+            waiting[scope] = false;
+            repaintAll();
+        });
+    }
+
+    return cats ? primaryTagOf(info.all, cats) : null;
+}
+
+var waiting = {};
+
+function repaintAll() {
+    if (isTv()) {
+        return;
+    }
+
+    var nodes = document.querySelectorAll(CARD_SELECTOR + ', ' + LIST_SELECTOR);
+    for (var i = 0; i < nodes.length; i++) {
+        var info = cardInfo(nodes[i].getAttribute('data-id'));
+        if (info && badgeType(nodes[i].getAttribute('data-type'))) {
+            try {
+                paint(nodes[i], info);
+            } catch (err) {
+                log('card badges: repaint failed', err);
+            }
+        }
+    }
+}
+
+/* A list row: the pill after the row's text, or none. Idempotent. */
+function paintRow(li, info) {
+    var cat = categoryOf(info);
+    var pill = li.querySelector('.' + LIST_CAT);
+    if (!cat) {
+        if (pill) { pill.remove(); }
+        return;
+    }
+
+    if (!pill) {
+        pill = el('span', LIST_CAT);
+        var body = li.querySelector('.listItemBody');
+        if (body && body.parentNode) {
+            body.parentNode.insertBefore(pill, body.nextSibling);
+        } else {
+            (li.querySelector(':scope > .listItem-content') || li).appendChild(pill);
+        }
+    }
+
+    if (pill.textContent !== cat.label) {
+        pill.textContent = cat.label;
+        pill.title = cat.name;
+    }
+}
+
 /* Brings one card in line with the record for its item. Idempotent: touches the DOM only on a change. */
 function paint(card, info) {
+    if (card.matches && card.matches(LIST_SELECTOR)) {
+        paintRow(card, info);
+        return;
+    }
+
     var scalable = card.querySelector('.cardScalable');
     if (!scalable || !info) {
         return;
     }
 
+    var cat = categoryOf(info);
     var chips = scalable.querySelector(':scope > .' + CHIPS);
     var texts = [];
     if (info.res) { texts.push(['jpChipRes', info.res]); }
     if (info.runtime) { texts.push(['jpChipRuntime', info.runtime]); }
+    if (cat) { texts.push([CAT, cat.label, cat.name]); }
     var sig = texts.map(function (t) { return t[1]; }).join('|');
     if (!texts.length) {
         if (chips) { chips.remove(); }
@@ -68,7 +157,11 @@ function paint(card, info) {
 
         chips.textContent = '';
         chips.setAttribute('data-sig', sig);
-        texts.forEach(function (t) { chips.appendChild(el('span', t[0], t[1])); });
+        texts.forEach(function (t) {
+            var span = el('span', t[0], t[1]);
+            if (t[2]) { span.title = t[2]; }
+            chips.appendChild(span);
+        });
     }
 
     // The footer UNDER the thumbnail only: a footer drawn over the image has no room for a third line.
@@ -82,7 +175,7 @@ function paint(card, info) {
     }
 
     var line = card.querySelector('.' + TAGS);
-    var text = tagsText(info.tags);
+    var text = cat ? '' : tagsText(info.tags); // the pill replaces the generic tag line
     if (!text || !footer) {
         if (line) { line.remove(); }
         return;
@@ -117,6 +210,21 @@ function decorate(card) {
     }
 }
 
+/* A list row (.listItem, phone/tablet list view): only the category pill. */
+function decorateRow(li) {
+    if (!li || li.nodeType !== 1 || !li.isConnected || isTv() || !li.matches(LIST_SELECTOR)
+        || !badgeType(li.getAttribute('data-type'))) {
+        return;
+    }
+
+    var info = cardInfo(li.getAttribute('data-id'));
+    if (info) {
+        paintRow(li, info);
+    } else {
+        watchCard(li);
+    }
+}
+
 var queue = [];
 var scheduled = false;
 
@@ -139,6 +247,19 @@ function drain() {
                     decorate(cards[i]);
                 }
             }
+
+            if (node.matches && node.matches(LIST_SELECTOR)) {
+                decorateRow(node);
+            } else if (node.closest && node.closest(LIST_SELECTOR)) {
+                decorateRow(node.closest(LIST_SELECTOR));
+            }
+
+            if (node.querySelectorAll) {
+                var rows = node.querySelectorAll(LIST_SELECTOR);
+                for (var r = 0; r < rows.length; r++) {
+                    decorateRow(rows[r]);
+                }
+            }
         } catch (err) {
             log('card badges: decorate failed', err);
         }
@@ -155,7 +276,7 @@ function enqueue(node) {
 
 function ours(n) {
     var c = n.classList;
-    return !!c && (c.contains(CHIPS) || c.contains(TAGS));
+    return !!c && (c.contains(CHIPS) || c.contains(TAGS) || c.contains(CAT) || c.contains(LIST_CAT));
 }
 
 export function installCardBadges() {
@@ -177,7 +298,7 @@ export function installCardBadges() {
                 return;
             }
 
-            var cards = document.querySelectorAll('.card[data-id="' + id + '"]');
+            var cards = document.querySelectorAll('.card[data-id="' + id + '"], .listItem[data-id="' + id + '"]');
             for (var i = 0; i < cards.length; i++) {
                 if (badgeType(cards[i].getAttribute('data-type'))) {
                     paint(cards[i], info);
