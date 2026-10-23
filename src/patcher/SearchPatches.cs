@@ -9,6 +9,7 @@ using HarmonyLib;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
@@ -30,7 +31,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
     /// Jellyfin stores in ItemValues.CleanValue (lowercase, diacritics stripped, punctuation to
     /// spaces), so Contains on the two is a case-insensitive substring match that translates to SQL.
     ///
-    /// THE SEAM. On Jellyfin 12.1 both /Items?searchTerm= (the web client's search page) and
+    /// THE SEAM. On Jellyfin 12.3 (as on 12.1) both /Items?searchTerm= (the web client's search page) and
     /// /Search/Hints go through SearchManager.GetSearchResultsAsync, whose built-in fallback provider
     /// is Emby.Server.Implementations.Library.Search.SqlSearchProvider. Its SearchAsync filters on
     /// CleanName and OriginalTitle only. A plugin-registered IInternalSearchProvider would be the
@@ -55,7 +56,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
         // Below stock ContainsMatchScore (50): a title match outranks a tag-only match.
         private const float TagMatchScore = 40f;
 
-        // Mirrors SqlSearchProvider.DefaultSearchLimit / _placeholderId on 12.1.
+        // Mirrors SqlSearchProvider.DefaultSearchLimit / _placeholderId (12.3; unchanged since 12.1).
         private const int DefaultSearchLimit = 100;
         private static readonly Guid _placeholderId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
@@ -164,7 +165,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
             logger?.LogInformation("JellyfinPlus: patched SqlSearchProvider.SearchAsync (search also matches tags; excludeTags honoured)");
         }
 
-        // Mirrors SqlSearchProvider's score tiers on 12.1.
+        // Mirrors SqlSearchProvider's score tiers (12.3; unchanged since 12.1).
         private const float ExactMatchScore = 100f;
         private const float PrefixMatchScore = 80f;
         private const float WordPrefixMatchScore = 75f;
@@ -209,12 +210,18 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 }
 
                 var clean = string.IsNullOrEmpty(raw) ? null : raw.GetCleanValue();
-                if (string.IsNullOrEmpty(clean) || !FtsIndexEngine.CanAnswer(clean, raw))
+                if (string.IsNullOrEmpty(clean))
                 {
                     return true;
                 }
 
-                __result = FtsNameSearch(__instance, query, raw, clean, cancellationToken);
+                var sortShape = SortNameShape(raw);
+                if (!FtsIndexEngine.CanAnswer(clean, raw, sortShape))
+                {
+                    return true;
+                }
+
+                __result = FtsNameSearch(__instance, query, raw, clean, sortShape, cancellationToken);
                 return false;
             }
             catch (Exception ex)
@@ -224,11 +231,24 @@ namespace Jellyfin.Plugin.Plus.Patcher
             }
         }
 
+        /// <summary>
+        /// The SortName operand of Jellyfin 12.3's name match: SqlSearchProvider computes
+        /// BaseItem.GetSortName(term, true, server configuration) and tests SortName LIKE %shape% only when that
+        /// is not blank. Null when stock adds no SortName test. BaseItem.ConfigurationManager is the same
+        /// server-configuration singleton the provider is constructed with.
+        /// </summary>
+        private static string SortNameShape(string raw)
+        {
+            var shape = BaseItem.GetSortName(raw, true, BaseItem.ConfigurationManager.Configuration);
+            return string.IsNullOrWhiteSpace(shape) ? null : shape;
+        }
+
         private static async Task<IReadOnlyList<SearchResult>> FtsNameSearch(
             object provider,
             SearchProviderQuery query,
             string raw,
             string clean,
+            string sortShape,
             CancellationToken ct)
         {
             var factory = (IDbContextFactory<JellyfinDbContext>)_dbProvider.GetValue(provider);
@@ -239,7 +259,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 try
                 {
                     await db.Database.OpenConnectionAsync(ct).ConfigureAwait(false);
-                    candidates = await FtsIndexEngine.NameCandidatesAsync(db.Database.GetDbConnection(), clean, raw, ct).ConfigureAwait(false);
+                    candidates = await FtsIndexEngine.NameCandidatesAsync(db.Database.GetDbConnection(), clean, raw, sortShape, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -258,7 +278,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
                 try
                 {
-                    return await RunNameQuery(provider, db, query, raw, clean, candidates, ct).ConfigureAwait(false);
+                    return await RunNameQuery(provider, db, query, raw, clean, sortShape, candidates, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -269,7 +289,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     // The constrained form failed: the unconstrained one IS the stock query.
                     _logger?.LogWarning(ex, "JellyfinPlus: FTS-constrained name query failed; re-running the stock query.");
                     FtsIndexEngine.Count("name:constrained-failed");
-                    return await RunNameQuery(provider, db, query, raw, clean, null, ct).ConfigureAwait(false);
+                    return await RunNameQuery(provider, db, query, raw, clean, sortShape, null, ct).ConfigureAwait(false);
                 }
             }
         }
@@ -376,26 +396,45 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 .ConfigureAwait(false);
         }
 
-        /// <summary>SqlSearchProvider.SearchAsync's query, verbatim, plus the optional candidate-id condition.</summary>
+        /// <summary>
+        /// SqlSearchProvider.SearchAsync's query (Jellyfin 12.3), verbatim, plus the optional candidate-id condition.
+        /// 12.3 added the SortName test (its sortNameShape / likeSortName); <paramref name="sortShape"/> is that shape,
+        /// null exactly when stock leaves the test out.
+        /// </summary>
         private static async Task<IReadOnlyList<SearchResult>> RunNameQuery(
             object provider,
             JellyfinDbContext db,
             SearchProviderQuery query,
             string raw,
             string clean,
+            string sortShape,
             Guid[] candidates,
             CancellationToken ct)
         {
             var cleanPrefix = clean + " ";
             var likeOriginal = $"%{raw}%";
+            var likeSortName = sortShape == null ? null : $"%{sortShape}%";
             var limit = query.Limit ?? DefaultSearchLimit;
 
             var dbQuery = db.BaseItems
                 .AsNoTracking()
                 .Where(e => e.Id != _placeholderId)
-                .Where(e => !e.IsVirtualItem)
-                .Where(e => e.CleanName!.Contains(clean)
-                    || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle, likeOriginal)));
+                .Where(e => !e.IsVirtualItem);
+
+            if (likeSortName is null)
+            {
+                dbQuery = dbQuery
+                    .Where(e => e.CleanName!.Contains(clean)
+                        || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle, likeOriginal)));
+            }
+            else
+            {
+                dbQuery = dbQuery
+                    .Where(e => e.CleanName!.Contains(clean)
+                        || (e.OriginalTitle != null && EF.Functions.Like(e.OriginalTitle, likeOriginal))
+                        || (e.SortName != null && EF.Functions.Like(e.SortName, likeSortName)));
+            }
+
             if (candidates != null)
             {
                 dbQuery = dbQuery.Where(e => EF.Parameter(candidates).Contains(e.Id));

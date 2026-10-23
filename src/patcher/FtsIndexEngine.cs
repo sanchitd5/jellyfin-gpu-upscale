@@ -19,7 +19,9 @@ namespace Jellyfin.Plugin.Plus.Patcher
     /// <summary>
     /// A SQLite FTS5 trigram index over item names and tag values, in two plugin-owned virtual tables inside
     /// Jellyfin's own database (created with CREATE ... IF NOT EXISTS; Jellyfin's EF model is never touched):
-    ///   JellyfinPlus_FtsNames(ItemId UNINDEXED, CleanName, OriginalTitle)  one row per BaseItems row
+    ///   JellyfinPlus_FtsNames(ItemId UNINDEXED, CleanName, OriginalTitle, SortName)  one row per BaseItems row
+    ///     (SortName because Jellyfin 12.3's name match also tests it; an index built before has no such column
+    ///     and is dropped and rebuilt whole - see EnsureSchema)
     ///   JellyfinPlus_FtsTags(ValueId UNINDEXED, CleanValue)                one row per distinct TAG VALUE
     ///   JellyfinPlus_FtsMeta(Key, Value)                                   the signature the index was built at
     ///
@@ -255,11 +257,29 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 using var db = _factory.CreateDbContext();
                 db.Database.OpenConnection();
                 var conn = db.Database.GetDbConnection();
+                Exec(conn, null, "CREATE TABLE IF NOT EXISTS " + MetaTable + " (Key TEXT NOT NULL PRIMARY KEY, Value TEXT NOT NULL) WITHOUT ROWID");
+
+                // A names table from before SortName was indexed (Jellyfin 12.1) cannot answer 12.3's name match:
+                // drop it and forget its signature, so the next sync rebuilds it whole with the column.
+                string namesSql;
+                using (var c = conn.CreateCommand())
+                {
+                    c.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = @n";
+                    AddParam(c, "@n", NamesTable);
+                    namesSql = c.ExecuteScalar() as string;
+                }
+
+                if (namesSql != null && namesSql.IndexOf("SortName", StringComparison.Ordinal) < 0)
+                {
+                    Exec(conn, null, "DROP TABLE " + NamesTable);
+                    Exec(conn, null, "DELETE FROM " + MetaTable + " WHERE Key = 'signature'");
+                    _log?.LogInformation("JellyfinPlus: search index predates the SortName column; rebuilding it.");
+                }
+
                 Exec(conn, null, "CREATE VIRTUAL TABLE IF NOT EXISTS " + NamesTable
-                    + " USING fts5(ItemId UNINDEXED, CleanName, OriginalTitle, tokenize='trigram')");
+                    + " USING fts5(ItemId UNINDEXED, CleanName, OriginalTitle, SortName, tokenize='trigram')");
                 Exec(conn, null, "CREATE VIRTUAL TABLE IF NOT EXISTS " + TagsTable
                     + " USING fts5(ValueId UNINDEXED, CleanValue, tokenize='trigram')");
-                Exec(conn, null, "CREATE TABLE IF NOT EXISTS " + MetaTable + " (Key TEXT NOT NULL PRIMARY KEY, Value TEXT NOT NULL) WITHOUT ROWID");
                 _unsupported = null;
                 _schemaReady = true;
                 return true;
@@ -499,15 +519,15 @@ namespace Jellyfin.Plugin.Plus.Patcher
                     if (full)
                     {
                         Exec(conn, tx, "DELETE FROM " + NamesTable);
-                        Exec(conn, tx, "INSERT INTO " + NamesTable + " (ItemId, CleanName, OriginalTitle) "
-                            + "SELECT Id, COALESCE(CleanName, ''), COALESCE(OriginalTitle, '') FROM BaseItems");
+                        Exec(conn, tx, "INSERT INTO " + NamesTable + " (ItemId, CleanName, OriginalTitle, SortName) "
+                            + "SELECT Id, COALESCE(CleanName, ''), COALESCE(OriginalTitle, ''), COALESCE(SortName, '') FROM BaseItems");
                     }
                     else if (ids.Length > 0)
                     {
                         var json = JsonSerializer.Serialize(ids.Select(g => g.ToString("D", CultureInfo.InvariantCulture).ToUpperInvariant()));
                         Exec(conn, tx, "DELETE FROM " + NamesTable + " WHERE ItemId IN (SELECT value FROM json_each(@ids))", ("@ids", json));
-                        Exec(conn, tx, "INSERT INTO " + NamesTable + " (ItemId, CleanName, OriginalTitle) "
-                            + "SELECT Id, COALESCE(CleanName, ''), COALESCE(OriginalTitle, '') FROM BaseItems WHERE Id IN (SELECT value FROM json_each(@ids))", ("@ids", json));
+                        Exec(conn, tx, "INSERT INTO " + NamesTable + " (ItemId, CleanName, OriginalTitle, SortName) "
+                            + "SELECT Id, COALESCE(CleanName, ''), COALESCE(OriginalTitle, ''), COALESCE(SortName, '') FROM BaseItems WHERE Id IN (SELECT value FROM json_each(@ids))", ("@ids", json));
                     }
 
                     // The tag table is small, so any refresh rewrites it whole: exact, and no diffing to get wrong.
@@ -548,29 +568,36 @@ namespace Jellyfin.Plugin.Plus.Patcher
         private static int Chars(string s) => s.EnumerateRunes().Count();
 
         /// <summary>
-        /// Whether a name search for these terms can be answered by a trigram index at all: both the cleaned
-        /// and the raw term need 3 or more characters, and the raw one must not hold the LIKE wildcards % or _
-        /// (the stock OriginalTitle test is a LIKE, where they match other characters; a trigram match does not).
+        /// Whether a name search for these terms can be answered by a trigram index at all: the cleaned and the
+        /// raw term, and the sort-name shape when there is one, need 3 or more characters, and the two LIKE
+        /// operands (raw for OriginalTitle, sortShape for SortName) must not hold the LIKE wildcards % or _ (in a
+        /// LIKE they match other characters; a trigram match does not). sortShape is null when stock adds no
+        /// SortName test (Jellyfin 12.3 SqlSearchProvider: a blank BaseItem.GetSortName of the term).
         /// </summary>
-        internal static bool CanAnswer(string clean, string raw)
-            => Chars(clean) >= 3 && Chars(raw) >= 3 && !raw.Contains('%', StringComparison.Ordinal) && !raw.Contains('_', StringComparison.Ordinal);
+        internal static bool CanAnswer(string clean, string raw, string sortShape)
+            => Chars(clean) >= 3 && LikeOperandOk(raw) && (sortShape == null || LikeOperandOk(sortShape));
+
+        private static bool LikeOperandOk(string s)
+            => Chars(s) >= 3 && !s.Contains('%', StringComparison.Ordinal) && !s.Contains('_', StringComparison.Ordinal);
 
         /// <summary>An FTS5 phrase for the text: double-quoted, inner quotes doubled.</summary>
         private static string Phrase(string s) => "\"" + s.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
         /// <summary>
-        /// A superset of the BaseItems ids whose CleanName contains <paramref name="clean"/> or whose OriginalTitle
-        /// is LIKE %<paramref name="raw"/>%. Null when the index cannot answer (unusable, a term under 3 characters,
+        /// A superset of the BaseItems ids whose CleanName contains <paramref name="clean"/>, whose OriginalTitle
+        /// is LIKE %<paramref name="raw"/>% or (when <paramref name="sortShape"/> is not null) whose SortName is LIKE
+        /// %<paramref name="sortShape"/>%. Null when the index cannot answer (unusable, a term under 3 characters,
         /// a LIKE wildcard in the term, more than <see cref="MaxCandidates"/> candidates, or any error).
         /// </summary>
-        internal static async Task<Guid[]> NameCandidatesAsync(DbConnection conn, string clean, string raw, CancellationToken ct)
+        internal static async Task<Guid[]> NameCandidatesAsync(DbConnection conn, string clean, string raw, string sortShape, CancellationToken ct)
         {
-            if (!Usable || !CanAnswer(clean, raw))
+            if (!Usable || !CanAnswer(clean, raw, sortShape))
             {
                 return null;
             }
 
-            var q = "{CleanName}: " + Phrase(clean) + " OR {OriginalTitle}: " + Phrase(raw);
+            var q = "{CleanName}: " + Phrase(clean) + " OR {OriginalTitle}: " + Phrase(raw)
+                + (sortShape == null ? string.Empty : " OR {SortName}: " + Phrase(sortShape));
             return await QueryIdsAsync(conn, "SELECT ItemId FROM " + NamesTable + " WHERE " + NamesTable + " MATCH @q LIMIT " + (MaxCandidates + 1).ToString(CultureInfo.InvariantCulture), q, ct).ConfigureAwait(false);
         }
 
