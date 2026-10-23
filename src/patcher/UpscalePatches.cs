@@ -283,6 +283,26 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 logger?.LogWarning(ex, "JellyfinPlus: the library tag filter patch could not be installed. Stock library listing is unaffected.");
             }
 
+            // List sort keys: seeded Random (jpListSeed) and recently edited (jpSortKey) on /Items listings.
+            // ORDER BY only, never a Where. Own try/catch.
+            try
+            {
+                ListSortPatches.Apply(harmony, logger);
+                if (ListSortPatches.Available)
+                {
+                    applied.Add("list sort (seeded random, recently edited)");
+                }
+                else
+                {
+                    failed.Add("list sort (random re-rolls per page, as stock does)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add("list sort (random re-rolls per page, as stock does)");
+                logger?.LogWarning(ex, "JellyfinPlus: the list sort patch could not be installed. Stock sorting is unaffected.");
+            }
+
             // Filter key cache: /Items/Filters and /Items/Filters2 answered from a table in jellyfin.db when
             // that is safe, stock otherwise. Own try/catch; with the cache layer off Jellyfin serves stock.
             try

@@ -4,6 +4,7 @@ import { wrapActionSheet } from './action-sheet.js';
 import { notePlaybackManager } from './live-apply.js';
 import { noteQueryClient } from './search-exclude.js';
 import { noteCardBuilder } from './detail-related.js';
+import { noteListView, noteSortMenu } from './list-sort.js';
 
 function wrapChunkModules(chunk) {
     try {
@@ -34,6 +35,8 @@ function wrapChunkModules(chunk) {
                         notePlaybackManager(exports);
                         noteQueryClient(exports);
                         noteCardBuilder(exports);
+                        noteListView(exports);
+                        noteSortMenu(exports);
                     }
                 } catch (err) {
                     log('module wrap failed', err);
