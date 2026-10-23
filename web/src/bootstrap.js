@@ -34,6 +34,7 @@ import { installTagAutocomplete } from './controller/tag-autocomplete.js';
 import { installSearchCensus } from './controller/search-census.js';
 import { installLibraryFilterHooks } from './controller/library-filters.js';
 import { installLibraryFilterPanel } from './view/library-filter-panel.js';
+import { installQuickTags } from './view/quick-tags.js';
 import { installLibraryGrid } from './view/library-grid.js';
 import { installLibraryLanding } from './controller/library-landing.js';
 import { installCardBadges } from './view/card-badges.js';
@@ -79,6 +80,8 @@ function feature(name, install) {
         feature('play-all fix', installPlayAllFix);
         feature('library filter hooks', installLibraryFilterHooks);
         feature('library filter panel', installLibraryFilterPanel);
+        // Quick tag chips above library lists; the picks ride in Filters.Tags markers rewritten by the hooks above.
+        feature('quick tags', installQuickTags);
         feature('library grid', installLibraryGrid);
         feature('library landing', installLibraryLanding);
         feature('list requests', installListRequests);

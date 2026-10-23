@@ -1,6 +1,7 @@
 import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
 import { openSheet, closeSheet } from '../view/sheet.js';
+import { openQuickTagsEditor } from '../view/quick-tags-editor.js';
 import { libraryHref, libraryIcon } from '../model/nav-routes.js';
 import { viewsCache } from './library-landing.js';
 import { selectableCards, enterSelectMode } from './select-mode.js';
@@ -125,6 +126,8 @@ export function openMoreSheet(opener, onClose) {
     try {
         if (selectableCards().length) { list.appendChild(row('checklist', 'Select items', null, enterSelectMode)); }
     } catch (e) { /* select mode absent: row omitted */ }
+    // The viewer's own one-tap tag filters (model/quick-tags.js); synced across devices by prefs-sync.
+    list.appendChild(row('filter_alt', 'Quick filters', null, function () { openQuickTagsEditor(); }));
     var dash = row('dashboard', 'Dashboard', '#/dashboard');
     var theme = row('palette', 'Jellyfin Plus look: ' + (themeOff() ? 'Stock' : 'On'), null, toggleTheme);
     list.appendChild(theme);

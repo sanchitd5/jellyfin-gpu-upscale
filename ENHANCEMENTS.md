@@ -335,6 +335,31 @@ tag nothing has: an empty list, not a wrong one.
 **Server side** (`src/patcher/LibraryFilterPatches.cs`, section 7.4). `excludeTagNames` is an exact
 match on the cleaned tag name, unlike the search page's substring `excludeTags`.
 
+**Quick tag filters** (per user; `web/src/view/quick-tags.js`, `view/quick-tags-editor.js`,
+`controller/quick-tags.js`, `model/quick-tags.js`; server part is only `jpTagAnyOf`, section 7.4). Each
+viewer builds their own one-tap tag groups in the client. A group is a name plus either a list of tags
+or a tag PREFIX (every tag starting with it is a chip, labelled with the rest of its name). Picked chips
+of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
+
+- Where: a chip row above the grid on the modern library tabs (not artists / studios, TV, or without
+  groups: with none it is one small "+ Add quick filters" chip), and a section per group in the search
+  Sort & filter sheet (the picks are active-filter chips; each group counts once in the badge). The row
+  ends in a ⚙ chip, and the More sheet has a "Quick filters" row, both opening the editor in the shared sheet.
+- Editor: add, rename, reorder and remove groups; tags are found with a search box answered by the
+  server's tag window (`jpTagQuery`, 20 at a time), never the whole list; a prefix shows a live preview of
+  the tags that start with it. Saved on Save only. At most 10 groups, 30 tags each, 14,000 stored characters.
+- Storage: `jellyfinPlus.quickTags` (compact JSON) and `jellyfinPlus.quickTagsAuto`, both mirrored to
+  `DisplayPreferences.CustomPrefs` by `prefs-sync` (section 10). Picks: on library lists as `a` markers in
+  the tab's `Filters.Tags` (persisted per library tab, cleared by the stock Reset, counted by the stock
+  filter dot, rewritten to `jpTagAnyOf` with `excludeTagNames`; infinite scroll replays the page's own
+  request so they ride along); on search inside the committed search state. Picks for a group that no
+  longer exists are cleared, so nothing invisible filters.
+- Suggested ("auto") groups: `registerGroupSource(fn(parentId) -> Promise<[{name, prefix | tags, id?,
+  kind?}]>)` in `controller/quick-tags.js` plugs in a source (none by default). Suggestions render like
+  the viewer's groups, marked "auto"; in the editor each can be pinned (copied into the viewer's own
+  groups, then editable), hidden, or renamed (choices in `jellyfinPlus.quickTagsAuto`, at most 50 each).
+  Picks are not pruned until every source has answered.
+
 **List pages: sort and paging** (`web/src/controller/list-requests.js`, `web/src/controller/list-sort.js`,
 models `web/src/model/list-requests.js` and `list-sort.js`; server `src/patcher/ListSortPatches.cs`, section 7.8).
 
@@ -972,6 +997,11 @@ sees no change.
   sd is width above 0 and under 1200; hd is 1200 or more and not 4K; 4k is width 3800 or more or height
   2100 or more; an item's resolution is the best any of its versions offers and a folder answers on its
   children. Malformed values are ignored.
+- `jpTagAnyOf` (repeatable, one value per group, tag names joined by `|`): the item must carry at least
+  one tag of EACH group (OR inside a group, AND between groups), compared on the cleaned value like stock
+  `tags`. At most 10 groups of 100 names; a name over 200 characters is dropped; a group with no usable
+  name, and an empty or whitespace value, is ignored (stock result). Proved on a copy of the real
+  database: equal to an SQL ground truth for (A or B) and (C), always a subset of the unfiltered result.
 - It can only add `Where` clauses, never widen a result, and user-access filtering is a separate stock
   step on the same query. Fail-soft: an exception leaves the query as stock built it (logged once).
 
@@ -1200,6 +1230,7 @@ server without the plugin sees no error.
 | `excludeTags` | Comma- or pipe-separated substrings. Drop tag matches whose tag contains one, and name matches with any such tag. At most 20 terms of 100 characters. | Search: `SqlSearchProvider.SearchAsync` (item search, `/Search/Hints`); `/JellyfinPlus/Search/Facets` | `search-exclude.js` (`markSearchUrl`), `model/search-filters.js` (`facetPairs`) |
 | `excludeTagNames` | Exact tag names (cleaned), one per parameter value, verbatim so a name may contain commas. Drop items carrying any. At most 100 of 200 characters. | `/Items` and `/Search/Facets` through `TranslateQuery`; also triggers search pool widening | `model/library-filter-marks.js` (library popover). The search sheet does not send it |
 | `tagMatch` | `all` makes stock's `tags` list an AND (needs 2+ tags) | Same as above | `library-filter-marks.js`, `model/search-filters.js` |
+| `jpTagAnyOf` | One value per quick tag group that has a pick: the picked tag names joined by `\|`. Items must carry at least one tag of each value. At most 10 values of 100 names of 200 characters; malformed values are ignored | `/Items` and `/Search/Facets` through `TranslateQuery` (`LibraryFilterPatches.cs`) | `model/library-filter-marks.js` (library lists, from `a` markers), `model/search-filters.js` (`filterPairs`) |
 | `jpTagLimit` | Return at most this many tags (1 to 5000) from `/Items/Filters` or `/Items/Filters2`; the match count comes back in header `X-JellyfinPlus-TagTotal` | `FilterController` postfixes (`FilterCachePatches.cs`) | `controller/tag-window.js`, `library-filters.js`, `controller/tag-autocomplete.js` (through `tag-window.js`) |
 | `jpTagQuery` | Return only tags containing this text (case- and diacritic-insensitive) | Same | `controller/tag-window.js`, `controller/tag-autocomplete.js` (through `tag-window.js`) |
 | `jpTagOrder` | `count`: order `/Items/Filters` tags most-used first (needs the filter cache; header `X-JellyfinPlus-TagOrder` reports `count` or `name`) | `FilterController` postfixes (`FilterCachePatches.cs`) | none yet |
@@ -1249,6 +1280,8 @@ keys once.
 | `jellyfinPlus.cardBadges` | `off` switches the card badges off (read at load; never written by the script) | `controller/card-data.js`, `view/card-badges.js` |
 | `jellyfinPlus.mobileTheme` | `off` returns every visual change to stock and sets `html.jp-theme-off`; `light` forces the light scheme (read at load; never written by the script) | `view/mobile-theme.js` |
 | `jellyfinPlus.imagePreload` | `off` switches the image look-ahead off (read at load; never written by the script) | `controller/image-preload.js` |
+| `jellyfinPlus.quickTags` | JSON `[{n: name, t: [tags]} \| {n: name, p: prefix}]`: the viewer's quick tag groups. Synced | `model/quick-tags.js`, `controller/quick-tags.js` |
+| `jellyfinPlus.quickTagsAuto` | JSON `{h: [ids], r: {id: name}}`: suggested groups the viewer hid or renamed. Synced | same |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
 | `jellyfinPlusPlaybackRate` | The saved playback speed, a number from 0.25 to 4; absent means 1x | `controller/player-speed.js` |
 | `jellyfinPlusBrightness` | The swipe brightness, 0.3 to 1.5; absent means 1 (no filter) | `controller/player-actions.js` |
@@ -1262,7 +1295,8 @@ Browser `sessionStorage` (per tab, gone when the tab closes; also in try/catch):
 | `jellyfinPlus.detailNav` | JSON `{v:1, src, ids}`: the route of the list a card was last opened from and the ids of up to 1000 consecutive cards (32 hex characters each, about 35 KB at most), for the details page's previous / next buttons | `controller/detail-nav.js`, `model/detail-nav.js` |
 | `jellyfinPlus.syncMeta` | JSON `{userId: {localKey: ms}}`: when this device last changed each synced key, per user | `controller/prefs-sync.js` |
 
-Synced keys: `jellyfinPlusPrefs` (without `pos`), `jellyfinPlus.searchPageSize` and `jellyfinPlus.searchPaging`
+Synced keys: `jellyfinPlusPrefs` (without `pos`), `jellyfinPlus.searchPageSize`, `jellyfinPlus.searchPaging`,
+`jellyfinPlus.quickTags` and `jellyfinPlus.quickTagsAuto`
 are mirrored to the server (section 11); `controller/prefs-sync.js` watches writes to them through a wrapper
 on `Storage.prototype.setItem` / `removeItem` (the original always runs first).
 jellyfin-web's own `userSettings` also keeps a copy of each synced value under `<userId>-<name>` in
