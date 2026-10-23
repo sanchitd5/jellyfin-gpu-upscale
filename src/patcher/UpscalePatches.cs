@@ -361,6 +361,30 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 logger?.LogWarning(ex, "JellyfinPlus: the scan timing patch could not be installed. Stock behaviour is unaffected.");
             }
 
+            // Folder images: link the child image instead of copying it, plus the write guard that
+            // keeps Jellyfin from ever writing through such a link. Own try/catch.
+            try
+            {
+                FolderImageLinkPatches.Apply(harmony, logger);
+                if (FolderImageLinkPatches.Available)
+                {
+                    applied.Add("folder image links");
+                }
+                else
+                {
+                    failed.Add(FolderImageLinkPatches.GuardActive
+                        ? "folder image links (write guard only; new folder images are copies)"
+                        : "folder image links (folder images are copies, as stock)");
+                }
+            }
+            catch (Exception ex)
+            {
+                failed.Add(FolderImageLinkPatches.GuardActive
+                    ? "folder image links (write guard only; new folder images are copies)"
+                    : "folder image links (folder images are copies, as stock)");
+                logger?.LogWarning(ex, "JellyfinPlus: the folder image link patch could not be installed. Folder images are copied, as stock.");
+            }
+
             // MediaInfoHelper lives in Jellyfin.Api, a different assembly from the core targets, and
             // is resolved BY NAME so that the patcher does not need a compile-time reference to a
             // web-API assembly it would then be version-pinned to.

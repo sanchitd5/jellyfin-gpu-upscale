@@ -33,12 +33,14 @@ Layout:
 ```
 src/                    plugin assembly (loads into Jellyfin's collectible ALC): plugin, controllers
                         (UpscaleController, SearchFacetsController, LibraryCensusController),
-                        hosted/scheduled/post-scan services (FilterCache.cs, FtsIndex.cs)
+                        hosted/scheduled/post-scan services (FilterCache.cs, FtsIndex.cs,
+                        FolderImageLinkTasks.cs)
 src/patcher/            patcher assembly (loads into the DEFAULT ALC, this is where Harmony lives):
                         transcode patches (UpscalePatches/SwapPatches), search (SearchPatches,
                         SearchSortPatches, SearchDeepPagePatches, SearchWildcard, ServerTimingPatches),
                         library (LibraryFilterPatches, FilterCacheEngine/Patches, FtsIndexEngine,
-                        SimilarPatches), ScanTimingPatches (measurement only)
+                        SimilarPatches), ScanTimingPatches (measurement only),
+                        FolderImageLinkPatches (folder covers link, ImageSaver write guard)
 src/Configuration/      settings class + the dashboard page
 web/src/                real ES modules (source); web/jellyfin-plus.js is the BUILT, gitignored
                         bundle of it (esbuild, scripts/build-web-panel.sh) - the injected browser

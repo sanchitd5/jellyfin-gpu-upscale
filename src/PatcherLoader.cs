@@ -161,6 +161,24 @@ namespace Jellyfin.Plugin.Plus
             }
         }
 
+        public static Task<string> FolderImageLink(bool dryRun, IProgress<double> progress, CancellationToken cancellationToken)
+        {
+            MethodInfo method = _host?.GetMethod("FolderImageLink");
+            if (method == null)
+            {
+                return Task.FromException<string>(new InvalidOperationException("Jellyfin Plus: the patcher is not loaded, so folder images cannot be linked."));
+            }
+
+            try
+            {
+                return (Task<string>)method.Invoke(null, new object[] { dryRun, progress, cancellationToken });
+            }
+            catch (TargetInvocationException ex)
+            {
+                return Task.FromException<string>(ex.InnerException ?? ex);
+            }
+        }
+
         public static Task FilterCacheRebuild(bool force, IProgress<double> progress, CancellationToken cancellationToken)
         {
             MethodInfo method = _host?.GetMethod("FilterCacheRebuild");

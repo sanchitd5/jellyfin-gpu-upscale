@@ -68,6 +68,13 @@ namespace Jellyfin.Plugin.Plus.Patcher
         public static string FilterCacheStatusJson() => FilterCacheEngine.StatusJson();
 
         /// <summary>
+        /// Replaces folder-cover copies with links to the identical child image (nothing written when
+        /// <paramref name="dryRun"/>). Completes with a JSON summary; faults if the write guard is absent.
+        /// </summary>
+        public static Task<string> FolderImageLink(bool dryRun, object progress, CancellationToken cancellationToken)
+            => FolderImageLinkPatches.ConvertAsync(dryRun, progress as IProgress<double>, cancellationToken);
+
+        /// <summary>
         /// The levels this server can actually deliver right now, so the injected player menu can
         /// be built from what exists instead of from a list baked into the script. A level whose
         /// shader file is not installed is not listed, and therefore is not offered.

@@ -75,6 +75,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Tag autocomplete in the metadata editor | Client | The tag prompt suggests existing tags, accepts "a, b, c" as three tags and refuses duplicates | On, no switch (not on TV) |
 | Tag counts and count order on `/Items/Filters` | Server patch | `jpTagOrder=count` orders the tag list most-used first; `jpTagCounts=1` adds the counts in a header | Only when the request sends the parameter; counts only from the filter cache (section 7.5) |
 | Tag management (config page) | Server route + config page | Dashboard, Plugins, Jellyfin Plus: list tags with item counts, rename, merge, delete across items, with a dry run first | Administrators only; nothing is written without Apply (section 6) |
+| Folder covers link instead of copy | Server patch + scheduled tasks | A folder's generated cover is a symlink to the child image it shows, not a 2-3 MB copy of it in `metadata/library`; two tasks convert existing copies ("Jellyfin Plus: link folder images instead of copies", and a "(dry run)" that only counts) | On, no switch; falls back to the stock copy (section 7.9) |
 | Maintenance task buttons (config page) | Config page | Start "Scan people" and "Optimize database" from the plugin page | Administrators only; stock endpoints (section 6) |
 | Preference sync across devices | Client | Enhance panel choices and search paging choices follow the viewer to other browsers | On, no switch; falls back to localStorage alone if jellyfin-web's settings object is not found (section 6) |
 
@@ -1046,6 +1047,83 @@ overload is not patched. It replaces the returned key expression and nothing els
   path, a search term and other sorts. Cost: a page of 100 over 47,621 rows is about 88 ms seeded against 56 ms
   for stock random (a string key sorts slower than a float). Not exercised: the live HTTP route end to end.
 
+### 7.9 Folder covers: `MediaBrowser.Providers.Manager.ImageSaver.SetImagePath` and `SaveImageToLocation` (`FolderImageLinkPatches.cs`)
+
+Two prefixes (optional "folder image links"), both on `ImageSaver`, which is non-generic and resolved by name
+and exact signature.
+
+**Why.** On the live library, 19,094 of the 20,342 `poster.jpg` files under `metadata/library` (40 GB) were
+the Primary image of a `Folder` (one per recording day). Each was a byte-for-byte copy of one child's contact
+sheet. Stock makes them in `FolderImageProvider`: `BaseFolderImageProvider<T>.GetItemsWithImages` picks the
+first child with a Primary (recursive, `IsFolder` then `SortName` ascending, `Limit = 1`),
+`BaseDynamicImageProvider<T>.CreateSingleImage` `File.Copy`s it to a temp file, and
+`ProviderManager.SaveImage` streams that temp file through `ImageSaver` into the metadata directory.
+
+**Why not `CreateSingleImage`.** Its output is only the temp file. `ImageSaver` then reads it and writes the bytes
+with its own `FileStream`, so a link at the temp path would still end up as a copy. It is also declared on a
+generic base, which is where `MetadataService<,>.RefreshMetadata` could not be patched (section 7.3). `ImageSaver`
+is a plain class and every image Jellyfin saves goes through it.
+
+- **Link: `SetImagePath(BaseItem, ImageType, int?, string)`, prefix.** This runs after the bytes are written and
+  before the image is recorded. Only an item whose exact type is `Folder` qualifies, and only its Primary
+  (index 0) at a path under the item's own internal metadata directory. The prefix runs stock's child pick
+  again. It links only when that child's image resolves to an existing file outside Jellyfin's program data,
+  data, cache, image cache, temp, metadata, trickplay, log, configuration, plugins, program and web directories
+  (from `IServerApplicationPaths`), has the same size, and has the same bytes (full streaming compare). The
+  link is created under a temp name beside the copy and renamed over it. The original then records
+  `FileSystem.GetFileInfo(link)`, which follows the link, so the stored `DateModified` is the target's mtime.
+  In every other case, on any exception, or when the write guard is missing, the stock copy stays.
+- **Write guard: `SaveImageToLocation(Stream, string, CancellationToken)`, prefix.** `ImageSaver` opens its
+  destination with `FileMode.Create`, which follows a symlink and truncates the target. Without the guard,
+  regenerating a linked cover would write into the library's contact sheet, or replace it with another sheet
+  if the child pick had changed. When the destination is a symlink under the internal metadata directory, the
+  guard deletes the link (never its target) before stock writes. If the link cannot be deleted, the write is
+  refused with an `IOException`. Destinations outside the metadata directory, and regular files, are left to
+  stock. The guard is installed first. The link patch is installed only if the guard is live, checks for it
+  on every call, and so does the conversion task. "Live" is read from Harmony's patch table, not from a flag.
+
+**Regeneration.** `HasChangedByDate` compares the stored `DateModified` with `FileSystem.GetLastWriteTimeUtc(path)`.
+`ManagedFileSystem` resolves both through the link to the target, so a link is exactly as stable as a copy.
+It is not regenerated on every refresh. When the target is modified, the dates differ and Jellyfin regenerates
+(the guard removes the link, stock writes a copy, the link patch relinks). When the target is deleted, the
+dangling link reports as missing and its date differs, so Jellyfin regenerates from the next child rather than
+serve a broken image. The link's own mtime is deliberately left alone. `LibraryManager.UpdateImagesAsync`
+re-reads size, blurhash and date through the link.
+
+**Serving.** `ImageController` serves an unresized original with `PhysicalFile(path, type)`. Range processing
+is off, and ASP.NET resolves the link for the length and the bytes. `ImageProcessor` checks `File.Exists`,
+which follows the link, and `SkiaEncoder` opens the path natively. Both read the target.
+
+**Conversion tasks** (Scheduled Tasks, Library): "Jellyfin Plus: link folder images instead of copies" and
+"... (dry run)". No default triggers. They go through every exact `Folder` whose Primary is a regular file
+(not already a link) under its metadata directory. Candidates are stock's child pick first, then every file
+with the same extension in the folder's own directory, in ordinal order. The first candidate that passes the
+checks above (outside Jellyfin's directories, same size, same bytes) replaces the copy with a link at the same
+path, so the database row stays valid. `UpdateImagesAsync` then stores the target's date, so the next refresh
+does not regenerate. The tasks run two folders at a time, because the source is on FUSE. The dry run makes
+every check, including the byte compare, so it reads as much as the real run and writes nothing. Both log
+one line: folders scanned, linked (or "would be linked"), MiB freed, and skipped by reason (`no-image`,
+`remote-image`, `not-in-metadata`, `already-linked`, `image-missing`, `no-source`, `source-missing`,
+`source-in-jellyfin-dirs`, `size-differs`, `content-differs`, `error`). A re-run is a no-op (`already-linked`).
+The real run refuses to start, changing nothing, if the write guard is not installed. Only one run at a time.
+
+**Verified** against the 12.3 DLLs in a harness (synthetic images on temp directories). The harness uses the
+real `FolderImageProvider`, `ImageSaver`, `ManagedFileSystem` and `SkiaEncoder` with a faked library manager:
+- Both targets patch.
+- A new cover is a link to the stock pick, and the stored date is the target's.
+- `HasChanged` is false after a save and after a regeneration, and the source's bytes and mtime are unchanged.
+- Without the guard, a plain `FileMode.Create` truncates a link's target (the negative control).
+- An undeletable link refuses the write.
+- A modified target regenerates and settles. A deleted target regenerates from the next child.
+- The fallbacks stay copies: a `Folder` subclass, a source in the data directory, a link that cannot be
+  created, and no guard.
+- `PhysicalFile` serves the target's full bytes. Skia reads the size, cold-resizes to 300x200 and computes a
+  blurhash through the link.
+- On mixed fixtures, the conversion links identical copies (the stock pick and a sibling) and skips copies
+  whose size or last byte differs. The dry run writes nothing. A re-run is a no-op.
+
+Not exercised: a live server, the real library query (`GetItemList`/`GetItemIds` were faked), and FUSE.
+
 ## 8. Plugin HTTP routes
 
 All under the Jellyfin API root. "Administrator" is the `RequiresElevation` policy.
@@ -1164,6 +1242,7 @@ only, by Clip Up Next).
 | Plugin assembly | `/var/lib/jellyfin/plugins/JellyfinPlus_<version>/` | Same scripts |
 | Served client script | `/usr/share/jellyfin/web/jellyfin-plus.js`, plus a `<script defer src="jellyfin-plus.js?v=<10 hex of sha256>">` tag inserted first in `index.html`. Backups: `index.html.jellyfin-plus-orig` (pristine, taken once) and `index.html.jellyfin-plus-bak`. | `scripts/jellyfin-plus-webinject` (installed at `/usr/local/sbin/`). The apt hook `/etc/apt/apt.conf.d/99-jellyfin-plus` reruns it after package operations, because a jellyfin-web upgrade replaces `index.html`. The cache-buster is derived from the file's content. Build the bundle first with `scripts/build-web-panel.sh`. |
 | Shim sync file | `/etc/jellyfin-upscale.json`, only if it already exists | Rewritten on each settings change |
+| Folder cover links | Jellyfin's own `metadata/library/<xx>/<id>/poster.jpg` (Folder items only), now a symlink to a child image beside the media instead of a copy. Same path, so the database row is unchanged | Self-healing: Jellyfin regenerates a cover whose target changes or disappears. To turn every link back into a copy (needs the disk back, about 2 MB per folder), stop Jellyfin and run `find /var/lib/jellyfin/metadata/library -type l -name 'poster.*' -exec sh -c 'cp --remove-destination "$(readlink -f "$1")" "$1"' _ {} \;` as the jellyfin user. Not exercised |
 
 ## 12. Known limits
 
@@ -1239,6 +1318,25 @@ Item pages and playback:
   item (or reload).
 - Card badges show the first two stored tags (a clip has 44 on average on the real library) and need a
   looked-up record, so a card shows nothing until it has been near the screen for about 150 ms.
+
+Folder covers (section 7.9):
+- A linked cover depends on the pool mount. While `/mnt/drivePool` is unmounted, links dangle: covers fail to
+  load, and a refresh in that window regenerates nothing (no child image exists) or drops the image. After
+  the pool remounts, the next refresh regenerates the covers as links. Nothing is lost, but a cover can be
+  missing until then.
+- The write guard is what stops Jellyfin writing through a link. If the patcher stops loading (for example a
+  Jellyfin upgrade that breaks the core patches), stock Jellyfin regenerating a linked cover would write
+  through the link: the same bytes when the pick is unchanged, but **another sheet's bytes** when the pick
+  has changed, and it would recreate a deleted target. Stock only regenerates when the target's date changes
+  or on "Replace all images". Before running Jellyfin without the patcher, convert the links back to copies
+  (section 11).
+- Only exact `Folder` items are linked. Box sets, albums, playlists, collection folders and videos keep stock
+  behaviour. Covers that "save artwork into media folders" writes beside the media are never linked.
+- `FileInfo.Length` on a link is the link's own size. Jellyfin's image route is unaffected (range processing
+  is off), but a range-enabled `PhysicalFile` through a link fails in ASP.NET's `SendFileFallback`. Nothing
+  in Jellyfin's image path does that today.
+- Each new folder cover costs one more read of the child image, for the byte compare. The conversion (and its
+  dry run) reads every candidate and every copy in full.
 
 Enhancement (from README.md, "Limitations and risks", and the code):
 - The patches match Jellyfin methods by name and can break on any Jellyfin upgrade; targets are pinned
