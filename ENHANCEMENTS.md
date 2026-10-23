@@ -37,6 +37,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Per-tag exclude on search | Both | "Exclude tags" box under the search field | On; clear the box to stop |
 | Search on submit | Client | Searching waits for Enter or the Search button | On, no switch (not on TV layouts) |
 | Search Sort and filter | Both | Sort by name, date, runtime, rating, random, play count, last played; filter by tag, cast and crew, studio, runtime, date added, resolution, watched, favourites, type | On; "Reset" in the sheet clears it |
+| Library date-added filter | Client (server `jpMinDateAdded`/`jpMaxDateAdded`) | "Date" chip on library tabs: Today, last 7 / 30 / 90 days, this year, or a custom From-To; presets roll | On, no switch; ✕ on the chip or the stock Reset clears it (not on TV layouts) |
 | Search-scoped Cast and Crew list | Both | The cast picker lists only people in the current results, with counts | On; falls back to a global people search if the route is missing |
 | Search paging, infinite scroll, virtualised chunks | Both | Page size choice and Prev/Next on desktop; infinite scroll on phones | On; the Paged/Infinite toggle on the results |
 | Search result grid | Client | Results as a vertical grid on phone and desktop | On, no switch (TV untouched) |
@@ -359,6 +360,21 @@ of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
   the viewer's groups, marked "auto"; in the editor each can be pinned (copied into the viewer's own
   groups, then editable), hidden, or renamed (choices in `jellyfinPlus.quickTagsAuto`, at most 50 each).
   Picks are not pruned until every source has answered.
+
+**Date added filter on library tabs** (`web/src/view/date-sheet.js`, the "Date" chip in `view/quick-tags.js`,
+pure part `model/date-added.js`; server part is only `jpMinDateAdded` / `jpMaxDateAdded`, section 7.4 - no
+server change). A "Date" chip leads the quick-filter row (also shown with no groups configured). It opens
+the shared sheet: Any time, Today, Last 7 days, Last 30 days, Last 90 days, This year, and a Custom section
+with native From and To date inputs (Apply; either side may be empty; a reversed pair is swapped).
+
+- Presets are stored by name and worked out when each request is built, so "Last 7 days" keeps rolling;
+  Custom stores fixed days. All days are UTC and inclusive, like the server. Active: the chip shows the
+  choice ("Last 7 days", "1 Oct - 15 Oct", years added when not this year) with a ✕ that clears it.
+- Rides in `Filters.Tags` as one `d` marker (`model/library-filter-marks.js`; payload `7d` or
+  `c:<from>~<to>`), so it persists per library tab, is cleared by the stock Reset, is counted by the stock
+  filter dot, and infinite scroll's follow-up pages replay the marked request and get the parameters from
+  the same fetch/XHR rewrite. An unreadable payload is dropped (no filter), not turned into a wrong one.
+- Same fail-soft and scope as the quick tag chips: modern library tabs only (not artists / studios, TV).
 
 **List pages: sort and paging** (`web/src/controller/list-requests.js`, `web/src/controller/list-sort.js`,
 models `web/src/model/list-requests.js` and `list-sort.js`; server `src/patcher/ListSortPatches.cs`, section 7.8).
@@ -1236,7 +1252,7 @@ server without the plugin sees no error.
 | `jpTagOrder` | `count`: order `/Items/Filters` tags most-used first (needs the filter cache; header `X-JellyfinPlus-TagOrder` reports `count` or `name`) | `FilterController` postfixes (`FilterCachePatches.cs`) | none yet |
 | `jpTagCounts` | `1`: add header `X-JellyfinPlus-TagCounts` (counts aligned with the returned tags, at most 1000 tags, cache path only) | Same | none yet |
 | `jpMinRuntime`, `jpMaxRuntime` | Whole minutes, inclusive, digits only | Same as above | `model/search-filters.js` (`filterPairs`) |
-| `jpMinDateAdded`, `jpMaxDateAdded` | `YYYY-MM-DD`, UTC day, inclusive | Same | `model/search-filters.js` |
+| `jpMinDateAdded`, `jpMaxDateAdded` | `YYYY-MM-DD`, UTC day, inclusive | Same | `model/search-filters.js` (search), `model/library-filter-marks.js` + `model/date-added.js` (library lists, from the `d` marker) |
 | `jpResolution` | Comma list of `sd`, `hd`, `4k` | Same | `model/search-filters.js` |
 | `jpSeed` | Positive integer seeding the `Random` sort; same seed and ids give the same order | `SearchManager.GetSearchResultsAsync` (needs `sortBy=Random`) | `model/search-filters.js`; a new seed on each Apply |
 | `jpListSeed` | Positive integer seeding the `Random` sort of a library listing (not a search; search uses `jpSeed`); same seed and same ids give the same order | `OrderMapper.MapOrderByField` postfix (`ListSortPatches.cs`), `/Items` only | `controller/list-requests.js` (one seed per list per page load) |

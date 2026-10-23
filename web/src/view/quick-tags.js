@@ -5,6 +5,8 @@ import { chipsFor, isSelected, toggleSelection, selectedIn, pruneSelection } fro
 import { findFilterContext, readFilters, updateTagState } from '../controller/library-filters.js';
 import { groupsFor, namesNow, resolveNames, onGroupsChanged } from '../controller/quick-tags.js';
 import { openQuickTagsEditor } from './quick-tags-editor.js';
+import { openDateSheet } from './date-sheet.js';
+import { encode as encodeDate, decode as decodeDate, labelOf } from '../model/date-added.js';
 
 /*
  * QUICK TAG CHIPS ABOVE A LIBRARY LIST (the search page has its own section in the Sort & filter sheet).
@@ -41,6 +43,7 @@ var CSS = [
     '.jpQtChip { flex: none; min-height: var(--jp-tap, 44px); box-sizing: border-box; padding: 0 1em; border-radius: 999px;'
         + ' border: 1px solid var(--jp-border, rgba(128, 128, 128, 0.55)); background: transparent; color: inherit; font: inherit;'
         + ' cursor: pointer; -webkit-tap-highlight-color: transparent; }',
+    '.jpQtDateX { padding: 0; min-width: var(--jp-tap, 44px); margin-left: -0.3em; }',
     '.jpQtAuto { font-size: 0.8em; opacity: 0.7; font-style: italic; }',
     '.jpQtEdit { opacity: 0.75; border-style: dashed; }',
     '.jpQtChip:focus-visible { outline: 2px solid ' + ACCENT + '; outline-offset: 1px; }',
@@ -80,8 +83,8 @@ function chipsOfGroup(group, selected) {
     return chipsFor(group, namesNow(group), selected);
 }
 
-function render(row, ctx, groups, picks) {
-    var sig = ctx.viewType + '|' + ctx.parentId + '|' + groups.length + '|' + groups.map(function (g) {
+function render(row, ctx, groups, picks, added) {
+    var sig = ctx.viewType + '|' + ctx.parentId + '|' + (added ? labelOf(added) : '-') + '|' + groups.length + '|' + groups.map(function (g) {
         return (g.auto ? 'A:' : '') + g.name + '=' + chipsOfGroup(g, selectedIn(picks, g.name)).map(function (c) {
             return c.tag + (isSelected(picks, g.name, c.tag) ? '*' : '');
         }).join(',');
@@ -129,7 +132,26 @@ function render(row, ctx, groups, picks) {
         host = el('div', 'jpQtChips');
         solo.appendChild(host);
         row.appendChild(solo);
+        lines = [host];
     }
+
+    // The Date chip leads the first line; with a range set it carries its label and a clear button.
+    var first = lines[0];
+    var date = el('button', 'jpQtChip jpQtDate', added ? labelOf(added) : 'Date');
+    date.type = 'button';
+    date.setAttribute('data-date', '1');
+    date.setAttribute('aria-pressed', added ? 'true' : 'false');
+    date.setAttribute('aria-label', added ? 'Date added: ' + labelOf(added) : 'Filter by date added');
+    var lead = [date];
+    if (added) {
+        var clear = el('button', 'jpQtChip jpQtDateX', '✕');
+        clear.type = 'button';
+        clear.setAttribute('data-date-clear', '1');
+        clear.setAttribute('aria-label', 'Clear date filter');
+        lead.push(clear);
+    }
+
+    lead.reverse().forEach(function (n) { first.insertBefore(n, first.firstChild); });
 
     var edit = el('button', 'jpQtChip jpQtEdit', groups.length ? '⚙' : '+ Add quick filters');
     edit.type = 'button';
@@ -142,6 +164,26 @@ function onClick(e) {
     try {
         var b = e.target && e.target.closest ? e.target.closest('.jpQtChip') : null;
         if (!b) {
+            return;
+        }
+
+        if (b.getAttribute('data-date') || b.getAttribute('data-date-clear')) {
+            var dctx = tabContext();
+            if (!dctx) {
+                return;
+            }
+
+            var setDate = function (state) {
+                updateTagState(dctx, function (p) { p.added = encodeDate(state); });
+                schedule(0);
+                setTimeout(function () { schedule(0); }, 150);
+            };
+            if (b.getAttribute('data-date-clear')) {
+                setDate(null);
+            } else {
+                openDateSheet(decodeDate(parseTags(readFilters(dctx).Tags).added), setDate, b);
+            }
+
             return;
         }
 
@@ -183,7 +225,9 @@ function scan() {
 
     // A pick for a group that is no longer configured would filter with no chip to show for it. Not while a
     // suggestion source has yet to answer: its groups are missing from the list, not removed.
-    var picks = parseTags(readFilters(ctx).Tags).any;
+    var parsed = parseTags(readFilters(ctx).Tags);
+    var picks = parsed.any;
+    var added = decodeDate(parsed.added);
     var live = found.ready ? pruneSelection(picks, groups) : picks;
     if (live.length !== picks.length) {
         updateTagState(ctx, function (p) { p.any = pruneSelection(p.any, groups); });
@@ -206,7 +250,7 @@ function scan() {
             resolveNames(g).then(function () { schedule(0); });
         }
     });
-    render(row, ctx, groups, picks);
+    render(row, ctx, groups, picks, added);
 }
 
 /* At most one scan per 250 ms; a burst of React mutations costs one. */

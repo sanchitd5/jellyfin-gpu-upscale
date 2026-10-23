@@ -1,4 +1,5 @@
 import { SEP, anyOfValues } from './quick-tags.js';
+import { encode as encodeDate, decode as decodeDate, paramPairs } from './date-added.js';
 
 /*
  * THE LIBRARY FILTER'S EXTRA STATE, CARRIED INSIDE jellyfin-web's OWN FILTER STATE.
@@ -19,6 +20,8 @@ import { SEP, anyOfValues } from './quick-tags.js';
  *   MARK all: END           -> tagMatch=all
  *   MARK p:<person id> END  -> personIds=<id>[,<id>...]
  *   MARK a:<group> SEP <tag> END -> jpTagAnyOf=<tag>[|<tag>...]   (one parameter per group: quick tag chips)
+ *   MARK d:<date state> END -> jpMinDateAdded / jpMaxDateAdded      (the Date chip; model/date-added.js, worked
+ *                              out when the request is built, so a relative preset keeps rolling)
  *
  * Every marker ends in END, so it is self-delimiting however the array was joined into the URL
  * (the SDK uses `|`, the legacy API client a comma): a tag name may contain either.
@@ -46,7 +49,7 @@ export function isMark(s) {
 
 /* A Filters.Tags array, split into the real tags and the state riding along with them. */
 export function parseTags(list) {
-    var out = { tags: [], exclude: [], people: [], any: [], all: false };
+    var out = { tags: [], exclude: [], people: [], any: [], all: false, added: '' };
     (Array.isArray(list) ? list : []).forEach(function (t) {
         if (typeof t !== 'string') {
             return;
@@ -68,6 +71,8 @@ export function parseTags(list) {
             out.people.push(m[2]);
         } else if (m[1] === 'all') {
             out.all = true;
+        } else if (m[1] === 'd') {
+            out.added = encodeDate(decodeDate(m[2]));
         } else if (m[1] === 'a') {
             var at = m[2].indexOf(SEP);
             if (at > 0 && at < m[2].length - 1) {
@@ -84,6 +89,7 @@ export function buildTags(p) {
         .concat(p.exclude.map(function (n) { return mark('x', n); }))
         .concat(p.people.map(function (id) { return mark('p', id); }))
         .concat((p.any || []).map(function (a) { return mark('a', a.group + SEP + a.tag); }))
+        .concat(p.added && encodeDate(decodeDate(p.added)) ? [mark('d', encodeDate(decodeDate(p.added)))] : [])
         .concat(p.all ? [mark('all')] : []);
 }
 
@@ -100,7 +106,7 @@ function hasMarks(url) {
  * common case costs one indexOf. On a path ending in /Items the markers become the parameters
  * above; on any other path they are simply removed.
  */
-export function rewriteLibraryUrl(url) {
+export function rewriteLibraryUrl(url, now) {
     if (typeof url !== 'string' || !hasMarks(url)) {
         return url;
     }
@@ -141,6 +147,7 @@ export function rewriteLibraryUrl(url) {
         var people = [];
         var any = [];
         var all = false;
+        var added = '';
         var real = [];
         tagValues.forEach(function (value) {
             var removed = false;
@@ -155,6 +162,8 @@ export function rewriteLibraryUrl(url) {
                     if (cut > 0 && cut < payload.length - 1) {
                         any.push({ group: payload.slice(0, cut), tag: payload.slice(cut + 1) });
                     }
+                } else if (kind === 'd') {
+                    added = payload;
                 } else if (kind === 'all') {
                     all = true;
                 }
@@ -184,6 +193,7 @@ export function rewriteLibraryUrl(url) {
             }
 
             anyOfValues(any).forEach(function (v) { extra.push('jpTagAnyOf=' + encodeURIComponent(v)); });
+            paramPairs(added, now).forEach(function (kv) { extra.push(kv[0] + '=' + kv[1]); });
         }
 
         var at = tagsAt === -1 ? kept.length : tagsAt;
