@@ -42,29 +42,47 @@ var CONTAINER_SELECTOR = '.itemsContainer, [is="emby-itemscontainer"]';
 // Cards that are not library items a user can favourite / open a context menu for.
 var SKIP_TYPES = ['Program', 'Timer', 'SeriesTimer', 'Channel', 'TvChannel', 'CollectionFolder', 'UserView'];
 
-var TAP_TARGET = '40px';
+var TAP_TARGET = '44px';
+var LIST_SELECTOR = '.listItem[data-id][data-serverid]';
+var STOCK_HEART = '[is="emby-ratingbutton"], .emby-ratingbutton';
+
+/*
+ * WHERE THE ROW SHOWS. Every non-TV layout: stock draws a heart only in the desktop hover overlay
+ * (and only on a phone-less layout), so the row is the card's always-visible heart on a phone, a
+ * tablet and a desktop alike. With the mobile theme off a desktop gets stock back; a phone keeps
+ * the row it has always had.
+ */
+var SHOWN = 'html:not(.layout-tv)';
+var OFF_DESKTOP = 'html.jp-theme-off:not(.layout-mobile)';
 
 var CSS = [
     '.' + ROW_CLASS + ' { display: none; }',
-    'html.layout-mobile .' + ROW_CLASS + ' {'
+    SHOWN + ' .' + ROW_CLASS + ' {'
         + ' display: flex; flex-wrap: wrap-reverse; justify-content: flex-end; align-items: flex-end;'
         + ' position: absolute; right: 0; bottom: 0; max-width: 100%; z-index: 2; pointer-events: none; }',
-    'html.layout-mobile .' + ROW_CLASS + ' button {'
+    OFF_DESKTOP + ' .' + ROW_CLASS + ' { display: none; }',
+    // A list row (.listItem, a flex row): the heart is its last flex item, not an overlay.
+    SHOWN + ' .' + ROW_CLASS + '.jpListHeart { position: static; flex: none; align-self: center; margin-left: auto; }',
+    SHOWN + ' .' + ROW_CLASS + ' [data-gpu-fav], ' + SHOWN + ' .' + ROW_CLASS + ' button {'
+        + ' display: flex; align-items: center; justify-content: center;'
         + ' pointer-events: auto; box-sizing: border-box; margin: 0; padding: 4px; border: 0;'
         + ' min-width: ' + TAP_TARGET + '; min-height: ' + TAP_TARGET + ';'
         + ' width: ' + TAP_TARGET + '; height: ' + TAP_TARGET + ';'
         + ' background: transparent; color: #fff; cursor: pointer; -webkit-tap-highlight-color: transparent; }',
-    'html.layout-mobile .' + ROW_CLASS + ' .jellyfinPlusDisc {'
+    SHOWN + ' .' + ROW_CLASS + ' .jellyfinPlusDisc {'
         + ' display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;'
         + ' border-radius: 50%; background: rgba(0,0,0,0.7); pointer-events: none; }',
-    'html.layout-mobile .' + ROW_CLASS + ' .material-icons {'
+    // On a list row the heart sits on the page's own background, not on a picture.
+    SHOWN + ' .' + ROW_CLASS + '.jpListHeart [data-gpu-fav] { color: inherit; }',
+    SHOWN + ' .' + ROW_CLASS + '.jpListHeart .jellyfinPlusDisc { background: transparent; }',
+    SHOWN + ' .' + ROW_CLASS + ' .material-icons {'
         + ' font-family: "Material Icons"; font-feature-settings: "liga"; font-size: 20px; line-height: 1;'
         + ' font-style: normal; letter-spacing: normal; text-transform: none; white-space: nowrap;'
         + ' -webkit-font-smoothing: antialiased; }',
-    'html.layout-mobile .' + ROW_CLASS + ' button[aria-pressed="true"] .material-icons { color: #ff4d6d; }',
-    // The row replaces the stock bottom-right overlay buttons (play, or more on some lists); both
-    // at once would sit on top of each other.
-    'html.layout-mobile .card[data-gpu-actions] .cardOverlayButton-br { display: none !important; }',
+    SHOWN + ' .' + ROW_CLASS + ' [aria-pressed="true"] .material-icons { color: #ff4d6d; }',
+    // The row replaces the stock bottom-right overlay buttons (play, favourite, more); both at once
+    // would sit on top of each other.
+    SHOWN + ' .card[data-gpu-actions] .cardOverlayButton-br { display: none !important; }',
     // Multi-select is active on this card: a tap there must select it, not favourite it.
     '.card:has(.withMultiSelect) .' + ROW_CLASS + ' { display: none !important; }',
 
@@ -80,13 +98,47 @@ var CSS = [
 // id -> boolean. The favourite state, learned from lookups and from the taps made here.
 var favState = new Map();
 
+/* Whether the row is drawn at all: any non-TV layout, except a desktop with the mobile theme off. */
 function isMobileLayout() {
-    return document.documentElement.classList.contains('layout-mobile');
+    var c = document.documentElement.classList;
+    return !c.contains('layout-tv') && (c.contains('layout-mobile') || !c.contains('jp-theme-off'));
+}
+
+/*
+ * Stock's own hearts (the desktop hover overlay's, a list row's) keep their state in
+ * data-isfavorite and two classes on the button. When the row's heart is tapped they are brought in
+ * step, and when one of them is tapped the row's follows (its click handler is ours to read, not to
+ * pre-empt: we only look at the attribute it sets once the server has answered).
+ */
+function syncStockHearts(id, fav) {
+    var list = document.querySelectorAll(STOCK_HEART);
+    for (var i = 0; i < list.length; i++) {
+        var b = list[i];
+        if (b.getAttribute('data-id') !== id) { continue; }
+        b.setAttribute('data-isfavorite', fav ? 'true' : 'false');
+        b.classList.toggle('ratingbutton-withrating', fav);
+        var icon = b.querySelector('.material-icons');
+        if (icon) { icon.classList.toggle('ratingbutton-icon-withrating', fav); }
+    }
+}
+
+function onStockHeartClick(e) {
+    var b = e.target && e.target.closest && e.target.closest(STOCK_HEART);
+    var id = b && b.getAttribute('data-id');
+    if (!id) { return; }
+    // The stock handler flips the attribute when the server's answer arrives.
+    setTimeout(function () {
+        var v = b.getAttribute('data-isfavorite');
+        if (v === 'true' || v === 'false') {
+            favState.set(id, v === 'true');
+            paintFavourite(id);
+        }
+    }, 600);
 }
 
 function paintFavourite(id) {
     var fav = favState.get(id) === true;
-    var buttons = document.querySelectorAll('.' + ROW_CLASS + ' button[data-gpu-fav="' + id + '"]');
+    var buttons = document.querySelectorAll('.' + ROW_CLASS + ' [data-gpu-fav="' + id + '"]');
     for (var i = 0; i < buttons.length; i++) {
         var b = buttons[i];
         b.setAttribute('aria-pressed', fav ? 'true' : 'false');
@@ -97,6 +149,8 @@ function paintFavourite(id) {
             icon.textContent = fav ? 'favorite' : 'favorite_border';
         }
     }
+
+    syncStockHearts(id, fav);
 }
 
 /* A looked-up record arrived (controller/card-data.js): adopt its favourite flag unless a tap set it. */
@@ -139,9 +193,22 @@ function onFavouriteTap(e) {
     });
 }
 
-function iconButton(icon, title) {
-    var b = el('button');
-    b.type = 'button';
+/*
+ * `asSpan`: a whole-row list item is itself a <button>, and a button inside a button does not get
+ * its own clicks in every browser, so the list heart is a role=button span there.
+ */
+function iconButton(icon, title, asSpan) {
+    var b = el(asSpan ? 'span' : 'button');
+    if (asSpan) {
+        b.setAttribute('role', 'button');
+        b.tabIndex = 0;
+        b.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { onFavouriteTap(e); }
+        });
+    } else {
+        b.type = 'button';
+    }
+
     b.title = title;
     b.setAttribute('aria-label', title);
     var disc = el('span', 'jellyfinPlusDisc');
@@ -218,6 +285,37 @@ function decorate(card) {
     }
 }
 
+/*
+ * A list row (.listItem, from listview.js) gets the heart when stock gave it none: stock draws its
+ * own emby-ratingbutton only for rows that are not whole-row buttons, so most phone lists have no
+ * heart at all. A row that already carries one is left alone. The tap is the card heart's
+ * (onFavouriteTap), so the state is shared with every other heart for the same item.
+ */
+function decorateRow(li) {
+    if (!li || li.nodeType !== 1 || !li.isConnected || !isMobileLayout() || !li.matches(LIST_SELECTOR)) {
+        return;
+    }
+
+    if (li.querySelector('.' + ROW_CLASS) || li.querySelector(STOCK_HEART)) {
+        return;
+    }
+
+    if (SKIP_TYPES.indexOf(li.getAttribute('data-type')) >= 0 || !sameServer(li.getAttribute('data-serverid'))) {
+        return;
+    }
+
+    var id = li.getAttribute('data-id');
+    var row = el('div', ROW_CLASS + ' jpListHeart');
+    var fav = iconButton('favorite_border', 'Add to favourites', true);
+    fav.setAttribute('data-gpu-fav', id);
+    fav.setAttribute('aria-pressed', 'false');
+    fav.addEventListener('click', onFavouriteTap);
+    row.appendChild(fav);
+    (li.querySelector(':scope > .listItem-content') || li).appendChild(row);
+    adopt(id, cardInfo(id));
+    watchCard(li);
+}
+
 var queue = [];
 var scheduled = false;
 
@@ -227,6 +325,19 @@ function drain() {
     queue = [];
     batch.forEach(function (node) {
         try {
+            if (node.matches && node.matches(LIST_SELECTOR)) {
+                decorateRow(node);
+            } else if (node.closest && node.closest(LIST_SELECTOR)) {
+                decorateRow(node.closest(LIST_SELECTOR));
+            }
+
+            if (node.querySelectorAll) {
+                var rows = node.querySelectorAll(LIST_SELECTOR);
+                for (var r = 0; r < rows.length; r++) {
+                    decorateRow(rows[r]);
+                }
+            }
+
             if (node.matches && node.matches(CARD_SELECTOR)) {
                 decorate(node);
             } else if (node.closest && node.closest(CARD_SELECTOR)) {
@@ -281,6 +392,7 @@ export function installCardActions() {
         });
         observer.observe(document.documentElement, { childList: true, subtree: true });
         onCardInfo(adopt);
+        document.addEventListener('click', onStockHeartClick, true);
 
         // The layout class can be applied after the first cards were drawn.
         new MutationObserver(function () {
