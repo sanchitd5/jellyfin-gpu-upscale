@@ -56,6 +56,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Tag and person chips on item pages | Client | Chips replace the one-line tag list (not on TV) | On, no switch |
 | Person and studio pages list Videos | Client | A "Videos" section appears on person and studio pages | On, no switch |
 | Poster zoom | Client | Tap the details poster to open it full size | On, no switch |
+| Bottom navigation bar | Client | Home, Libraries, Search, Favourites, More at the bottom of the screen on phones and on tablets without a docked drawer; More holds Now playing, Profile, Settings, Select items, Dashboard (admins) and the Plus/stock look switch | On; hidden on the video page, login pages, TV, in selection mode, with the player locked, and with `jellyfinPlus.mobileTheme = off` |
 | Image look-ahead | Client | Card images are requested before they scroll into view and are not reloaded when you scroll back | On; `localStorage jellyfinPlus.imagePreload = off` (not on TV) |
 | Mobile card actions | Client | Always-visible favourite, more and play buttons on phone cards | On, no switch |
 | Card badges | Client | Resolution, runtime and the first two tags on video cards, looked up lazily for the cards on screen | On; `localStorage jellyfinPlus.cardBadges = off` (not on TV) |

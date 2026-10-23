@@ -45,6 +45,7 @@ import { installListRequests } from './controller/list-requests.js';
 import { installListSort } from './controller/list-sort.js';
 import { installThemeFallback } from './controller/theme-fallback.js';
 import { installLibraryInfinite } from './view/library-infinite.js';
+import { installBottomNav } from './view/bottom-nav.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -116,6 +117,8 @@ function feature(name, install) {
         feature('detail prev/next', installDetailNav);
         feature('detail download', installDetailDownload);
         feature('detail actions', installDetailActions);
+        // Bottom bar (P3): phone and portrait tablet only; reads html classes the modules above set.
+        feature('bottom nav', installBottomNav);
         feature('tag autocomplete', installTagAutocomplete);
         feature('prefs sync', installPrefsSync);
         probeServer();
