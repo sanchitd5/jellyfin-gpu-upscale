@@ -16,7 +16,9 @@ import { installSearchPager } from './view/search-pager.js';
 import { installImageZoom } from './view/image-zoom.js';
 import { installPlayAllFix } from './controller/play-all.js';
 import { installCardActions } from './view/card-actions.js';
-import { installDoubleTapSeek } from './controller/double-tap-seek.js';
+import { installPlayerGestures } from './controller/player-gestures.js';
+import { installPlayerSpeed } from './controller/player-speed.js';
+import { installPlayerBadge } from './controller/player-badge.js';
 import { installClipUpNext } from './controller/clip-upnext.js';
 import { installDetailRelated } from './controller/detail-related.js';
 import { installPersonVideos } from './controller/person-videos.js';
@@ -72,7 +74,11 @@ function feature(name, install) {
         feature('card badges', installCardBadges);
         // Observes list responses only (never changes a request), so its place in the chain does not matter.
         feature('select all', installSelectAll);
-        feature('double-tap seek', installDoubleTapSeek);
+        // Gestures (double-tap seek, hold for 2x, swipe volume/brightness), the saved playback
+        // speed and the Enhance badge in the OSD. All independent of the request hooks above.
+        feature('player gestures', installPlayerGestures);
+        feature('player speed', installPlayerSpeed);
+        feature('player badge', installPlayerBadge);
         feature('clip up next', installClipUpNext);
         feature('detail related', installDetailRelated);
         feature('person videos', installPersonVideos);
