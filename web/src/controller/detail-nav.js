@@ -115,8 +115,12 @@ function removeButtons(page) {
 /* A button that looks like the stock ones: a copy of the Replay button without its identity. */
 function makeButton(template, icon, title, href) {
     var b = template.cloneNode(true);
-    b.classList.remove('hide', 'btnReplay', 'btnPlay');
+    b.classList.remove('hide', 'btnReplay', 'btnPlay', 'jpPrimaryPlay');
     b.classList.add(NAV_CLASS);
+    // view/detail-actions.js may already have marked the template as the primary Play (accent + label).
+    Array.prototype.forEach.call(b.querySelectorAll('.jpPlayLabel'), function (n) {
+        n.parentNode.removeChild(n);
+    });
     b.removeAttribute('data-action');
     b.removeAttribute('id');
     b.title = title;

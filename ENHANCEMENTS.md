@@ -444,6 +444,19 @@ hidden `.btnDownload` and binds its click, but stock only shows it for Books. It
 it and throws without), and hidden again on a later item that fails the test. Not on TV. The click is
 stock's; nothing is re-implemented.
 
+**Primary Play and sticky action bar** (`web/src/view/detail-actions.js`, redesign P7). Nothing is
+re-created: the stock Play/Resume button (else the stock Replay button) in `.mainDetailButtons` gets
+`jpPrimaryPlay` and a visible label copied from its title, and CSS draws it as an accent button first
+in the row (full width on phone/tablet, the other buttons as 44 px icons). A bar inside
+`#itemDetailPage` docks under `.skinHeader` once the row has scrolled out above it (IntersectionObserver):
+title, previous / next (twins of detail-nav's `.jpNavBtn` buttons), favourite heart, Play, More. Every bar
+button only calls `.click()` on its stock twin, so Play resumes at the stored position, the heart runs
+stock's `emby-ratingbutton` handler (`updateFavoriteStatus`) and is read back from its `data-isfavorite`
+(also kept current by stock's UserDataChanged subscription), and Download stays in the row. Stock shows
+the favourite button for any item `canRate` accepts (everything with UserData except Program, Timer,
+Channel, CollectionFolder, UserView); it is not hidden on phone. Scoped to
+`html:not(.jp-theme-off):not(.layout-tv)`; hidden while `html.jp-sheet-open`. No storage keys.
+
 ## 5. Cards and playback
 
 **Image look-ahead** (`web/src/controller/image-preload.js`, `web/src/model/image-preload.js`). Stock
