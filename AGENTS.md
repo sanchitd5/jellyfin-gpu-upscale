@@ -371,6 +371,10 @@ commit them. The CAS shaders in `shaders/` are this project's own.
 RCAS is derived at install time from AMD FidelityFX FSR v1.0.2 (MIT, via agyild's mpv port) by
 `shaders/make-rcas.sh`. The transform is documented in that script; the upstream file is not vendored.
 
+The web client's client-side upscaler DOES carry a port of FSR 1 (EASU + RCAS) from AMD's `ffx_fsr1.h`
+(MIT): `web/src/model/shaders/fsr1.js` keeps AMD's copyright and licence text and lists what the port
+changed. Its deblock/deband shaders (`cleanup.js`) are this project's own.
+
 On picking shaders: judge on measurement, not names. A heavier FSRCNN variant measured *no better*
 for twice the cost. Anime4K wins at its native 2.0x and falls below plain scaling at 1.5x. FSR's EASU
 measured worse than plain scaling outright. Only RCAS survived, and it won on cost as well as quality

@@ -5,6 +5,8 @@ import { probeServer } from './probe.js';
 import { fetchServerState } from './live-block.js';
 import { activeState } from './live-apply.js';
 import { openEnhancePanel } from './playback-hooks.js';
+import { clientStatus, onClientStatus } from './client-upscale.js';
+import { el } from '../lib/dom.js';
 
 /*
  * THE ENHANCE BADGE IN THE VIDEO OSD: a small chip, shown with the OSD, saying what the server is
@@ -48,7 +50,10 @@ var CSS = [
     '#' + CHIP_ID + '.show { opacity: 1; visibility: visible; }',
     '#' + CHIP_ID + '[data-key="active"] { background: rgba(0,128,96,0.75); }',
     '#' + CHIP_ID + '[data-key="off"], #' + CHIP_ID + '[data-key="unavailable"] { background: rgba(110,70,0,0.7); }',
-    '#' + CHIP_ID + '.show[data-key="waiting"] { opacity: 0.7; }'
+    '#' + CHIP_ID + '.show[data-key="waiting"] { opacity: 0.7; }',
+    '#' + CHIP_ID + '[data-key="device"] { background: rgba(0,70,130,0.75); }',
+    '#' + CHIP_ID + ' .jp-device-line { display: block; overflow: hidden; text-overflow: ellipsis;'
+        + ' font-size: 0.9em; opacity: 0.85; text-align: left; }'
 ].join('\n');
 
 var chip = null;
@@ -93,15 +98,31 @@ function ensureChip() {
 function render() {
     if (!chip) { return; }
     var model = badgeModel(caps, state.lastServerState, activeState());
-    if (!model.show) {
+    // Client-side upscaling (controller/client-upscale.js) is its own line, always worded
+    // "This device: ...", so it can never be read as something the server did. It does not need
+    // the server plugin, so it can be the chip's only line.
+    var device = clientStatus().line;
+    if (!model.show && !device) {
         chip.classList.remove('show');
         return;
     }
 
-    chip.textContent = model.text;
-    chip.title = model.title;
-    chip.setAttribute('aria-label', 'Enhance: ' + model.text);
-    chip.setAttribute('data-key', model.key);
+    if (model.show) {
+        chip.textContent = model.text;
+        chip.title = model.title;
+        chip.setAttribute('aria-label', 'Enhance: ' + model.text);
+        chip.setAttribute('data-key', model.key);
+        if (device) {
+            chip.appendChild(el('span', 'jp-device-line', device));
+            chip.title = model.title + '\n' + device;
+            chip.setAttribute('aria-label', 'Enhance: ' + model.text + '. ' + device);
+        }
+    } else {
+        chip.textContent = device;
+        chip.title = device;
+        chip.setAttribute('aria-label', 'Enhance: ' + device);
+        chip.setAttribute('data-key', 'device');
+    }
     chip.classList.add('show');
 }
 
@@ -135,6 +156,11 @@ function tick() {
             burst = 4;
         }
 
+        if (!caps || !caps.full) {
+            render();       // device line only: no server record to fetch
+            return;
+        }
+
         if (burst > 0 || ticks % REFRESH_EVERY_TICKS === 0) {
             if (burst > 0) { burst--; }
             refresh();
@@ -149,22 +175,25 @@ function show() {
     // probeServer() answers from cache once it has succeeded, and retries after a failure.
     probeServer().then(function (c) {
         caps = c;
-        if (!c || !c.full) {
-            hide();
-            return;
-        }
-
         if (!onVideoPage()) { return; }
         if (!timer) {
             ticks = 0;
             timer = setInterval(tick, TICK_MS);
         }
 
+        if (!c || !c.full) {
+            render();       // the device line alone, or nothing
+            return;
+        }
+
         // A record fetched for an earlier session is not shown as this one's: when the session
         // changed since the last fetch, the chip waits for the new answer.
         if (state.playSessionId === lastSid) { render(); }
         refresh();
-    }, function () { hide(); });
+    }, function () {
+        caps = null;
+        if (onVideoPage()) { render(); } else { hide(); }
+    });
 }
 
 function onOsd(e, showing) {
@@ -184,6 +213,9 @@ export function installPlayerBadge() {
         document._callbacks = document._callbacks || {};
         var list = document._callbacks[EVENT] = document._callbacks[EVENT] || [];
         list.push(onOsd);
+        // The device line changes on its own (auto turning on, the governor stepping down):
+        // follow it while the chip is up.
+        onClientStatus(function () { if (timer) { render(); } });
         log('enhance badge installed');
     } catch (err) {
         log('enhance badge install failed', err);

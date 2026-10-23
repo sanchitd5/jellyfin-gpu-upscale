@@ -869,5 +869,9 @@ plugin references its assemblies and patches its code at runtime, so a compatibl
   *Fetched at install time, not redistributed here.*
 - **Anime4K** — © 2019-2021 bloc97, MIT — https://github.com/bloc97/Anime4K
   *Fetched at install time, not redistributed here.*
+- **AMD FidelityFX Super Resolution 1 (EASU + RCAS)** — © 2021 Advanced Micro Devices, Inc., MIT —
+  https://github.com/GPUOpen-Effects/FidelityFX-FSR. Ported to WebGL2 for client-side upscaling in
+  `web/src/model/shaders/fsr1.js`, which carries AMD's copyright and licence text. The cleanup
+  shaders beside it (`cleanup.js`) are this project's own.
 - **CAS shaders** in `shaders/` are this project's own work, implementing AMD's Contrast Adaptive
   Sharpening approach as an mpv/libplacebo user shader.

@@ -19,6 +19,7 @@ import { installCardActions } from './view/card-actions.js';
 import { installPlayerGestures } from './controller/player-gestures.js';
 import { installPlayerSpeed } from './controller/player-speed.js';
 import { installPlayerBadge } from './controller/player-badge.js';
+import { installClientUpscale } from './controller/client-upscale.js';
 import { installClipUpNext } from './controller/clip-upnext.js';
 import { installDetailRelated } from './controller/detail-related.js';
 import { installPersonVideos } from './controller/person-videos.js';
@@ -84,6 +85,9 @@ function feature(name, install) {
         feature('player gestures', installPlayerGestures);
         feature('player speed', installPlayerSpeed);
         feature('player badge', installPlayerBadge);
+        // WebGL2 upscaling in this browser when the stream is smaller than the screen. Never
+        // touches a request: it watches <video> media events only.
+        feature('client upscale', installClientUpscale);
         feature('clip up next', installClipUpNext);
         feature('detail related', installDetailRelated);
         feature('person videos', installPersonVideos);
