@@ -62,7 +62,7 @@ export function parseCategories(raw) {
 export function toGroups(categories) {
     return parseCategories(categories).map(function (c) {
         return c.kind === 'prefix'
-            ? { id: 'smart:' + c.id, name: c.label, kind: c.kind, prefix: c.prefix }
+            ? { id: 'smart:' + c.id, name: c.label, kind: c.kind, prefix: c.prefix, tags: c.tags.map(function (t) { return t.name; }) }
             : { id: 'smart:' + c.id, name: c.label, kind: c.kind, tags: c.tags.map(function (t) { return t.name; }) };
     });
 }

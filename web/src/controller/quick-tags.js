@@ -20,7 +20,7 @@ var CACHE_TTL = 5 * 60 * 1000;
 // A prefix is matched as a substring by the server, so a very common one may be cut at this many tags.
 export var PREFIX_LIMIT = 200;
 
-var names = {}; // prefix -> { at, tags, promise }
+var names = {}; // userId|prefix ->{ at, tags, promise }
 var listeners = [];
 
 /* The viewer's groups, read fresh (another tab or a sync may have changed them). Never null. */
@@ -62,7 +62,7 @@ export function saveGroups(groups) {
 /* ---- suggested ("auto") groups: a pluggable source, and the viewer's choices about them ---- */
 
 var sources = [];
-var suggestedCache = {}; // parentId -> { at, groups, promise }
+var suggestedCache = {}; // userId|parentId ->{ at, groups, promise }
 var SUGGEST_TTL = 60 * 1000;
 
 /*
@@ -79,7 +79,7 @@ export function registerGroupSource(fn) {
 }
 
 function scopeKey(parentId) {
-    return parentId ? String(parentId) : '';
+    return userKey() + '|' + (parentId ? String(parentId) : '');
 }
 
 /* Suggested groups for a scope, synchronously: [] with no source, null while a source has not answered yet. */
@@ -176,14 +176,34 @@ export function loadVisible(parentId) {
     return loadSuggested(parentId).then(function () { return groupsFor(parentId).groups; });
 }
 
-/* The tag names already enumerated for a prefix group, or null while they are not (call resolveNames). */
+/* The cache key: the user too, so a user switch without a page reload never shows the previous user's tags. */
+function userKey() {
+    try {
+        var c = window.ApiClient;
+        return c && typeof c.getCurrentUserId === 'function' ? String(c.getCurrentUserId() || '') : '';
+    } catch (e) {
+        return '';
+    }
+}
+
+/* The tag names already enumerated for a prefix group (stale ones too, so a row never vanishes while a refetch runs), or null while there are none. */
 export function namesNow(group) {
     if (group.tags.length) {
         return [];
     }
 
-    var e = names[group.prefix];
-    return e && e.tags && Date.now() - e.at < CACHE_TTL ? e.tags : null;
+    var e = names[userKey() + '|' + group.prefix];
+    return e && e.tags ? e.tags : null;
+}
+
+/* True when namesNow is current: a fixed group, or names fetched within CACHE_TTL. */
+export function namesFresh(group) {
+    if (group.tags.length) {
+        return true;
+    }
+
+    var e = names[userKey() + '|' + group.prefix];
+    return !!(e && e.tags && Date.now() - e.at < CACHE_TTL);
 }
 
 /* Promise of the tag names to filter into chips for a group: [] for a fixed group, never rejects. */
@@ -192,25 +212,25 @@ export function resolveNames(group) {
         return Promise.resolve([]);
     }
 
-    var hit = namesNow(group);
-    if (hit) {
-        return Promise.resolve(hit);
+    if (namesFresh(group)) {
+        return Promise.resolve(namesNow(group));
     }
 
-    var e = names[group.prefix];
+    var key = userKey() + '|' + group.prefix;
+    var e = names[key];
     if (e && e.promise) {
         return e.promise;
     }
 
-    var entry = { at: 0, tags: null, promise: null };
+    var entry = { at: 0, tags: e ? e.tags : null, promise: null };
     entry.promise = fetchTagWindow({ query: group.prefix, limit: PREFIX_LIMIT }).then(function (w) {
         entry.tags = w.tags;
         entry.at = Date.now();
         entry.promise = null;
         return entry.tags;
     }, function (err) {
-        // Remembered as empty for 30 s, so a persistent failure is not retried on every page change.
-        entry.tags = [];
+        // Remembered for 30 s (the stale tags if any, else empty), so a persistent failure is not retried on every page change.
+        entry.tags = entry.tags || [];
         entry.at = Date.now() - CACHE_TTL + 30 * 1000;
         entry.promise = null;
         log('quick tag prefix list failed', err);
@@ -220,7 +240,7 @@ export function resolveNames(group) {
         names = {};
     }
 
-    names[group.prefix] = entry;
+    names[key] = entry;
     return entry.promise;
 }
 

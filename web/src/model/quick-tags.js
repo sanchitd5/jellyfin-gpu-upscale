@@ -64,7 +64,7 @@ export function parseGroups(raw) {
         }
 
         seen[name] = true;
-        out.push({ name: name, tags: tags, prefix: tags.length ? '' : prefix });
+        out.push({ name: name, tags: tags, prefix: prefix });
     });
     return out;
 }
@@ -112,7 +112,7 @@ export function chipsFor(group, names, selected) {
         }
     };
     if (group.tags.length) {
-        group.tags.forEach(function (t) { add(t, t); });
+        group.tags.forEach(function (t) { add(t, group.prefix ? labelFor(t, group.prefix) : t); });
     } else {
         var found = [];
         (names || []).forEach(function (t) {
@@ -142,7 +142,7 @@ export var MAX_STORED = 14000;
 /* Compact stored form: [{n: name, t: [tags], p: prefix}]. */
 export function encodeGroups(groups) {
     return JSON.stringify(parseGroups(groups).map(function (g) {
-        return g.tags.length ? { n: g.name, t: g.tags } : { n: g.name, p: g.prefix };
+        return g.tags.length ? (g.prefix ? { n: g.name, t: g.tags, p: g.prefix } : { n: g.name, t: g.tags }) : { n: g.name, p: g.prefix };
     }));
 }
 
@@ -279,7 +279,8 @@ export function mergeGroups(user, suggested, prefs) {
         names[name] = true;
         all.push(Object.assign({}, g, { name: name, original: g.name, hidden: prefs.hidden.indexOf(g.id) !== -1 }));
     });
-    return { visible: user.concat(all.filter(function (g) { return !g.hidden; })), all: all };
+    // Capped at MAX_GROUPS (own first): anyOfValues and the server take no more, so a pick in a cut group would show pressed and never filter.
+    return { visible: user.concat(all.filter(function (g) { return !g.hidden; })).slice(0, MAX_GROUPS), all: all };
 }
 
 /* The viewer's list with a suggestion copied in as their own (a name clash gets " (2)", " (3)", ...). Same list when full. */
@@ -294,7 +295,7 @@ export function pinSuggestion(user, g) {
         name = g.name + ' (' + n++ + ')';
     }
 
-    var copy = g.tags && g.tags.length ? { name: name, tags: g.tags.slice(), prefix: '' } : { name: name, tags: [], prefix: g.prefix };
+    var copy = g.tags && g.tags.length ? { name: name, tags: g.tags.slice(), prefix: g.prefix || '' } : { name: name, tags: [], prefix: g.prefix };
     return user.concat([copy]);
 }
 

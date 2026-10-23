@@ -3,7 +3,7 @@ import { el } from '../lib/dom.js';
 import { parseTags } from '../model/library-filter-marks.js';
 import { chipsFor, isSelected, toggleSelection, selectedIn, pruneSelection } from '../model/quick-tags.js';
 import { findFilterContext, readFilters, updateTagState } from '../controller/library-filters.js';
-import { groupsFor, namesNow, resolveNames, onGroupsChanged } from '../controller/quick-tags.js';
+import { groupsFor, namesNow, namesFresh, resolveNames, onGroupsChanged } from '../controller/quick-tags.js';
 import { openQuickTagsEditor } from './quick-tags-editor.js';
 import { openDateSheet } from './date-sheet.js';
 import { encode as encodeDate, decode as decodeDate, labelOf } from '../model/date-added.js';
@@ -246,7 +246,7 @@ function scan() {
     }
 
     groups.forEach(function (g) {
-        if (!g.tags.length && !namesNow(g)) {
+        if (!g.tags.length && !namesFresh(g)) {
             resolveNames(g).then(function () { schedule(0); });
         }
     });

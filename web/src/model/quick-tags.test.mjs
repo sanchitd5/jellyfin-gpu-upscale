@@ -41,12 +41,37 @@ t('parseGroups accepts camel and Pascal case, drops groups with neither tags nor
     ]);
 });
 
-t('a fixed list wins over a prefix; duplicate group names and unusable tags are dropped', function () {
+t('a fixed list keeps its prefix too; duplicate group names and unusable tags are dropped', function () {
     var g = parseGroups([
         { name: 'A', tags: ['red', 'a|b', 'red', ' blue '], prefix: 'zzz' },
         { name: 'A', tags: ['other'] }
     ]);
-    assert.deepEqual(g, [{ name: 'A', tags: ['red', 'blue'], prefix: '' }]);
+    assert.deepEqual(g, [{ name: 'A', tags: ['red', 'blue'], prefix: 'zzz' }]);
+});
+
+t('chipsFor: a fixed list with a prefix labels its chips by the remainder, no refetch needed', function () {
+    var g = parseGroups([{ name: 'Tint', tags: ['tint-b', 'tint-a'], prefix: 'tint' }])[0];
+    assert.deepEqual(chipsFor(g, null, []).map(function (c) { return c.label; }), ['b', 'a']);
+    assert.deepEqual(chipsFor(g, null, []).map(function (c) { return c.tag; }), ['tint-b', 'tint-a']);
+    // a hand-defined prefix group (no tags) still resolves from the names passed in
+    var h = parseGroups([{ name: 'H', prefix: 'tint' }])[0];
+    assert.deepEqual(chipsFor(h, ['tint-z'], []).map(function (c) { return c.label; }), ['z']);
+    // stored form round-trips both
+    assert.deepEqual(decodeGroups(encodeGroups([g])), [g]);
+});
+
+t('mergeGroups caps the visible groups at MAX_GROUPS, own first; pruneSelection then drops picks in cut groups', function () {
+    var user = [];
+    for (var i = 0; i < MAX_GROUPS; i++) { user.push({ name: 'own' + i, tags: ['t'], prefix: '' }); }
+    var s = parseSuggested([{ name: 'S1', tags: ['a'] }, { name: 'S2', tags: ['b'] }]);
+    var m = mergeGroups(user, s, { hidden: [], names: {} });
+    assert.equal(m.visible.length, MAX_GROUPS);
+    assert.ok(m.visible.every(function (g) { return !g.auto; }));
+    assert.equal(m.all.length, 2, 'the editor still lists every suggestion');
+    var few = mergeGroups(user.slice(0, 9), s, { hidden: [], names: {} });
+    assert.deepEqual(few.visible.map(function (g) { return g.name; }).slice(8), ['own8', 'S1']);
+    var picks = [{ group: 'S1', tag: 'a' }, { group: 'own0', tag: 't' }];
+    assert.deepEqual(pruneSelection(picks, m.visible), [{ group: 'own0', tag: 't' }]);
 });
 
 t('parseGroups caps groups and names, and ignores non-arrays', function () {
