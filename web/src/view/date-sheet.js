@@ -96,7 +96,7 @@ export function openDateSheet(current, onPick, opener) {
         function refresh() {
             var f = inputs.from.value;
             var t = inputs.to.value;
-            apply.disabled = !state();
+            apply.disabled = !state() || (f !== '' && !validDay(f)) || (t !== '' && !validDay(t));
             hint.textContent = f && t && f > t ? 'From is after To: the two will be swapped.'
                 : (f && !validDay(f)) || (t && !validDay(t)) ? 'That is not a valid date.' : '';
         }

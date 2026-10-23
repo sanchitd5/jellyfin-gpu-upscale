@@ -85,7 +85,7 @@ function pushChanged() {
         var c = canon(def, readLocal(def.local));
         var remote = decode(def, settings.displayPrefs.CustomPrefs[def.remote]);
         var t = meta[def.local] || 0;
-        if (t && decide(c, t, remote) === 'push') {
+        if (t && decide(c, t, remote, def.owned) === 'push') {
             pushOne(def, c, t);
         }
     });
@@ -127,7 +127,7 @@ function reconcile() {
             var raw = readLocal(def.local);
             var c = canon(def, raw);
             var remote = decode(def, settings.displayPrefs.CustomPrefs[def.remote]);
-            var action = decide(c, meta[def.local] || 0, remote);
+            var action = decide(c, meta[def.local] || 0, remote, def.owned);
             if (action === 'adopt') {
                 var next = adopted(def, remote.v, raw);
                 try {

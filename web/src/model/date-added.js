@@ -8,7 +8,7 @@
  *                                                                the REQUEST is built, so "Last 7 days" rolls
  *   `c:<from>~<to>`        fixed days, either side may be empty   (YYYY-MM-DD)
  *
- * Days are UTC days, inclusive, exactly the server's contract (jpMinDateAdded / jpMaxDateAdded in
+ * Days are UTC days, inclusive ("Last N days" = today plus the N-1 before it), exactly the server's contract (jpMinDateAdded / jpMaxDateAdded in
  * src/patcher/LibraryFilterPatches.cs). Anything unreadable decodes to null = no date filter.
  */
 
@@ -126,7 +126,7 @@ export function rangeOf(state, now) {
         return { from: at.getUTCFullYear() + '-01-01', to: '' };
     }
 
-    return { from: utcDay(new Date(at.getTime() - presetOf(s.id).days * 86400000)), to: '' };
+    return { from: utcDay(new Date(at.getTime() - Math.max(0, presetOf(s.id).days - 1) * 86400000)), to: '' };
 }
 
 function dayText(day, withYear) {
