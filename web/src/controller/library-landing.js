@@ -11,6 +11,9 @@ import { landingSeeds, videosTabHash, DEFAULT_LANDING } from '../model/library-l
 var doneFor = null;   // userId seeded this page load
 var running = false;
 
+/* The user's /UserViews items once fetched; the bottom bar's Libraries sheet reuses it. */
+export var viewsCache = null;
+
 function getJson(client, path, params) {
     return client.ajax({ type: 'GET', url: client.getUrl(path, params), dataType: 'json' });
 }
@@ -33,6 +36,7 @@ function seed() {
 
     Promise.all([getJson(client, 'UserViews', { userId: userId }), prefs]).then(function (r) {
         var views = r[0] && r[0].Items;
+        if (views) { viewsCache = views; }
         var seeds = landingSeeds(userId, views, r[1], function (k) { return window.localStorage.getItem(k); });
         seeds.forEach(function (s) {
             window.localStorage.setItem(s[0], s[1]);

@@ -143,3 +143,6 @@ esbuild) support natively.
 | `controller/player-item.js` | `currentItem()` | `model/state.js`, `live-apply.js` (`player`, `activePlayer`) |
 | `controller/player-favorite.js` | `syncFavorite()`, `toggleFavorite()` | `lib/log.js`, `player-item.js` |
 | `controller/player-rotate.js` | `cycleRotation()`, `resetRotation()`, `cssRotation()`, `refreshRotation()`, `rotationFollowsItem()`, `rotationAvailable()`, `installRotateListeners()` | `lib/log.js` |
+| `model/nav-routes.js` | `parseHash()`, `activeSlot()`, `isVideoPath()`, `isPublicPath()`, `libraryHref()`, `libraryIcon()` (pure route logic for the bottom bar; test `nav-routes.test.mjs`) | none |
+| `controller/more-sheet.js` | `openLibrariesSheet()`, `openMoreSheet()` (the bar's two sheets, on the shared sheet) | `lib/log.js`, `lib/dom.js`, `view/sheet.js`, `model/nav-routes.js`, `controller/library-landing.js` (`viewsCache`), `controller/select-mode.js` (`selectableCards`, `enterSelectMode`) |
+| `view/bottom-nav.js` | `installBottomNav()` (phone/portrait-tablet bar: Home, Libraries, Search, Favourites, More; sets `html.jp-nav-on` and `--jp-nav-h`; hidden on video, public routes, `jp-selecting`, `jp-player-locked`) | `lib/log.js`, `lib/dom.js`, `view/sheet.js`, `model/nav-routes.js`, `controller/more-sheet.js` |
