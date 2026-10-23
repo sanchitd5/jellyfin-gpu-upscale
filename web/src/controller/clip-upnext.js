@@ -40,13 +40,18 @@ var STYLE_ID = 'jellyfinPlusUpNextStyle';
 var CARD_ID = 'jellyfinPlusUpNext';
 
 var CSS = [
-    '#' + CARD_ID + ' { position: fixed; right: 12px; left: 12px; margin-left: auto; max-width: 26em;'
-        + ' bottom: calc(env(safe-area-inset-bottom, 0px) + 7.5em); box-sizing: border-box; z-index: 99997;'
+    // Docked bottom-right, above the OSD controls (--jp-osd-clear, measured by view/portrait-osd.js,
+    // so the card never covers the seek bar), inset past the notch / rounded corners (P12).
+    '#' + CARD_ID + ' { position: fixed; right: max(env(safe-area-inset-right, 0px), 12px);'
+        + ' left: max(env(safe-area-inset-left, 0px), 12px); margin-left: auto; max-width: 26em;'
+        + ' bottom: calc(var(--jp-osd-clear, 9em) + 12px); box-sizing: border-box; z-index: 99997;'
         + ' padding: 0.8em 1em; color: #fff; background: rgba(0,0,0,0.75); border-radius: 0.3em;'
         + ' user-select: none; -webkit-touch-callout: none; }',
     '#' + CARD_ID + '.hide { display: none; }',
     '#' + CARD_ID + ' .head { font-size: 1.1em; font-weight: 500; margin: 0 0 0.25em; }',
     '#' + CARD_ID + ' .title { margin: 0 0 0.6em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+    // Portrait with the dock under the picture: the card sits in the dead area above the chip.
+    'html.jp-portrait-osd #' + CARD_ID + ' { bottom: calc(var(--jp-osd-clear, 9em) + 3.6em); }',
     '#' + CARD_ID + ' .buttons { display: flex; justify-content: flex-end; gap: 0.5em; }',
     '#' + CARD_ID + ' button { min-height: 40px; padding: 0 1em; border: 0; border-radius: 0.2em;'
         + ' background: #404040; color: #fff; font: inherit; cursor: pointer; }'

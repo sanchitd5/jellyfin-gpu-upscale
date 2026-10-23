@@ -32,7 +32,10 @@ export var THRESHOLDS = {
     // |dy| must be at least this many times |dx| for the move to count as a vertical swipe.
     VERTICAL_RATIO: 1.5,
     // Fraction of the page height that sweeps the whole 0..1 range.
-    SWIPE_RANGE: 0.7
+    SWIPE_RANGE: 0.7,
+    // A touch that lands this close to the left or right screen edge is the OS back-swipe (iOS
+    // Safari, Android gesture nav) and is never ours: no brightness swipe, hold or double tap.
+    EDGE_DEAD_PX: 24
 };
 
 export var HOLD_RATE = 2;
@@ -47,6 +50,25 @@ var BRIGHTNESS_SNAP = 0.03;
 export function zoneOf(x, width) {
     if (!(width > 0)) { return 0; }
     return x < width / 3 ? -1 : (x > width * 2 / 3 ? 1 : 0);
+}
+
+/* True for a touch inside the dead zone on either horizontal edge. */
+export function inEdgeZone(x, width) {
+    return width > 0 && (x < THRESHOLDS.EDGE_DEAD_PX || x > width - THRESHOLDS.EDGE_DEAD_PX);
+}
+
+/*
+ * POINTER COORDINATES THROUGH THE ROTATE-VIDEO TRANSFORM (controller/player-rotate.js). The page
+ * is a <body> rotated by rot degrees (90: translateX(vw) rotate(90deg); -90: translateY(vh)
+ * rotate(-90deg)), so a pointer event's client coordinates are screen coordinates while the
+ * zones, swipe axis and level range are content coordinates. Returns the content point under
+ * the screen point (sx, sy) of a vw x vh viewport; rot 0 (or anything else) is the identity.
+ * So a swipe that goes up as the viewer sees it is still dy < 0, and left/right stay left/right.
+ */
+export function toContent(rot, sx, sy, vw, vh) {
+    if (rot === 90) { return { x: sy, y: vw - sx }; }
+    if (rot === -90) { return { x: vh - sy, y: sx }; }
+    return { x: sx, y: sy };
 }
 
 /* Left half is brightness, right half is volume. */
@@ -84,7 +106,9 @@ export function parseBrightness(raw) {
  * The arbiter. Events carry plain data; every method returns the action the controller must
  * take, or null. Actions:
  *
- *   down()      { doubleTap: -1|0|1, continuing }  (the press is always swallowed)
+ *   down()      { doubleTap: -1|0|1, continuing }  (the press is always swallowed), or
+ *               { doubleTap: 0, continuing: false, edge: true } for a touch in the edge dead zone:
+ *               phase 'passed', nothing of ours will follow, the controller must not swallow it
  *   move()      { type: 'swipe-start', kind } | { type: 'swipe', dy } | { type: 'replay' } | null
  *   holdTimeout { type: 'hold-start' } | null
  *   up()        { type: 'replay' } (a tap) | { type: 'hold-end' } | { type: 'swipe-end' } | null
@@ -112,8 +136,17 @@ export function createArbiter() {
         forgetTaps: function () { last = null; },
 
         down: function (p) {
-            phase = 'pending';
             sw = null;
+            // The OS edge is a SCREEN edge: when the page is rotated, p.sx / p.swidth carry the
+            // screen coordinate while x / width are content coordinates.
+            if (p.touch && inEdgeZone(p.sx != null ? p.sx : p.x, p.swidth != null ? p.swidth : p.width)) {
+                phase = 'passed';
+                g = null;
+                last = null;
+                return { doubleTap: 0, continuing: false, edge: true };
+            }
+
+            phase = 'pending';
             g = { t: p.t, x: p.x, y: p.y, width: p.width, touch: !!p.touch, third: zoneOf(p.x, p.width) };
 
             if (g.touch && g.third && last && last.third === g.third

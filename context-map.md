@@ -131,3 +131,8 @@ esbuild) support natively.
 `web/jellyfin-plus.js`. esbuild is a build-time-only dependency: `web/package.json` +
 `web/package-lock.json` are checked in, `web/node_modules/` is gitignored and installed with
 `npm install` in `web/` on whichever machine runs the build.
+
+| `view/portrait-osd.js` | `installPortraitOsd()` (touch OSD sizes, portrait layout under the picture, the player lock, the heart and rotate buttons, `--jp-osd-clear`) | `lib/log.js`, `lib/dom.js`, `controller/playback-hooks.js` (`openEnhancePanel`), `controller/player-item.js`, `controller/player-favorite.js`, `controller/player-rotate.js` |
+| `controller/player-item.js` | `currentItem()` | `model/state.js`, `live-apply.js` (`player`, `activePlayer`) |
+| `controller/player-favorite.js` | `syncFavorite()`, `toggleFavorite()` | `lib/log.js`, `player-item.js` |
+| `controller/player-rotate.js` | `cycleRotation()`, `resetRotation()`, `cssRotation()`, `refreshRotation()`, `rotationFollowsItem()`, `rotationAvailable()`, `installRotateListeners()` | `lib/log.js` |
