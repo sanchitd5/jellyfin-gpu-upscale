@@ -20,11 +20,85 @@ import { TIERS, tierOf, themeCss, zoomableViewport } from '../model/theme-tokens
 var KEY = 'jellyfinPlus.mobileTheme';
 var STYLE_ID = 'jellyfinPlusMobileThemeStyle';
 
+/*
+ * A URL switch for getting back when the look is off (the bottom bar and its More sheet are hidden
+ * then): `?jpTheme=on|off|light`, in the query string or in the hash's query (`#/home?jpTheme=on`).
+ * "on" clears the stored value (= the default look).
+ */
+function urlSwitch() {
+    var m = /[?&]jpTheme=(on|off|light)\b/.exec((window.location.search || '') + ' ' + (window.location.hash || ''));
+    if (!m) {
+        return;
+    }
+    try {
+        if (m[1] === 'on') {
+            localStorage.removeItem(KEY);
+        } else {
+            localStorage.setItem(KEY, m[1]);
+        }
+    } catch (e) { /* storage blocked: nothing to switch */ }
+}
+
 function mode() {
     try {
         var v = localStorage.getItem(KEY);
         return v === 'off' || v === 'light' ? v : '';
     } catch (e) { return ''; }
+}
+
+/*
+ * A "Jellyfin Plus look" row on the stock Settings page (#myPreferencesMenuPage, after Display), in
+ * BOTH states, so every tier (desktop has no bottom bar) and the off state have a way to switch.
+ */
+var SETTINGS_ROW_ID = 'jellyfinPlusLookRow';
+
+function settingsRow(m) {
+    var page = document.getElementById('myPreferencesMenuPage');
+    var anchor = page && page.querySelector('.lnkDisplayPreferences');
+    if (!anchor || document.getElementById(SETTINGS_ROW_ID)) {
+        return;
+    }
+    var off = m === 'off';
+    var a = document.createElement('a');
+    a.id = SETTINGS_ROW_ID;
+    a.href = '#';
+    a.className = 'listItem-border';
+    a.style.display = 'block';
+    a.style.margin = '0';
+    a.style.padding = '0';
+    a.innerHTML = '<div class="listItem"><span class="material-icons listItemIcon listItemIcon-transparent palette" aria-hidden="true"></span>'
+        + '<div class="listItemBody"><div class="listItemBodyText">Jellyfin Plus look</div>'
+        + '<div class="listItemBodyText secondary">' + (off ? 'Off - tap to turn on' : 'On - tap to turn off') + '</div></div></div>';
+    a.addEventListener('click', function (e) {
+        e.preventDefault();
+        try {
+            if (off) {
+                localStorage.removeItem(KEY);
+            } else {
+                localStorage.setItem(KEY, 'off');
+            }
+        } catch (err) { return; }
+        window.location.reload();
+    });
+    anchor.parentNode.insertBefore(a, anchor.nextSibling);
+}
+
+function watchSettingsRow(m) {
+    var start = function () {
+        if (!document.body) {
+            return;
+        }
+        new MutationObserver(function () {
+            if (!document.documentElement.classList.contains('layout-tv')) {
+                settingsRow(m);
+            }
+        }).observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.body) {
+        start();
+    } else {
+        document.addEventListener('DOMContentLoaded', start);
+    }
 }
 
 function setClass(html, cls, on) {
@@ -60,9 +134,11 @@ function apply(m) {
 }
 
 export function installMobileTheme() {
+    urlSwitch();
     var m = mode();
     var html = document.documentElement;
     var old = document.getElementById(STYLE_ID);
+    watchSettingsRow(m);
     if (m === 'off') {
         if (old) old.remove();
         apply(m);
