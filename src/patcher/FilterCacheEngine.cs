@@ -846,6 +846,15 @@ namespace Jellyfin.Plugin.Plus.Patcher
         /// smallest across rows, which is what stock's Min(Value) per clean value gives.
         /// </summary>
         internal static List<(string Clean, string Value, string RefId)> ReadKeys(DbConnection conn, Guid[] libs, Kind kind, string[] types)
+            => ReadKeysCounted(conn, libs, kind, types).Select(k => (k.Clean, k.Value, k.RefId)).ToList();
+
+        /// <summary>
+        /// <see cref="ReadKeys"/> plus how many items carry each key in the scope: the sum of the stored
+        /// per-(library, item type) counts. An item has exactly one library and one type, so the sum is a
+        /// distinct-item count, the same number stock's per-tag count would give (a build-time snapshot, so as
+        /// stale as the cache is allowed to be).
+        /// </summary>
+        internal static List<(string Clean, string Value, string RefId, int Count)> ReadKeysCounted(DbConnection conn, Guid[] libs, Kind kind, string[] types)
         {
             using var c = conn.CreateCommand();
             var ls = new List<string>();
@@ -856,7 +865,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
             }
 
             AddParam(c, "@k", (int)kind);
-            var sql = "SELECT CleanValue, MIN(Value), MIN(RefId) FROM " + KeysTable
+            var sql = "SELECT CleanValue, MIN(Value), MIN(RefId), SUM(ItemCount) FROM " + KeysTable
                 + " WHERE Kind = @k AND LibraryId IN (" + string.Join(",", ls) + ")";
             if (types != null)
             {
@@ -871,11 +880,11 @@ namespace Jellyfin.Plugin.Plus.Patcher
             }
 
             c.CommandText = sql + " GROUP BY CleanValue";
-            var list = new List<(string, string, string)>();
+            var list = new List<(string, string, string, int)>();
             using var r = c.ExecuteReader();
             while (r.Read())
             {
-                list.Add((r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2)));
+                list.Add((r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? 0 : (int)r.GetInt64(3)));
             }
 
             return list;

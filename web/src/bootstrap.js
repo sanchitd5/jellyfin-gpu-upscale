@@ -32,6 +32,7 @@ import { installLibraryFilterPanel } from './view/library-filter-panel.js';
 import { installLibraryLanding } from './controller/library-landing.js';
 import { installCardBadges } from './view/card-badges.js';
 import { installSelectAll } from './controller/select-all.js';
+import { installPrefsSync } from './controller/prefs-sync.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -86,6 +87,7 @@ function feature(name, install) {
         feature('detail prev/next', installDetailNav);
         feature('detail download', installDetailDownload);
         feature('tag autocomplete', installTagAutocomplete);
+        feature('prefs sync', installPrefsSync);
         probeServer();
         state.installed = true;
         log('bootstrap install: end, installed on', state.globals.join(', '));
