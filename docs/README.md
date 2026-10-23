@@ -57,6 +57,7 @@ Each one covers what the level does, what it costs, and what you must obtain or 
 |---|---|
 | [README.md](roadmap/README.md) | Roadmap index |
 | [QOL_IDEAS.md](roadmap/QOL_IDEAS.md) | Quality-of-life candidates for Jellyfin 12.1, with the stock seam for each (many have shipped; see ENHANCEMENTS.md) |
+| [mobile-redesign.md](roadmap/mobile-redesign.md) | Phone UI and theme redesign plan for jellyfin-web 12.3: audit, tokens, delivery mechanism, prioritised proposals, wireframes, phases |
 | [improvements.md](roadmap/improvements.md) | The improvement programme for the enhancement engine |
 | [hw-resident-encode-plan.md](roadmap/hw-resident-encode-plan.md) | GPU-resident encode: Vulkan to NVENC without leaving the GPU |
 | [gpu-only-filters.md](roadmap/gpu-only-filters.md) | GPU-only versions of the existing filters |
