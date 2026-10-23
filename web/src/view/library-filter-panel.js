@@ -15,6 +15,7 @@ import {
     nameOf,
     searchEntities
 } from '../controller/library-filters.js';
+import { syncGroupSections, GROUP_CSS } from './library-filter-groups.js';
 
 /*
  * ADDITIONS TO THE MODERN LIBRARY PAGE'S FILTER POPOVER (jellyfin-web 12.3,
@@ -100,7 +101,7 @@ var CSS = [
         + ' display: flex; align-items: center; }',
     '.jpFsHead button { min-width: var(--jp-tap, 44px); min-height: var(--jp-tap, 44px); background: none; border: 0;'
         + ' color: var(--jp-accent, inherit); font: inherit; font-weight: 600; cursor: pointer; }'
-].join('\n');
+].join('\n') + '\n' + GROUP_CSS;
 
 // html.jp-sheet-open is the shared sheet's flag (view/sheet.js); only take it down if this set it.
 var ownsSheetClass = false;
@@ -594,6 +595,12 @@ function sync() {
 
     if (EXTRA_TABS.includes(ctx.viewType)) {
         syncExtras(root, ctx);
+    }
+
+    // Quick tag groups as sections (same jpTagAnyOf picks as the chip row); tabs with their own endpoint ignore the parameter.
+    var paper = root.querySelector('.MuiPopover-paper');
+    if (paper && !OTHER_ENDPOINT_TABS.includes(ctx.viewType)) {
+        syncGroupSections(paper, ctx, currentContext, scheduleSync);
     }
 }
 
