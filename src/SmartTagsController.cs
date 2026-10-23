@@ -312,6 +312,7 @@ namespace Jellyfin.Plugin.Plus
     {
         internal const int MaxEntries = 100;
         internal static readonly TimeSpan Ttl = TimeSpan.FromMinutes(30);
+        internal static readonly TimeSpan MinFresh = TimeSpan.FromMinutes(10);
 
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, (long Gen, long Ticks, List<SmartTagCategory> Rows)> Map = new Dictionary<string, (long, long, List<SmartTagCategory>)>(StringComparer.Ordinal);
@@ -378,7 +379,11 @@ namespace Jellyfin.Plugin.Plus
                     return false;
                 }
 
-                if (e.Gen != gen || Environment.TickCount64 - e.Ticks > (long)Ttl.TotalMilliseconds)
+                // Item events arrive continuously while a recorder ingests, so a generation bump alone does
+                // not expire an answer younger than MinFresh: categories follow the tag distribution, which a
+                // handful of new items barely moves. Past MinFresh a change expires it; past Ttl, always.
+                var age = Environment.TickCount64 - e.Ticks;
+                if (age > (long)Ttl.TotalMilliseconds || (e.Gen != gen && age > (long)MinFresh.TotalMilliseconds))
                 {
                     Map.Remove(key);
                     return false;
@@ -391,11 +396,9 @@ namespace Jellyfin.Plugin.Plus
 
         internal static void Put(string key, long gen, List<SmartTagCategory> rows)
         {
-            if (gen != Generation)
-            {
-                return; // a change raced the computation; do not store a possibly old answer
-            }
-
+            // A change racing the computation still stores the answer, stamped with the generation read
+            // before computing: under constant ingest a race is the norm, and refusing to store would
+            // recompute (about a second) on every request. The stale stamp expires it after MinFresh.
             lock (Gate)
             {
                 if (Map.Count >= MaxEntries && !Map.ContainsKey(key))
