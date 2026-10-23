@@ -1,5 +1,6 @@
 import { log } from '../lib/log.js';
 import { showTagDialog } from '../view/bulk-tags-dialog.js';
+import { offerSelectAll, startSelectAll, extendedSelection } from './select-all.js';
 
 /*
  * BULK TAG EDITING (QOL_IDEAS #27, with #28 "Edit tags" on a single item's menu).
@@ -305,7 +306,11 @@ export function loadSelectionTags(client, userId, ids) {
     for (var i = 0; i < ids.length; i += CHUNK) {
         chunks.push(ids.slice(i, i + CHUNK));
     }
-    return Promise.all(chunks.map(function (chunk) {
+    // At most 4 requests at a time: a selection of thousands (select-all across pages) is dozens of chunks.
+    var nextChunk = 0;
+    function lane() {
+        if (nextChunk >= chunks.length) { return Promise.resolve(); }
+        var chunk = chunks[nextChunk++];
         return Promise.resolve(client.ajax({
             type: 'GET',
             url: client.getUrl('Items', { userId: userId, ids: chunk.join(','), fields: 'Tags' }),
@@ -316,8 +321,10 @@ export function loadSelectionTags(client, userId, ids) {
                     counts.set(t, (counts.get(t) || 0) + 1);
                 });
             });
+            return lane();
         });
-    })).then(function () {
+    }
+    return Promise.all([lane(), lane(), lane(), lane()]).then(function () {
         return Array.from(counts.keys()).sort(function (a, b) { return counts.get(b) - counts.get(a); });
     }).catch(function (err) {
         log('bulk tags: selection tags unavailable', err);
@@ -414,13 +421,16 @@ function keepOnScreen(dlg) {
     } catch (e) { /* cosmetic only */ }
 }
 
-function openMulti(mode, ids) {
+/* `all`: ids are every result of the list (controller/select-all.js), not the ticked cards. */
+function openMulti(mode, ids, all) {
     var c = client();
     if (!c) { return; }
     var userId = c.getCurrentUserId();
     var counter = counterValue();
     var note = ids.length + (ids.length === 1 ? ' item selected' : ' items selected');
-    if (counter !== null && counter !== ids.length) {
+    if (all) {
+        note = 'All ' + ids.length + ' results of this list';
+    } else if (counter !== null && counter !== ids.length) {
         note += ' (the counter says ' + counter + '; only items still on this page can be edited)';
     }
     showTagDialog({
@@ -490,11 +500,24 @@ function decorate(dlg) {
                 var row = makeRow(sib, d[0], d[1], d[2]);
                 // Read the ticks NOW; the sheet's own click handler runs after this one and closes it.
                 row.addEventListener('click', function () {
-                    var ids = selectedIds();
-                    setTimeout(function () { openMulti(d[3], ids); }, 0);
+                    // All results of the list, when "Select all N results" was used; else the ticked cards.
+                    var all = extendedSelection();
+                    var ids = all ? all.ids : selectedIds();
+                    setTimeout(function () { openMulti(d[3], ids, !!all); }, 0);
                 });
                 parent.insertBefore(row, before || null);
             });
+
+            // "Select all N results": every result of the list, across pages (select-all.js).
+            var stockAll = dlg.querySelector('[data-id="selectall"]');
+            var offer = stockAll && offerSelectAll(selectedIds());
+            if (offer) {
+                var allRow = makeRow(stockAll, 'gpuselectallresults', offer.label, 'select_all');
+                allRow.addEventListener('click', function () {
+                    setTimeout(function () { startSelectAll(offer); }, 0);
+                });
+                stockAll.parentNode.insertBefore(allRow, stockAll.nextSibling);
+            }
         } else {
             var row = makeRow(editRow, 'gpuedittags', 'Edit tags', 'label');
             row.addEventListener('click', function () {
