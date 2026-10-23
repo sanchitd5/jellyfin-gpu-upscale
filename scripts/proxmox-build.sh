@@ -340,6 +340,9 @@ command -v npm >/dev/null || { echo "npm not on PATH: install Node.js on this ma
 echo "==> publishing the client script"
 install -m 0644 web/jellyfin-plus.js "$PATCH_DIR/jellyfin-plus.js.tmp.$$"
 mv "$PATCH_DIR/jellyfin-plus.js.tmp.$$" "$PATCH_DIR/jellyfin-plus.js"
+# The selectable jellyfin-web theme's stylesheet; the injector installs it and adds the config.json entry.
+install -m 0644 web/theme/jellyfinplus.css "$PATCH_DIR/jellyfinplus-theme.css.tmp.$$"
+mv "$PATCH_DIR/jellyfinplus-theme.css.tmp.$$" "$PATCH_DIR/jellyfinplus-theme.css"
 /usr/local/sbin/jellyfin-plus-webinject
 
 # ---- 9. what actually happened ---------------------------------------------------------------

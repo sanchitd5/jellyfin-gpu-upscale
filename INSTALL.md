@@ -123,6 +123,8 @@ sudo cp out-patcher/Jellyfin.Plugin.Plus.Patcher.dll out-patcher/0Harmony.dll \
 ./scripts/build-web-panel.sh
 # this copy is CANONICAL
 sudo cp web/jellyfin-plus.js /usr/lib/jellyfin-plus/jellyfin-plus.js
+# the selectable "Jellyfin Plus" jellyfin-web theme (optional; the injector skips it when absent)
+sudo cp web/theme/jellyfinplus.css /usr/lib/jellyfin-plus/jellyfinplus-theme.css
 
 sudo chown -R jellyfin:jellyfin /var/lib/jellyfin/plugins/JellyfinPlus_$V
 ```
@@ -155,7 +157,10 @@ sudo /usr/local/sbin/jellyfin-plus-webinject
 ```
 
 This copies `/usr/lib/jellyfin-plus/jellyfin-plus.js` into `/usr/share/jellyfin/web/`, adds a
-`<script>` tag to `index.html`, and bumps a cache-busting version.
+`<script>` tag to `index.html`, and bumps a cache-busting version. It also installs the selectable
+"Jellyfin Plus" theme (`themes/jellyfinplus/theme.css` plus a `themes[]` entry in `config.json`,
+backed up as `config.json.jellyfin-plus-orig` / `-bak`) from `/usr/lib/jellyfin-plus/jellyfinplus-theme.css`,
+and withdraws the entry again if that file or the stock Dark theme is missing.
 
 **Never edit `/usr/share/jellyfin/web/jellyfin-plus.js` directly.** The injector overwrites it from
 the canonical copy in `/usr/lib/jellyfin-plus/`, so a direct edit gets silently reverted while

@@ -14,8 +14,9 @@
 # migration of the rest of the install is scripts/migrate-to-jellyfin-plus.sh.
 set -euo pipefail
 
-WEB=/usr/share/jellyfin/web
-SRC=/usr/lib/jellyfin-plus/jellyfin-plus.js
+# Overridable only so the script can be exercised against a scratch tree; the defaults are the install.
+WEB=${JP_WEB:-/usr/share/jellyfin/web}
+SRC=${JP_SRC:-/usr/lib/jellyfin-plus/jellyfin-plus.js}
 
 [ -f "$SRC" ] || { echo "jellyfin-plus: source $SRC missing, nothing to do"; exit 0; }
 [ -f "$WEB/index.html" ] || { echo "jellyfin-plus: $WEB/index.html missing, nothing to do"; exit 0; }
@@ -77,3 +78,98 @@ PYEOF
 rm -f "$WEB/gpu-upscale.js" "$WEB"/gpu-upscale.js.tmp.*
 
 echo "jellyfin-plus: index.html $result at v$VERSION"
+
+# The selectable "Jellyfin Plus" jellyfin-web theme (docs/roadmap/mobile-redesign.md 2.2, B): a
+# themes/jellyfinplus/theme.css plus a themes[] entry in config.json, both package-owned and both
+# replaced by a jellyfin-web upgrade, so both are written here on every run. It runs after the
+# index.html hook and cannot fail this script; everything about it fails soft:
+#   - the entry exists only while the css it names exists, and the css is written FIRST and removed
+#     LAST, so config.json never points at a missing file;
+#   - the css @imports the stock Dark theme for its base rules, so with no Dark theme on disk (or no
+#     source css) the theme is withdrawn rather than offered broken, and an unreadable config.json
+#     is left exactly as it is;
+#   - config.json is backed up like index.html (.jellyfin-plus-orig once, .jellyfin-plus-bak on each
+#     change) and rewritten only when the result differs; every other key and theme is preserved.
+THEME_SRC=${JP_THEME_SRC:-/usr/lib/jellyfin-plus/jellyfinplus-theme.css}
+theme_result=$(python3 - "$WEB" "$THEME_SRC" <<'PYEOF' || echo "skipped (error)"
+import json
+import os
+import shutil
+import sys
+
+web, src = sys.argv[1], sys.argv[2]
+cfg = os.path.join(web, 'config.json')
+tdir = os.path.join(web, 'themes', 'jellyfinplus')
+css = os.path.join(tdir, 'theme.css')
+ID = 'jellyfinplus'
+ENTRY = {'name': 'Jellyfin Plus', 'id': ID, 'color': '#0f1115'}
+
+
+def atomic(path, text):
+    # Temp file then rename, so a request mid-write never sees a truncated file.
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def set_entry(present):
+    """Add (or replace) / remove our themes[] entry. Returns True when config.json changed."""
+    with open(cfg) as f:
+        data = json.load(f)
+    themes = data.get('themes')
+    if not isinstance(themes, list):
+        raise ValueError('config.json has no themes list')
+    kept = [t for t in themes if not (isinstance(t, dict) and t.get('id') == ID)]
+    new = kept + [dict(ENTRY)] if present else kept
+    if new == themes:
+        return False
+    data['themes'] = new
+    orig = cfg + '.jellyfin-plus-orig'
+    if not os.path.exists(orig):
+        shutil.copy2(cfg, orig)
+    shutil.copy2(cfg, cfg + '.jellyfin-plus-bak')
+    atomic(cfg, json.dumps(data, indent=2) + '\n')
+    return True
+
+
+def withdraw(why):
+    changed = False
+    if os.path.isfile(cfg):
+        changed = set_entry(False)
+    if os.path.isdir(tdir):
+        shutil.rmtree(tdir)
+        changed = True
+    print(('withdrawn (%s)' if changed else 'absent (%s)') % why)
+
+
+if not os.path.isfile(cfg):
+    print('skipped (no config.json)')
+    sys.exit(0)
+try:
+    with open(cfg) as f:
+        json.load(f)
+except ValueError:
+    print('skipped (config.json unreadable)')
+    sys.exit(0)
+
+if not os.path.isfile(src):
+    withdraw('no source css')
+elif not os.path.isfile(os.path.join(web, 'themes', 'dark', 'theme.css')):
+    withdraw('no stock Dark theme to import')
+else:
+    with open(src) as f:
+        want = f.read()
+    os.makedirs(tdir, exist_ok=True)
+    have = None
+    if os.path.isfile(css):
+        with open(css) as f:
+            have = f.read()
+    if have != want:
+        atomic(css, want)
+    os.chmod(css, 0o644)
+    added = set_entry(True)
+    print('installed' if (have != want or added) else 'unchanged')
+PYEOF
+)
+echo "jellyfin-plus: theme $theme_result"

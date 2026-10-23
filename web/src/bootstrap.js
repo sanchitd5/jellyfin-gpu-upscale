@@ -37,6 +37,7 @@ import { installPrefsSync } from './controller/prefs-sync.js';
 import { installImagePreload } from './controller/image-preload.js';
 import { installListRequests } from './controller/list-requests.js';
 import { installListSort } from './controller/list-sort.js';
+import { installThemeFallback } from './controller/theme-fallback.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -58,6 +59,7 @@ function feature(name, install) {
     try {
         // Before hookWebpack: it arms noteLazyLoader(), which the module wrapper calls as chunks evaluate.
         feature('image preload', installImagePreload);
+        feature('theme fallback', installThemeFallback);
         hookWebpack();
         // Innermost on purpose: it must judge a search url AFTER network.js's markings have rewritten it.
         feature('search census', installSearchCensus);

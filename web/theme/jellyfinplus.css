@@ -1,0 +1,123 @@
+/*
+ * Jellyfin Plus: selectable jellyfin-web theme (docs/roadmap/mobile-redesign.md section 2.2, B).
+ *
+ * Source of /usr/share/jellyfin/web/themes/jellyfinplus/theme.css. scripts/jellyfin-plus-webinject
+ * installs this file there and adds the matching entry to config.json; nothing else reads it.
+ *
+ * Colour and shape only: no layout, no size change, nothing structural. The structural half of the
+ * redesign lives in the script-injected CSS (web/src/view/mobile-theme.js) and is scoped to the
+ * layout tiers; a stylesheet cannot know the tier. Choosing this theme is the viewer's own choice,
+ * so the colours may apply on TV too, but no rule here moves or resizes anything.
+ *
+ * A jellyfin-web theme.css must carry the stock base rules itself (every themes/<id>/theme.css has
+ * them compiled in), so the first line imports the stock Dark theme and the rules below only
+ * override its variables. The import resolves its own url()s relative to itself.
+ *
+ * The --jp-* names are the shared contract (docs/roadmap/mobile-redesign.md section 2.1 and the
+ * agent brief). They sit in :where() so they have zero specificity: when the script's injected
+ * tokens are present they win and the two never disagree, and when the script is missing these
+ * values stand alone.
+ */
+@import url("../dark/theme.css");
+
+/* Dark scheme (default). */
+:where(html[data-theme="jellyfinplus"]) {
+    --jp-bg: #0f1115;
+    --jp-surface: #181b21;
+    --jp-surface-2: #22262e;
+    --jp-text: #f2f4f7;
+    --jp-text-muted: #aab2bf;
+    --jp-border: #3a404b;
+    --jp-accent: #5ccfff;
+    --jp-accent-hover: #8ddcff;
+    --jp-on-accent: #0b1a22;
+    --jp-error: #ff6b6b;
+    --jp-scrim: rgba(0, 0, 0, .6);
+    /* r g b triplets, for the alpha-blended palette entries below. */
+    --jp-accent-rgb: 92 207 255;
+    --jp-surface-rgb: 24 27 33;
+
+    --jp-radius-s: 6px;
+    --jp-radius-m: 10px;
+    --jp-radius-l: 16px;
+    --jp-space-1: 4px;
+    --jp-space-2: 8px;
+    --jp-space-3: 12px;
+    --jp-space-4: 16px;
+    --jp-space-5: 24px;
+    --jp-space-6: 32px;
+    --jp-tap: 44px;
+    --jp-elev-1: 0 0 0 1px var(--jp-border);
+    --jp-elev-2: 0 -8px 24px rgba(0, 0, 0, .35);
+    --jp-dur-fast: 120ms;
+    --jp-dur: 200ms;
+    --jp-ease: cubic-bezier(.2, .8, .2, 1);
+}
+
+/* Light scheme, from the OS preference (a theme has no other signal). */
+@media (prefers-color-scheme: light) {
+    :where(html[data-theme="jellyfinplus"]) {
+        --jp-bg: #f7f8fa;
+        --jp-surface: #ffffff;
+        --jp-surface-2: #eef0f4;
+        --jp-text: #15181e;
+        --jp-text-muted: #4b5563;
+        --jp-border: #c9ced6;
+        --jp-accent: #0369a1;
+        --jp-accent-hover: #075985;
+        --jp-on-accent: #ffffff;
+        --jp-error: #b42318;
+        --jp-scrim: rgba(0, 0, 0, .35);
+        --jp-accent-rgb: 3 105 161;
+        --jp-surface-rgb: 255 255 255;
+        --jp-elev-1: 0 1px 3px rgba(0, 0, 0, .12);
+        --jp-elev-2: 0 -8px 24px rgba(0, 0, 0, .2);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    :where(html[data-theme="jellyfinplus"]) {
+        --jp-dur-fast: 0ms;
+        --jp-dur: 0ms;
+    }
+}
+
+/*
+ * The stock palette. MUI emits --jf-palette-* on :root for the default scheme, so an unknown
+ * data-theme id keeps those values; this block outranks them (0,2,0 against 0,1,0) and points
+ * them at the tokens, which restyles the legacy pages and the MUI pages alike.
+ */
+:root[data-theme="jellyfinplus"] {
+    color-scheme: dark;
+    --jf-palette-background-default: var(--jp-bg);
+    --jf-palette-background-paper: var(--jp-surface);
+    --jf-palette-background-paperChannel: var(--jp-surface-rgb);
+    --jf-palette-text-primary: var(--jp-text);
+    --jf-palette-text-secondary: var(--jp-text-muted);
+    --jf-palette-divider: var(--jp-border);
+    --jf-palette-primary-main: var(--jp-accent);
+    --jf-palette-primary-mainChannel: var(--jp-accent-rgb);
+    --jf-palette-primary-dark: var(--jp-accent-hover);
+    --jf-palette-primary-contrastText: var(--jp-on-accent);
+    --jf-palette-secondary-main: var(--jp-accent);
+    --jf-palette-secondary-contrastText: var(--jp-on-accent);
+    --jf-palette-error-main: var(--jp-error);
+    --jf-palette-error-light: var(--jp-error);
+    --jf-palette-AppBar-defaultBg: var(--jp-surface);
+    --jf-palette-AppBar-transparentBg: var(--jp-scrim);
+    --jf-palette-action-hover: rgb(var(--jp-accent-rgb) / .12);
+    --jf-palette-action-focus: rgb(var(--jp-accent-rgb) / .24);
+    --jf-palette-FilledInput-bg: var(--jp-surface-2);
+    --jf-palette-FilledInput-borderColor: var(--jp-border);
+    --jf-palette-Alert-infoFilledBg: var(--jp-accent);
+    --jf-palette-Alert-infoFilledColor: var(--jp-on-accent);
+    --jf-palette-SnackbarContent-bg: var(--jp-surface-2);
+    --jf-palette-SnackbarContent-color: var(--jp-text);
+    --jf-card-borderRadius: var(--jp-radius-m);
+}
+
+@media (prefers-color-scheme: light) {
+    :root[data-theme="jellyfinplus"] {
+        color-scheme: light;
+    }
+}
