@@ -11,6 +11,9 @@ import {
     fetchPeopleFacets,
     refreshIfActive
 } from '../controller/search-filters.js';
+import { loadVisible, namesNow, resolveNames } from '../controller/quick-tags.js';
+import { openQuickTagsEditor } from './quick-tags-editor.js';
+import { chipsFor, isSelected, selectedIn, pruneSelection } from '../model/quick-tags.js';
 import {
     SORTS,
     TYPES,
@@ -84,6 +87,11 @@ var CSS = [
     '.jfp-sub { margin: 0.3em 0 0.7em; }',
     '.jfp-pills { display: flex; flex-wrap: wrap; gap: 0.45em; margin: 0 0 0.7em; }',
     '.jfp-pills[hidden] { display: none; }',
+    // Quick tag groups on a phone: one horizontally scrolling line per group.
+    'html:not(.jp-theme-off):not(.layout-tv):is(.jp-phone, .layout-mobile:not(.jp-tablet):not(.jp-desktop)) .jfp-pills.jfp-scroll'
+        + ' { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;'
+        + ' overscroll-behavior-x: contain; }',
+    '.jfp-pills.jfp-scroll .jfp-pill { flex: none; }',
     '.jfp-pill { min-height: 40px; padding: 0 1em; box-sizing: border-box; border-radius: 20px; border: 1px solid ' + LINE + ';'
         + ' background: transparent; color: inherit; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }',
     '.jfp-pill[aria-pressed=true] { background: ' + P + '; border-color: ' + P + ';'
@@ -434,6 +442,72 @@ function openSheet(opener) {
         loadTags();
     }
 
+    /* ---- quick tag groups (owner-configured; nothing is drawn when there are none) ---- */
+    var quickHost = el('div');
+    body.appendChild(quickHost);
+    loadVisible(searchParentId()).then(function (groups) {
+        if (!sheet || !groups || !quickHost.isConnected) {
+            return;
+        }
+
+        // A pick for a group the owner removed would filter with no chip to show for it.
+        draft.quick = pruneSelection(draft.quick, groups);
+        groups.forEach(function (g) {
+            var sec = el('section', 'jfp-sec');
+            sec.appendChild(el('h3', null, g.auto ? g.name + ' (auto)' : g.name));
+            var pills = el('div', 'jfp-pills jfp-scroll');
+            pills.setAttribute('role', 'group');
+            pills.setAttribute('aria-label', g.name);
+            sec.appendChild(pills);
+            var built = '';
+            var draw = function (names) {
+                var chips = chipsFor(g, names, selectedIn(draft.quick, g.name));
+                var sig = chips.map(function (c) { return c.tag; }).join('\u0001');
+                if (sig === built) {
+                    return;
+                }
+
+                built = sig;
+                pills.textContent = '';
+                chips.forEach(function (c) {
+                    var b = button('jfp-pill', c.label);
+                    b.setAttribute('aria-pressed', 'false');
+                    b.setAttribute('data-tag', c.tag);
+                    b.addEventListener('click', function () {
+                        var on = !isSelected(draft.quick, g.name, c.tag);
+                        draft.quick = draft.quick.filter(function (q) { return !(q.group === g.name && q.tag === c.tag); });
+                        if (on) {
+                            draft.quick.push({ group: g.name, tag: c.tag, label: c.label });
+                        }
+
+                        refreshAll();
+                    });
+                    pills.appendChild(b);
+                });
+                sec.hidden = chips.length === 0;
+                refreshAll();
+            };
+            quickHost.appendChild(sec);
+            refreshers.push(function () {
+                Array.prototype.forEach.call(pills.children, function (b) {
+                    setPressed(b, isSelected(draft.quick, g.name, b.getAttribute('data-tag')));
+                });
+            });
+            sec.hidden = true;
+            draw(namesNow(g) || []);
+            resolveNames(g).then(function (names) { if (quickHost.isConnected) { draw(names); } });
+        });
+
+        // The way into the editor. It replaces this sheet, so unapplied edits here are dropped.
+        var editSec = el('div', 'jfp-pills');
+        var edit = button('jfp-pill', groups.length ? '⚙ Edit quick filters' : '+ Add quick filters');
+        edit.addEventListener('click', function () { openQuickTagsEditor(opener, null, searchParentId()); });
+        editSec.style.marginTop = '0.7em';
+        editSec.appendChild(edit);
+        quickHost.appendChild(editSec);
+        refreshAll();
+    });
+
     /* ---- people and studios ---- */
     function entityPicker(kind, title, key, useFacets) {
         var facet = useFacets ? { all: null } : null;
@@ -774,6 +848,23 @@ function openSheet(opener) {
     log('search filter sheet opened');
 }
 
+/* Quick picks saved for a group the owner has since removed would filter with no chip to show: clear them. */
+function pruneCommitted() {
+    loadVisible(searchParentId()).then(function (groups) {
+        var cur = currentFilters();
+        if (!groups || !cur.quick.length) {
+            return;
+        }
+
+        var keep = pruneSelection(cur.quick, groups);
+        if (keep.length !== cur.quick.length) {
+            var next = JSON.parse(JSON.stringify(cur));
+            next.quick = keep;
+            commit(next);
+        }
+    });
+}
+
 /* ---- installation ---- */
 
 function scan() {
@@ -792,6 +883,7 @@ function scan() {
 
             fields.appendChild(buildBar());
             log('search sort & filter bar added');
+            pruneCommitted();
             // Results already on screen (or restored from the persisted cache) may predate the filters.
             refreshIfActive();
         });

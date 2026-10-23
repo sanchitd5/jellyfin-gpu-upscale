@@ -17,6 +17,8 @@
  *   jpMinRuntime / jpMaxRuntime   whole minutes, inclusive
  *   jpMinDateAdded / jpMaxDateAdded  YYYY-MM-DD, UTC, inclusive by day
  *   jpResolution                  comma list of sd,hd,4k
+ *   jpTagAnyOf                    one per quick tag group with a pick: the picked tags joined by `|`
+ *                                 (OR inside a group, AND between groups; model/quick-tags.js)
  *
  * Type is the one filter jellyfin-web's own two /Items search queries (the Video query, marked by
  * mediaTypes=Video, and the all-types query) answer differently, so it is done by steering them:
@@ -24,6 +26,8 @@
  * discards (it only builds sections for the item types it asked for), and the other one carries
  * the filters. See typePlan().
  */
+
+import { SEP, MAX_GROUPS, MAX_NAMES, usableTag, anyOfValues } from './quick-tags.js';
 
 export var STORE_KEY = 'jellyfinPlus.searchFilters';
 
@@ -94,6 +98,7 @@ export function defaultState() {
         seed: 0,
         tags: [],
         tagAll: false,
+        quick: [],
         people: [],
         roles: [],
         peopleAll: false,
@@ -145,6 +150,28 @@ function entities(list) {
     return out;
 }
 
+/* Quick tag picks: [{ group, tag, label }], well-formed, deduplicated, within the wire's caps. */
+function quickPicks(list) {
+    var out = [];
+    var groups = {};
+    (Array.isArray(list) ? list : []).forEach(function (q) {
+        if (!q || typeof q.group !== 'string' || !q.group || q.group.length > 100 || q.group.indexOf(SEP) !== -1
+            || !usableTag(q.tag)) {
+            return;
+        }
+
+        var inGroup = out.filter(function (x) { return x.group === q.group; });
+        if (inGroup.some(function (x) { return x.tag === q.tag; }) || inGroup.length >= MAX_NAMES
+            || (!groups[q.group] && Object.keys(groups).length >= MAX_GROUPS)) {
+            return;
+        }
+
+        groups[q.group] = true;
+        out.push({ group: q.group, tag: q.tag, label: typeof q.label === 'string' && q.label ? q.label : q.tag });
+    });
+    return out;
+}
+
 /* Anything -> a well-formed state. Used on every load and on every draft, so nothing malformed
  * (hand-edited storage, an older shape) can reach a URL. */
 export function normalizeState(raw) {
@@ -167,6 +194,7 @@ export function normalizeState(raw) {
         }
     });
     s.tagAll = raw.tagAll === true;
+    s.quick = quickPicks(raw.quick);
     s.people = entities(raw.people);
     // Canonical ROLES order, unknown names dropped: nothing but a PersonKind name reaches a URL.
     s.roles = ROLES.map(function (x) { return x.value; }).filter(function (v) {
@@ -309,6 +337,11 @@ export function chipsOf(s) {
         out.push({ group: 'tags', id: 'tagAll', label: 'Match all tags' });
     }
 
+    // One badge count per quick group, however many of its chips are picked.
+    s.quick.forEach(function (q) {
+        out.push({ group: 'quick:' + q.group, id: 'quick:' + q.group + SEP + q.tag, label: q.group + ': ' + q.label });
+    });
+
     var roleText = roleLabels(s);
     s.people.forEach(function (p) {
         out.push({ group: 'people', id: 'person:' + p.id, label: 'Cast: ' + p.name + (roleText ? ' (' + roleText + ')' : '') });
@@ -385,6 +418,8 @@ export function removeChip(s, id) {
         n.tags = n.tags.filter(function (t) { return t !== arg; });
     } else if (kind === 'tagAll') {
         n.tagAll = false;
+    } else if (kind === 'quick') {
+        n.quick = n.quick.filter(function (q) { return q.group + SEP + q.tag !== arg; });
     } else if (kind === 'person') {
         n.people = n.people.filter(function (p) { return p.id !== arg; });
         if (!n.people.length) {
@@ -470,6 +505,8 @@ export function filterPairs(s, now) {
         }
     }
 
+    anyOfValues(s.quick).forEach(function (v) { p.push(['jpTagAnyOf', v]); });
+
     if (s.people.length) {
         p.push(['personIds', s.people.map(function (x) { return x.id; }).join(',')]);
         if (activeRoles(s).length) {
@@ -513,7 +550,7 @@ export function filterPairs(s, now) {
 // Every parameter this module may write: removed from the URL first so a value is never doubled.
 var OWNED = [
     'sortby', 'sortorder', 'jpseed', 'isplayed', 'isfavorite', 'tags', 'tagmatch', 'personids',
-    'persontypes', 'jppersonmatch', 'studioids', 'jpminruntime', 'jpmaxruntime', 'jpmindateadded', 'jpmaxdateadded', 'jpresolution'
+    'persontypes', 'jppersonmatch', 'studioids', 'jpminruntime', 'jpmaxruntime', 'jpmindateadded', 'jpmaxdateadded', 'jpresolution', 'jptaganyof'
 ];
 
 function keyOf(piece) {

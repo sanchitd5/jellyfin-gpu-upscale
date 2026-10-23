@@ -3,7 +3,8 @@
  * DisplayPreferences.CustomPrefs). No DOM, no network: controller/prefs-sync.js does the wiring.
  *
  * WHAT SYNCS. Only choices that should follow the viewer from device to device: the Enhance panel's
- * stage and per-axis picks, the search page size and the paged/infinite choice. Not the panel's
+ * stage and per-axis picks, the search page size and the paged/infinite choice, and the viewer's quick
+ * tag-filter groups. Not the panel's
  * position (device-specific, so it is dropped from the synced value and kept local), not committed
  * search filters or the exclude box (query state), not UI collapse state, debug flag or name caches.
  *
@@ -18,7 +19,11 @@
 export var SYNCED = [
     { local: 'jellyfinPlusPrefs', remote: 'jellyfinPlus.prefs', drop: 'pos' },
     { local: 'jellyfinPlus.searchPageSize', remote: 'jellyfinPlus.searchPageSize' },
-    { local: 'jellyfinPlus.searchPaging', remote: 'jellyfinPlus.searchPaging' }
+    { local: 'jellyfinPlus.searchPaging', remote: 'jellyfinPlus.searchPaging' },
+    // The viewer's quick tag-filter groups (model/quick-tags.js keeps the stored form well under MAX_VALUE_LENGTH).
+    { local: 'jellyfinPlus.quickTags', remote: 'jellyfinPlus.quickTags' },
+    // Which suggested groups the viewer hid or renamed (small: capped at 100 of each).
+    { local: 'jellyfinPlus.quickTagsAuto', remote: 'jellyfinPlus.quickTagsAuto' }
 ];
 
 /* localStorage key holding {userId: {localKey: t}}, the time each local value last changed. */

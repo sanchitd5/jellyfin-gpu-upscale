@@ -38,6 +38,9 @@ namespace Jellyfin.Plugin.Plus.Patcher
     ///   query, and each tag is then required additionally. (OR AND each-tag) equals AND, so the
     ///   postfix can only narrow what the stock query returned. The stock query is not rewritten.
     ///
+    /// - jpTagAnyOf (repeatable): one parameter value per group, tag names joined by '|'. The item must
+    ///   carry at least one tag of EACH group (OR inside a group, AND between groups). Same postfix.
+    ///
     /// THREE MORE NARROWING FILTERS, same postfix, same request scoping (any /Items request, only when
     /// the parameter is present): jpMinRuntime/jpMaxRuntime (whole minutes, inclusive, on
     /// RunTimeTicks; an item with no runtime matches neither), jpMinDateAdded/jpMaxDateAdded
@@ -65,6 +68,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
         public const string MinAddedParam = "jpMinDateAdded";
         public const string MaxAddedParam = "jpMaxDateAdded";
         public const string ResolutionParam = "jpResolution";
+        public const string TagAnyOfParam = "jpTagAnyOf";
 
         // Stock TranslateQuery's isHd / is4K thresholds (12.1; identical on 12.3).
         private const int HDWidth = 1200;
@@ -75,6 +79,10 @@ namespace Jellyfin.Plugin.Plus.Patcher
         // Each term is one more NOT EXISTS / EXISTS in the SQL, so what a request can ask is bounded.
         private const int MaxTerms = 100;
         private const int MaxTermLength = 200;
+
+        // jpTagAnyOf: each group is one more EXISTS, each name one more IN member.
+        private const int MaxAnyOfGroups = 10;
+        private const int MaxAnyOfNames = 100;
 
         // Same static-AsyncLocal trick as SearchPatches: a fresh accessor reads the current context.
         private static readonly HttpContextAccessor _http = new HttpContextAccessor();
@@ -222,6 +230,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
 
                 var query = __result;
                 query = MatchAll(query, filter, request);
+                query = TagAnyOf(query, request);
                 query = RuntimeRange(query, request);
                 query = DateAddedRange(query, request);
                 query = Resolution(query, context, request);
@@ -251,6 +260,61 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 var t = tag;
                 query = query.Where(e => e.ItemValues!.Any(v => v.ItemValue.Type == ItemValueType.Tags
                     && v.ItemValue.CleanValue == t));
+            }
+
+            return query;
+        }
+
+        /// <summary>
+        /// jpTagAnyOf: one parameter value per group, tag names separated by '|'. The item must carry at
+        /// least one tag of EACH group (OR inside a group, AND between groups). Names are cleaned the way
+        /// stored tags are. A group with no usable name is ignored; a name over the length cap is dropped;
+        /// groups and names past the caps are not read. Only ever a Where, so it only narrows.
+        /// </summary>
+        internal static string[][] ParseTagAnyOf(IEnumerable<string> values)
+        {
+            var groups = new List<string[]>();
+            foreach (var value in values ?? Array.Empty<string>())
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                var names = value.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(n => n.Length <= MaxTermLength)
+                    .Select(n => n.GetCleanValue())
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(MaxAnyOfNames)
+                    .ToArray();
+                if (names.Length > 0)
+                {
+                    groups.Add(names);
+                }
+
+                if (groups.Count >= MaxAnyOfGroups)
+                {
+                    break;
+                }
+            }
+
+            return groups.ToArray();
+        }
+
+        private static IQueryable<BaseItemEntity> TagAnyOf(IQueryable<BaseItemEntity> query, HttpRequest request)
+        {
+            if (!request.Query.TryGetValue(TagAnyOfParam, out var values))
+            {
+                return query;
+            }
+
+            foreach (var group in ParseTagAnyOf(values))
+            {
+                // A fresh local per iteration: the expression captures the variable, not its value.
+                var names = group;
+                query = query.Where(e => e.ItemValues!.Any(v => v.ItemValue.Type == ItemValueType.Tags
+                    && names.Contains(v.ItemValue.CleanValue)));
             }
 
             return query;

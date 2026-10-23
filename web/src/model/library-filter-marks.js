@@ -1,3 +1,5 @@
+import { SEP, anyOfValues } from './quick-tags.js';
+
 /*
  * THE LIBRARY FILTER'S EXTRA STATE, CARRIED INSIDE jellyfin-web's OWN FILTER STATE.
  *
@@ -16,6 +18,7 @@
  *   MARK x:<tag name> END   -> excludeTagNames=<tag name>            (one parameter per tag)
  *   MARK all: END           -> tagMatch=all
  *   MARK p:<person id> END  -> personIds=<id>[,<id>...]
+ *   MARK a:<group> SEP <tag> END -> jpTagAnyOf=<tag>[|<tag>...]   (one parameter per group: quick tag chips)
  *
  * Every marker ends in END, so it is self-delimiting however the array was joined into the URL
  * (the SDK uses `|`, the legacy API client a comma): a tag name may contain either.
@@ -43,7 +46,7 @@ export function isMark(s) {
 
 /* A Filters.Tags array, split into the real tags and the state riding along with them. */
 export function parseTags(list) {
-    var out = { tags: [], exclude: [], people: [], all: false };
+    var out = { tags: [], exclude: [], people: [], any: [], all: false };
     (Array.isArray(list) ? list : []).forEach(function (t) {
         if (typeof t !== 'string') {
             return;
@@ -65,6 +68,11 @@ export function parseTags(list) {
             out.people.push(m[2]);
         } else if (m[1] === 'all') {
             out.all = true;
+        } else if (m[1] === 'a') {
+            var at = m[2].indexOf(SEP);
+            if (at > 0 && at < m[2].length - 1) {
+                out.any.push({ group: m[2].slice(0, at), tag: m[2].slice(at + 1) });
+            }
         }
     });
     return out;
@@ -75,6 +83,7 @@ export function buildTags(p) {
     return p.tags
         .concat(p.exclude.map(function (n) { return mark('x', n); }))
         .concat(p.people.map(function (id) { return mark('p', id); }))
+        .concat((p.any || []).map(function (a) { return mark('a', a.group + SEP + a.tag); }))
         .concat(p.all ? [mark('all')] : []);
 }
 
@@ -130,6 +139,7 @@ export function rewriteLibraryUrl(url) {
 
         var exclude = [];
         var people = [];
+        var any = [];
         var all = false;
         var real = [];
         tagValues.forEach(function (value) {
@@ -140,6 +150,11 @@ export function rewriteLibraryUrl(url) {
                     exclude.push(payload);
                 } else if (kind === 'p') {
                     people.push(payload);
+                } else if (kind === 'a') {
+                    var cut = payload.indexOf(SEP);
+                    if (cut > 0 && cut < payload.length - 1) {
+                        any.push({ group: payload.slice(0, cut), tag: payload.slice(cut + 1) });
+                    }
                 } else if (kind === 'all') {
                     all = true;
                 }
@@ -167,6 +182,8 @@ export function rewriteLibraryUrl(url) {
             if (people.length) {
                 extra.push('personIds=' + people.map(encodeURIComponent).join(','));
             }
+
+            anyOfValues(any).forEach(function (v) { extra.push('jpTagAnyOf=' + encodeURIComponent(v)); });
         }
 
         var at = tagsAt === -1 ? kept.length : tagsAt;
