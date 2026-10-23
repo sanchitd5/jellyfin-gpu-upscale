@@ -36,6 +36,8 @@ esbuild) support natively.
 | `model/costing.js` | `serverConfig()`, `eligibleTargets()`, `srWouldRun()`, `stageCost()`, `selectionCost()`, `costHint()` | `state.js`, `controls-data.js` (`CONTROLS`), `effective.js` (`shownPrefs`) `<->`, `lib/utils.js` (`isOff`) |
 | `model/ladder.js` | `ladder()`, `recommendedStage()`, `sameStage()`, `currentStage()`, `stageText()` | `state.js`, `costing.js` |
 | `model/effective.js` | `effective()`, `displayPrefs()`, `shownPrefs()`, `anyEnhancement()`, `summaryText()`, `advancedText()` | `state.js`, `controls-data.js` (`DEFAULT_PREFS`), `ladder.js`, `costing.js` (`eligibleTargets`), `controller/network.js` (`wireParams`) `<->`, `lib/utils.js` (`isOff`) |
+| `model/detail-nav.js` | `STORAGE_KEY`, `MAX_IDS`, `normId()`, `runAround()`, `neighbours()`, `encode()`, `decode()`, `detailHref()` (pure; unit-tested by `model/detail-nav.test.mjs`) | none (pure) |
+| `model/tag-input.js` | `currentToken()`, `withToken()`, `finishedTags()`, `planAdd()`, `sortLikeEditor()`, `pickSuggestions()` (pure; unit-tested by `model/tag-input.test.mjs`) | `controller/bulk-tags.js` (`parseTags`, `mergeTags`) |
 | `model/conflicts.js` | `axisConflict()`, `optionInert()`, `costSuffix()`, `shortName()`, `gameOwnsOutputSize()`, `neuralCudaLevels()`, `neuralCudaDisables()`, `cudaDenoiseLevels()`, `neuralIsCudaNative()` | `state.js` (`COSTS`), `lib/utils.js` (`isOff`), `costing.js` (`eligibleTargets`), `effective.js` (`shownPrefs`) |
 
 ## controller/ - orchestration
@@ -68,6 +70,10 @@ esbuild) support natively.
 | `controller/detail-related.js` | `installDetailRelated()`, `noteCardBuilder()`, `getCardBuilder()` | `lib/log.js`, `lib/dom.js` (`el`) |
 | `controller/person-videos.js` | `installPersonVideos()`, `rewriteSectionUrl()` | `lib/log.js` |
 | `controller/bulk-tags.js` | `parseTags()`, `mergeTags()`, `buildPayload()`, `changedFields()`, `editItemTags()`, `runBulk()`, `loadTagNames()`, `loadSelectionTags()`, `installBulkTags()` | `lib/log.js`, `view/bulk-tags-dialog.js` (`showTagDialog`) |
+| `controller/detail-page.js` | `watchDetail()` (one shared watcher for `#itemDetailPage`: fetches the item once per page and id, calls each watcher's `start(page, id)` and `item(page, item)`) | `lib/log.js` |
+| `controller/detail-nav.js` | `installDetailNav()` (captures the list's card order on a card click into sessionStorage; adds previous / next buttons to the details button row) | `lib/log.js`, `detail-page.js` (`watchDetail`), `model/detail-nav.js` |
+| `controller/detail-download.js` | `installDetailDownload()` (unhides the stock `.btnDownload` for downloadable videos) | `lib/log.js`, `detail-page.js` (`watchDetail`) |
+| `controller/tag-autocomplete.js` | `installTagAutocomplete()` (suggestions and comma splitting in the metadata editor's tag prompt) | `lib/log.js`, `lib/dom.js` (`el`), `tag-window.js` (`fetchTagWindow`, `normalize`), `model/tag-input.js` |
 
 ## view/ - DOM rendering
 
@@ -89,7 +95,7 @@ esbuild) support natively.
 
 | module | exports | imports |
 |---|---|---|
-| `bootstrap.js` | none (runs the install try/catch as a side effect) | `lib/storage-migrate.js` (first import; must run before `prefs-store.js` loads), `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/search-census.js` (`installSearchCensus`, through `feature()`, installed BEFORE `hookFetch`/`hookXhr`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`), `controller/search-exclude.js` (`watchSearchPage`), `controller/search-scope.js` (`installSearchScopeFix`), `view/search-grid.js` (`installSearchGrid`), `view/search-pager.js` (`installSearchPager`, through `feature()`), `view/search-filter-sheet.js` (`installSearchFilterBar`, through `feature()`), `view/image-zoom.js` (`installImageZoom`), and the QoL installers: `controller/play-all.js`, `view/card-actions.js`, `controller/double-tap-seek.js`, `controller/clip-upnext.js`, `controller/detail-related.js`, `controller/person-videos.js`, `controller/bulk-tags.js` (each through `feature()`, its own try/catch) |
+| `bootstrap.js` | none (runs the install try/catch as a side effect) | `lib/storage-migrate.js` (first import; must run before `prefs-store.js` loads), `model/state.js`, `lib/log.js`, `model/prefs-store.js` (for its load-on-import side effect), `controller/webpack-hook.js` (`hookWebpack`), `controller/search-census.js` (`installSearchCensus`, through `feature()`, installed BEFORE `hookFetch`/`hookXhr`), `controller/network.js` (`hookFetch`, `hookXhr`), `controller/playback-hooks.js` (`watchPlaybackInfoDialog`), `controller/probe.js` (`probeServer`), `controller/search-exclude.js` (`watchSearchPage`), `controller/search-scope.js` (`installSearchScopeFix`), `view/search-grid.js` (`installSearchGrid`), `view/search-pager.js` (`installSearchPager`, through `feature()`), `view/search-filter-sheet.js` (`installSearchFilterBar`, through `feature()`), `view/image-zoom.js` (`installImageZoom`), and the QoL installers: `controller/play-all.js`, `view/card-actions.js`, `controller/double-tap-seek.js`, `controller/clip-upnext.js`, `controller/detail-related.js`, `controller/person-videos.js`, `controller/bulk-tags.js`, `controller/detail-nav.js`, `controller/detail-download.js`, `controller/tag-autocomplete.js` (each through `feature()`, its own try/catch) |
 | `banner.txt` | n/a - not a module, injected as the bundle's leading comment via esbuild's `--banner:js` | none |
 
 ## Build
