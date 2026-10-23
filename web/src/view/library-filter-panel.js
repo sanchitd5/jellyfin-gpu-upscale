@@ -46,6 +46,9 @@ var OTHER_ENDPOINT_TABS = ['artists', 'albumartists', 'authors', 'studios'];
 // Tabs where the stock popover hides studios / resolution and /Items filtering applies.
 var EXTRA_TABS = ['videos', 'folders', 'mixed', 'musicvideos'];
 
+/* A phone: the phone tier, or stock's mobile layout until the tier classes exist. Never TV or theme-off. */
+var PHONE_TIER = 'html:not(.jp-theme-off):not(.layout-tv):is(.jp-phone, .layout-mobile:not(.jp-tablet):not(.jp-desktop))';
+
 var CSS = [
     '#' + TAGS_REGION_ID + ' label.MuiFormControlLabel-root { display: flex; width: 100%; margin-right: 0; }',
     '#' + TAGS_REGION_ID + ' label[hidden] { display: none; }',
@@ -73,8 +76,82 @@ var CSS = [
     '.gu-sec label.gu-row { display: flex; align-items: center; gap: 0.5em; padding: 0.4em 0; cursor: pointer; }',
     '.gu-results { max-height: 14em; overflow-y: auto; margin-top: 0.4em; }',
     'html.layout-mobile #' + POPOVER_ID + ' .MuiPopover-paper { width: min(94vw, 440px) !important;'
-        + ' max-height: 75% !important; }'
+        + ' max-height: 75% !important; }',
+
+    /*
+     * PHONE: the same popover, drawn as a bottom sheet (the look of view/search-filter-sheet.js).
+     * It is the stock MUI Popover - its paper restyled, not moved or copied - so React keeps owning
+     * the state, focus trap and close handling, and the request is whatever the stock state makes
+     * it. Inline top/left/transform from MUI lose to !important. The invisible backdrop becomes a
+     * scrim; tapping it closes the popover as it always did.
+     */
+    PHONE_TIER + ' #' + POPOVER_ID + ' .MuiBackdrop-root { background: rgba(0,0,0,0.5) !important; opacity: 1 !important; }',
+    PHONE_TIER + ' #' + POPOVER_ID + ' .MuiPopover-paper {'
+        + ' position: fixed !important; top: auto !important; left: 0 !important; right: 0 !important; bottom: 0 !important;'
+        + ' width: 100% !important; max-width: 100% !important; max-height: 85vh !important; max-height: 85dvh !important;'
+        + ' transform: none !important; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;'
+        + ' border-radius: var(--jp-radius-l, 16px) var(--jp-radius-l, 16px) 0 0 !important;'
+        + ' padding-bottom: env(safe-area-inset-bottom, 0px); }',
+    '.jpFsHead { position: sticky; top: 0; z-index: 3; background: inherit; display: flex; align-items: center;'
+        + ' flex-wrap: wrap; padding: 0 8px 0 16px; border-bottom: 1px solid rgba(128,128,128,0.3); }',
+    '.jpFsHead .jpFsHandle { flex: 0 0 100%; height: 4px; width: 36px; margin: 8px auto 0; border-radius: 2px;'
+        + ' background: rgba(128,128,128,0.6); }',
+    '.jpFsHead .jpFsTitle { flex: 1; font-size: 1.05em; font-weight: 600; min-height: var(--jp-tap, 44px);'
+        + ' display: flex; align-items: center; }',
+    '.jpFsHead button { min-width: var(--jp-tap, 44px); min-height: var(--jp-tap, 44px); background: none; border: 0;'
+        + ' color: var(--jp-accent, inherit); font: inherit; font-weight: 600; cursor: pointer; }'
 ].join('\n');
+
+// html.jp-sheet-open is the shared sheet's flag (view/sheet.js); only take it down if this set it.
+var ownsSheetClass = false;
+
+function releaseSheetClass() {
+    if (ownsSheetClass) {
+        document.documentElement.classList.remove('jp-sheet-open');
+        ownsSheetClass = false;
+    }
+}
+
+function isPhoneSheet() {
+    var c = document.documentElement.classList;
+    return !c.contains('layout-tv') && !c.contains('jp-theme-off')
+        && (c.contains('jp-phone') || (c.contains('layout-mobile') && !c.contains('jp-tablet') && !c.contains('jp-desktop')));
+}
+
+/* Handle, title and Done at the top of the paper. Done presses the stock backdrop: the stock close. */
+function syncSheetHead(root) {
+    var c = document.documentElement.classList;
+    if (!isPhoneSheet()) {
+        releaseSheetClass();
+        return;
+    }
+
+    var paper = root.querySelector('.MuiPopover-paper');
+    if (!paper) {
+        return;
+    }
+
+    if (!c.contains('jp-sheet-open')) {
+        c.add('jp-sheet-open');
+        ownsSheetClass = true;
+    }
+
+    if (paper.querySelector(':scope > .jpFsHead')) {
+        return;
+    }
+
+    var head = el('div', 'jpFsHead');
+    head.appendChild(el('div', 'jpFsHandle'));
+    head.appendChild(el('div', 'jpFsTitle', 'Filter'));
+    var done = el('button', null, 'Done');
+    done.type = 'button';
+    done.addEventListener('click', function () {
+        var bd = root.querySelector('.MuiBackdrop-root');
+        if (bd) { bd.click(); }
+    });
+    head.appendChild(done);
+    paper.insertBefore(head, paper.firstChild);
+}
 
 /* ---- helpers ---- */
 
@@ -495,6 +572,9 @@ function sync() {
         return;
     }
 
+    // The sheet look needs no tab context: it is only the paper's frame.
+    syncSheetHead(root);
+
     var ctx = contextOf(root);
     if (!ctx) {
         return;
@@ -550,6 +630,7 @@ function scan() {
     observedRoot = root;
     if (!root) {
         openedFor = null;
+        releaseSheetClass();
         return;
     }
 

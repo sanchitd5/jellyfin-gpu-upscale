@@ -480,6 +480,18 @@ about 0.3 s per image the first time a size is requested (it resizes, then cache
 Stock's own observer and the URLs it asks for are unchanged. Off switch:
 `localStorage jellyfinPlus.imagePreload = off`. Not active on the TV layout.
 
+**Library grid, card treatment, phone filter sheet, hearts everywhere** (redesign P5/P6; no storage
+keys). `view/library-grid.js` turns wrapping card lists (`.itemsContainer.vertical-wrap`, not home,
+details or Search) into a grid on phone/tablet tiers; columns = `columnsFor(width, shape)`
+(`model/grid-density.js`, minimum card width per shape in rem, never a fixed 2/3), recomputed on
+resize. Under `.jpGrid` the title sits over the picture, chips top-left, heart + more bottom-right
+(play is dropped; a tap on the picture opens or plays). Image requests are unchanged (cardBuilder's
+own `getPostersPerRow`). Search's phone grid is `auto-fill` too. On phones the library filter popover
+is restyled as a bottom sheet (same stock MUI Popover, so state and request are stock's; Done presses
+the stock backdrop); `html.jp-sheet-open` is set while open. The card-actions heart now shows on every
+non-TV tier (44 px) and on `.listItem` rows that have no stock heart, kept in step with stock's
+hearts through `data-isfavorite`.
+
 **Mobile card actions** (`web/src/view/card-actions.js`). Under `html.layout-mobile`, a row of
 favourite, more and play buttons on each card in an items container (stock shows favourite and more
 only in a desktop hover overlay). More and Play use the stock `itemAction` handlers; Favourite calls

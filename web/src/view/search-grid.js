@@ -9,7 +9,7 @@ import { log } from '../lib/log.js';
  * on a desktop alike. This restyles exactly those sections - scoped to #searchPage .searchResults,
  * nothing else - so the page scrolls vertically over a grid of cards.
  *
- *  - up to 50em wide (a phone, in either orientation): two columns;
+ *  - up to 50em wide (a phone, in either orientation): at least two columns, more as the width allows;
  *  - wider (desktop, tablet): as many columns as fit, `repeat(auto-fill, minmax(<card>, 1fr))`,
  *    with a wider minimum for landscape cards (backdrops, episode thumbs, videos) than for portrait
  *    and square ones, so a section reads as roughly 4 to 8 across at common window widths.
@@ -58,7 +58,12 @@ var COMMON = [
     NON_TV + ' .emby-scrollbuttons { display: none !important; }'
 ].join('\n');
 
-var PHONE = SLIDER + ' { grid-template-columns: repeat(2, minmax(0, 1fr)); }';
+// Columns follow the width (same minimums as model/grid-density.js: 9em posters, 14em landscape),
+// and `min(.., 47%)` keeps at least two across however narrow the screen is: no fixed column count.
+var PHONE = [
+    SLIDER + ' { --jp-card-min: 9em; grid-template-columns: repeat(auto-fill, minmax(min(var(--jp-card-min), 47%), 1fr)); }',
+    SLIDER + ':has(.cardPadder-backdrop), ' + SLIDER + ':has(.cardPadder-overflowBackdrop) { --jp-card-min: 14em; }'
+].join('\n');
 
 // Card minimums in em, so they follow the viewer's font size. Landscape cards need to be wider than
 // portrait ones for the same readable thumbnail.

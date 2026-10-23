@@ -118,7 +118,9 @@ esbuild) support natively.
 | `view/mobile-theme.js` | `installMobileTheme()` | `lib/log.js`, `model/theme-tokens.js` |
 | `model/theme-tokens.js` | `tierOf()`, `TIERS`, `contrast()`, `DARK`, `LIGHT`, `themeCss()`, `zoomableViewport()` (pure; `theme-tokens.test.mjs`) | none |
 | `view/library-filter-panel.js` | `installLibraryFilterPanel()` | `lib/log.js`, `lib/dom.js` (`el`), `controller/library-filters.js` |
-| `view/card-actions.js` | `installCardActions()` | `lib/log.js`, `lib/dom.js` (`el`), `controller/card-data.js` (`apiClient`, `sameServer`, `cardInfo`, `onCardInfo`, `watchCard`) |
+| `view/library-grid.js` | `installLibraryGrid()` (library card lists become a grid with `--jp-cols` from `columnsFor`; card treatment under `.jpGrid`; phone/tablet tiers only) | `lib/log.js`, `model/grid-density.js` |
+| `model/grid-density.js` | `columnsFor(width, shape, gap, rem)`, `shapeOf(padderClass)`, `MIN_CARD_REM`, `MIN_COLS`, `MAX_COLS` (pure; tested) | none |
+| `view/card-actions.js` | `installCardActions()` (heart row on every non-TV tier, cards and `.listItem` rows) | `lib/log.js`, `lib/dom.js` (`el`), `controller/card-data.js` (`apiClient`, `sameServer`, `cardInfo`, `onCardInfo`, `watchCard`) |
 | `view/card-badges.js` | `installCardBadges()` (resolution + runtime chips on the thumbnail, first two tags in the footer; data from `card-data.js`, never from list requests) | `lib/log.js`, `lib/dom.js` (`el`), `model/card-badges.js`, `controller/card-data.js` |
 | `view/client-upscale-panel.js` | `deviceSection(rerender)` (the Enhance panel's "On this device" section: mode, cleanup, sharpness chips and the device status line) | `lib/dom.js` (`el`), `model/client-upscale.js`, `controller/client-upscale.js` |
 | `view/player-hud.js` | `ensureHudStyle()`, `applyBrightness()`, `showSeekHint()`, `showHoldPill()`, `hideHoldPill()`, `showLevelBar()`, `hideLevelBar()` (the gesture overlays and the page rules they need) | `lib/dom.js` (`el`) |
