@@ -84,4 +84,55 @@ export function installMobileTheme() {
     document.addEventListener('DOMContentLoaded', run);
     // layout-tv is set after this script runs; follow it (apply() only writes on a real change).
     new MutationObserver(run).observe(html, { attributes: true, attributeFilter: ['class'] });
+    watchSkeletons();
+}
+
+/*
+ * Loading skeletons: a section or row container that APPEARS empty gets `.jpSkel` for at most
+ * SKELETON_MS. The CSS shows the shimmer only while it is both marked and empty, so it vanishes the
+ * moment cards land, and a section that stays empty for good loses it when the mark expires. The mark
+ * is given once per element, so a re-render that empties a live section never brings it back.
+ */
+var SKELETON_MS = 2000;
+var SKEL_SELECTOR = '.verticalSection, .verticalSection .itemsContainer';
+var skelSeen = new WeakSet();
+
+function markSkeleton(el) {
+    if (skelSeen.has(el) || el.firstElementChild) {
+        return;
+    }
+    skelSeen.add(el);
+    el.classList.add('jpSkel');
+    setTimeout(function () { el.classList.remove('jpSkel'); }, SKELETON_MS);
+}
+
+function watchSkeletons() {
+    var start = function () {
+        if (!document.body) {
+            return;
+        }
+        new MutationObserver(function (records) {
+            if (document.documentElement.classList.contains('layout-tv')) {
+                return;
+            }
+            records.forEach(function (r) {
+                Array.prototype.forEach.call(r.addedNodes, function (n) {
+                    if (n.nodeType !== 1) {
+                        return;
+                    }
+                    if (n.matches && n.matches(SKEL_SELECTOR)) {
+                        markSkeleton(n);
+                    }
+                    if (n.querySelectorAll) {
+                        Array.prototype.forEach.call(n.querySelectorAll(SKEL_SELECTOR), markSkeleton);
+                    }
+                });
+            });
+        }).observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.body) {
+        start();
+    } else {
+        document.addEventListener('DOMContentLoaded', start);
+    }
 }

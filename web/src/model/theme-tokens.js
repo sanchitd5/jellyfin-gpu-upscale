@@ -103,16 +103,17 @@ export function themeCss() {
     out.push(coarse.split(',').map(function (s) {
         return s + ' .listItem';
     }).join(',') + '{min-height:var(--jp-tap)}');
-    // Loading skeletons: a placeholder row while a section is still empty. The life animation is a
-    // discrete step that drops the placeholder after 7s so a genuinely empty list does not shimmer forever.
-    out.push(BASE + ' :is(.verticalSection:empty,.verticalSection .itemsContainer:empty):not(.hide){'
+    // Loading skeletons: a placeholder row while a section is still empty. Only on elements the view
+    // marks `.jpSkel` when they first appear, for at most SKELETON_MS (view/mobile-theme.js): a pure
+    // `:empty` rule cannot tell "still loading" from "empty for good" and left a permanent grey band
+    // under Continue Watching on Home.
+    out.push(BASE + ' .jpSkel:empty:not(.hide){'
         + 'min-height:12em;border-radius:var(--jp-radius-m);'
         + 'background:linear-gradient(90deg,var(--jp-surface) 0,var(--jp-surface-2) 50%,var(--jp-surface) 100%) 0 0/200% 100%;'
-        + 'animation:jpSkelShimmer calc(var(--jp-dur)*7) linear infinite,jpSkelLife 7s steps(1,end) forwards}');
+        + 'animation:jpSkelShimmer calc(var(--jp-dur)*7) linear infinite}');
     out.push('@keyframes jpSkelShimmer{to{background-position:-200% 0}}');
-    out.push('@keyframes jpSkelLife{to{min-height:0;background:none}}');
     out.push('@media (prefers-reduced-motion:reduce){' + BASE + '{--jp-dur-fast:0ms;--jp-dur:0ms;--jp-dur-slow:0ms}'
-        + BASE + ' :is(.verticalSection:empty,.verticalSection .itemsContainer:empty):not(.hide){animation:jpSkelLife 7s steps(1,end) forwards}}');
+        + BASE + ' .jpSkel:empty{animation:none}}');
     return out.join('\n');
 }
 
