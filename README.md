@@ -1,50 +1,120 @@
 # Jellyfin Plus
 
-Realtime GPU super-resolution, sharpening and denoising for Jellyfin transcodes. A viewer picks a
-quality level from the player's **Enhance** panel and the stream is upscaled on the fly: a 540p
-capture served at 1080p, reconstructed rather than stretched.
+An all-round upgrade for a Jellyfin server and its web client. It makes the picture better, on the
+server's GPU and in the viewer's browser. It improves the player, makes search smarter and faster,
+and gives library browsing and tag management the tools stock Jellyfin lacks. It ships as one plugin
+plus one injected client script. Every feature installs on its own and falls back to stock Jellyfin
+when it cannot attach, so one breaking does not take the others with it.
 
-**Everything this plugin changes in Jellyfin, server and client: see [ENHANCEMENTS.md](ENHANCEMENTS.md).**
+**Every change, server and client, with its routes, request parameters, storage keys and fail-soft
+guarantees: [ENHANCEMENTS.md](ENHANCEMENTS.md).**
 
-Two engines sit behind that panel. **libplacebo GLSL user shaders on Vulkan** carry the super
-resolution, sharpening, refine and chroma passes. **Five custom ffmpeg video filters**, in a
-separately built binary beside the stock one, carry Intel Open Image Denoise, NVIDIA OptiX, ONNX
-neural models, FSR2 and DLSS/DLAA. Fourteen axes are exposed, all composable, all live-switchable
-mid-playback.
-
-> **Renamed from GPU Upscale.** The plugin began as a GPU upscaler and now also carries search fixes,
-> library-filter features and other quality-of-life patches, so the umbrella is **Jellyfin Plus**. The GPU
-> upscaling is still here, as the enhancement panel and engine. The plugin GUID is unchanged, and the
-> settings, shader cache and browser preferences carry over. The plugin's constructor copies the old
-> `Jellyfin.Plugin.GpuUpscale.xml` settings to `Jellyfin.Plugin.Plus.xml` on first start (not the deploy
-> script); the shader cache moves to `/var/cache/jellyfin/jellyfin-plus-shaders`; browser preferences are
-> migrated by the client on first load. Server paths, HTTP routes (`/JellyfinPlus/...`) and log prefixes
-> moved from `GpuUpscale` / `jellyfin-gpuupscale` to `JellyfinPlus` / `jellyfin-plus`.
-
-Built and measured against Jellyfin **12.1.0** with an NVIDIA RTX 3090.
+Built and measured against Jellyfin **12.1.0**. The server-side video enhancement was measured on an
+NVIDIA RTX 3090.
 
 > **This is not an official Jellyfin plugin, and it works by runtime-patching Jellyfin.**
 > Read [Limitations and risks](#limitations-and-risks) before installing it anywhere you care about.
 > It will break on some Jellyfin upgrades — by the nature of the approach, not by accident.
 
-Two things distinguish it from the usual "enable an upscaler" plugin, and both are the reason the
-rest of this document is long:
+## What it adds
 
-**Every choice here was measured against ground truth, and several popular options lost.** FSR's
-EASU, NVScaler, Anime4K below its native ratio, temporal video super-resolution and generative models
-were all tested on real footage and rejected with numbers — see
-[What was tried and rejected](#what-was-tried-and-rejected). The defaults are what survived, not what
-sounded best.
+**Video enhancement on the server GPU** ([details](#the-player-menu), [catalogue](ENHANCEMENTS.md#1-gpu-upscaling-and-enhancement))
+- Realtime super-resolution, sharpening, denoise, deblock and deband inside the transcode. A 540p
+  capture is served at 1080p, reconstructed rather than stretched.
+- Fourteen axes, all composable and switchable mid-playback without a gap. They are picked from an
+  **Enhance** panel in the player.
+- Two engines. **libplacebo GLSL shaders on Vulkan** carry super-resolution, sharpening, refine and
+  chroma. **Five custom ffmpeg filters**, in an optional separately built binary, carry Intel Open Image
+  Denoise, NVIDIA OptiX, ONNX neural models, FSR2 and DLSS/DLAA.
 
-**It never claims to have done something it did not do.** If the concurrency cap, a subtitle burn-in,
-a direct-play session or a low scale ratio means enhancement did not run, the session report says so
-plainly rather than showing a quality badge that is a lie.
+**Upscaling in the browser, for slow connections** ([catalogue](ENHANCEMENTS.md#5-cards-and-playback))
+- When the stream that arrives is smaller than the screen, the web player removes compression blocking
+  and banding, then upscales with AMD FSR 1. It runs on the viewer's own GPU (WebGL2), with nothing
+  extra asked of the server.
+- Auto by default and set per device. If the device cannot keep up, it steps down and says so.
+
+**The player** ([catalogue](ENHANCEMENTS.md#5-cards-and-playback))
+- Touch gestures:
+  - hold for 2× speed;
+  - swipe the right half for volume and the left half for brightness;
+  - double-tap a side to seek 10 s.
+- Playback speed remembered across sessions.
+- An OSD chip showing what the server, and the browser, are actually doing to the picture. Tapping it
+  opens the Enhance panel.
+- A "next video in N s" card for queued clips.
+
+**Search** ([catalogue](ENHANCEMENTS.md#2-search))
+- Matches tags as well as names, with `*` and `?` wildcards. Answered from a full-text index: the
+  search step takes about 3 ms instead of 36 ms on an 80k-item library.
+- Per-tag exclude.
+- A Sort & filter sheet: tag, cast and crew, studio, runtime, date added, resolution, watched,
+  favourites and type.
+- Searches on submit, remembers recent searches, takes up to 200 characters, and suggests clips on the
+  empty page.
+- Results as a grid: paged on desktop, infinite scroll on phones.
+
+**Library browsing** ([catalogue](ENHANCEMENTS.md#3-library-browsing-and-filters))
+- Home Videos libraries open on Videos, not Folders.
+- The filter popover gains:
+  - tag search, per-tag exclude and "match all";
+  - studios, people and resolution where stock hides them;
+  - lists that load fast from a cache.
+- A Random sort that does not repeat items across pages, a "Recently edited" sort, and tag lists that
+  open newest first.
+- On cards:
+  - resolution, runtime and tag badges;
+  - always-visible buttons on phones;
+  - Play all and Shuffle that queue up to 1000 items, and queue videos from Home Videos folders;
+  - Favourites rows of up to 100.
+
+**Item pages** ([catalogue](ENHANCEMENTS.md#4-item-pages))
+- Previous and next buttons that step through the list the item was opened from.
+- A Download button for videos.
+- "More Like This" for clips.
+- Tag and person chips.
+- A Videos section on person and studio pages.
+- Poster zoom.
+
+**Tags and administration** ([catalogue](ENHANCEMENTS.md#6-tag-editing))
+- Bulk add and remove tags, including "Select all N results" across pages. Tag autocomplete in the
+  metadata editor.
+- A tag manager on the plugin page:
+  - rename, merge and delete across the library;
+  - a dry-run preview first;
+  - locked fields are honoured.
+- Buttons for maintenance tasks.
+- Enhance and search preferences follow the viewer to other browsers.
+
+> **Renamed from GPU Upscale.** The plugin began as the GPU upscaler above, hence the repository name.
+> The plugin GUID is unchanged, and settings, shader cache and browser preferences carry over:
+> - The constructor copies `Jellyfin.Plugin.GpuUpscale.xml` to `Jellyfin.Plugin.Plus.xml` on first start.
+> - The shader cache moves to `/var/cache/jellyfin/jellyfin-plus-shaders`.
+> - The client migrates browser preferences on first load.
+>
+> Server paths, HTTP routes (`/JellyfinPlus/...`) and log prefixes moved from `GpuUpscale` /
+> `jellyfin-gpuupscale` to `JellyfinPlus` / `jellyfin-plus`.
+
+## How it is built
+
+Two rules run through all of it, and they are why the rest of this document is long.
+
+**Every choice was measured against ground truth, and several popular options lost.** On the video
+side, FSR's EASU (server-side), NVScaler, Anime4K below its native ratio, temporal video
+super-resolution and generative models were all tested on real footage and rejected with numbers.
+See [What was tried and rejected](#what-was-tried-and-rejected). The defaults are what survived, not
+what sounded best. On the library side, every faster query was proved to return exactly the same
+rows as stock, on a real 80k-item database, before it shipped.
+
+**It never claims to have done something it did not do.** Sometimes enhancement does not run: the
+concurrency cap, a subtitle burn-in, a direct-play session or a low scale ratio can stop it. When that
+happens, the session report and the OSD chip say so plainly, rather than showing a quality badge that
+is a lie. A feature that cannot attach leaves stock Jellyfin in place rather than half-working.
 
 ## Contents
 
-**Using it** — [Requirements](#requirements) · [Install](#install) · [The player menu](#the-player-menu) · [Off means direct play](#off-means-direct-play)
+**Using it** — [What it adds](#what-it-adds) · [Requirements](#requirements) · [Install](#install) · [The player menu](#the-player-menu) · [Off means direct play](#off-means-direct-play)
 
-**What it does** — [Super-resolution levels](#super-resolution-levels) · [The non-2x ratio problem](#the-non-2x-ratio-problem) · [Two more axes: refine and chroma](#two-more-axes-refine-and-chroma) · [Detail engine: RTX DLPP / ONNX neural models (neural=)](#neural-models-neural) · [Game temporal upscalers (game=)](#game-temporal-upscalers-game) · [Sharpening: RCAS](#sharpening-rcas) · [Denoise](#denoise) · [Deblock (deblock=)](#deblock-deblock) · [Intel Open Image Denoise (denoise=oidn)](#intel-open-image-denoise-denoiseoidn) · [NVIDIA OptiX (denoise=optix, denoise=optix-temporal)](#nvidia-optix-denoiseoptix-denoiseoptix-temporal)
+**Server video enhancement in depth** — [Super-resolution levels](#super-resolution-levels) · [The non-2x ratio problem](#the-non-2x-ratio-problem) · [Two more axes: refine and chroma](#two-more-axes-refine-and-chroma) · [Detail engine: RTX DLPP / ONNX neural models (neural=)](#neural-models-neural) · [Game temporal upscalers (game=)](#game-temporal-upscalers-game) · [Sharpening: RCAS](#sharpening-rcas) · [Denoise](#denoise) · [Deblock (deblock=)](#deblock-deblock) · [Intel Open Image Denoise (denoise=oidn)](#intel-open-image-denoise-denoiseoidn) · [NVIDIA OptiX (denoise=optix, denoise=optix-temporal)](#nvidia-optix-denoiseoptix-denoiseoptix-temporal)
 
 **Running it** — [Configuration](#configuration) · [Honest reporting](#honest-reporting) · [Measured throughput](#measured-throughput)
 
@@ -54,10 +124,23 @@ plainly rather than showing a quality badge that is a lie.
 
 ## Requirements
 
+For everything:
+
 - Jellyfin **12.1.0** (other versions: see the risks section)
+- .NET SDK matching the server's runtime, to build
+- Node.js and npm on the build machine, to bundle the client script (esbuild; build-time only)
+- The jellyfin-web client in a browser. Other apps get only the server-side changes; see
+  [Limitations and risks](#limitations-and-risks).
+
+For upscaling in the browser: a browser with WebGL2. Without it, the player shows the stock video.
+
+For server video enhancement:
+
 - NVIDIA GPU with NVENC, a driver new enough for your `jellyfin-ffmpeg`, and Vulkan
 - `jellyfin-ffmpeg` built with **libplacebo + vulkan + libshaderc** (`jellyfin-ffmpeg8` is)
-- .NET SDK matching the server's runtime, to build
+
+The search, library, player and tag features do not use the GPU. Running them on a server without
+one has not been tested.
 
 That is the whole requirement for the shader axes: `upscale`, `sr`, `deblur`, `refine`, `chroma`,
 `deband`, `kernel` and the `nlmeans_vulkan`/`hqdn3d` denoise levels all run on the stock
@@ -102,11 +185,13 @@ sudo ./scripts/install-shaders.sh
 export DOTNET_ROOT=/opt/dotnet   # wherever your SDK lives
 dotnet publish src -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out
 dotnet publish src/patcher -c Release -p:JellyfinBin=/usr/lib/jellyfin/bin -o ./out-patcher
+(cd web && npm install) && ./scripts/build-web-panel.sh   # writes web/jellyfin-plus.js (not in git)
 
 # 3. deploy
 #    plugin  -> /var/lib/jellyfin/plugins/JellyfinPlus_<version>/   (owned jellyfin:jellyfin)
 #    patcher -> /usr/lib/jellyfin-plus/                     (NOT under plugins/)
-#    client  -> /usr/share/jellyfin/web/jellyfin-plus.js + a <script> tag in index.html
+#    client  -> web/jellyfin-plus.js into /usr/lib/jellyfin-plus/; the injector below copies it to
+#               /usr/share/jellyfin/web/ and adds a <script> tag (content-hash cache-buster) to index.html
 sudo ./scripts/jellyfin-plus-webinject
 sudo systemctl restart jellyfin
 ```
@@ -754,7 +839,14 @@ that break the patches. It stands down automatically while the plugin's patches 
   That is the right failure mode for viewers and the wrong one for whoever did the rebuild: verify
   with `-filters`.
 - **Subtitle burn-in is never enhanced** — those jobs build a `-filter_complex` graph and are skipped.
-- **Clients without the injected script** (Android, TV, mobile) direct-play and are never enhanced.
+- **Clients without the injected script** (the Android, iOS and TV apps and other third-party
+  players) direct-play and are never enhanced. They also get none of the client features: the
+  player gestures, browser upscaling, search sheet, library filter additions and tag tools. The
+  server-side search changes (tag and wildcard matching, the search index) and the faster filter
+  lists apply to them.
+- **Browser upscaling covers less than the server path.** It switches off while the browser's own
+  native subtitles are showing, in iOS native fullscreen and in picture-in-picture. It was measured
+  only on a desktop GPU; phones and Safari are untested.
 - **The concurrency cap is advisory** — it counts live ffmpeg processes carrying `libplacebo` at
   command-build time, so two sessions starting simultaneously can both pass. Linux-only by construction.
 - `targetAbi` pins the plugin to a Jellyfin version; a later server may refuse to load it until raised.
@@ -766,6 +858,12 @@ fidelity while adding only modest detail: its directional analysis was designed 
 input and locks onto compression-noise gradients in low-bitrate h264. Tuning the sharpening after it
 only trades ringing for softness around a worse operating point. Only FSR's **RCAS** pass survived
 evaluation, and it is what this project now uses.
+
+EASU is back in one place, for a different job: [browser upscaling](#what-it-adds) for slow
+connections. There it runs on the viewer's device, after a deblock and deband pass, against plain
+bilinear stretching rather than `ewa_lanczos`. On a synthetic 360p→1440p test it measured sharper and
+closer to the truth than bilinear (30.94 vs 30.51 dB). That is not a re-test on real footage, and it
+does not overturn the server-side result above.
 
 *Measurement trap worth knowing if you re-test this:* in the stock `FSR.glsl`, EASU writes to a
 scratch texture (`//!SAVE EASUTEX`) and only the RCAS pass writes back to `LUMA`. Strip RCAS to
