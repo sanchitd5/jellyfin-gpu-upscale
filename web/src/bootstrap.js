@@ -33,6 +33,8 @@ import { installLibraryLanding } from './controller/library-landing.js';
 import { installCardBadges } from './view/card-badges.js';
 import { installSelectAll } from './controller/select-all.js';
 import { installPrefsSync } from './controller/prefs-sync.js';
+import { installListRequests } from './controller/list-requests.js';
+import { installListSort } from './controller/list-sort.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -62,6 +64,8 @@ function feature(name, install) {
         feature('library filter hooks', installLibraryFilterHooks);
         feature('library filter panel', installLibraryFilterPanel);
         feature('library landing', installLibraryLanding);
+        feature('list requests', installListRequests);
+        feature('list sort menus', installListSort);
         tryRequireShim();
         watchPlaybackInfoDialog();
         feature('search page', watchSearchPage);

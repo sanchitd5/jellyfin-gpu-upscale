@@ -47,6 +47,10 @@ setting, a control in the page, or "remove the plugin or script".
 | Search suggestions include clips | Client | The empty page's Suggestions list also offers random Video items | On, no switch; a changed stock request is left alone |
 | Library filter: tag search, exclude, match-all | Both | Search box, per-tag exclude and "match ALL" switch in the filter popover | On, no switch |
 | Library filter: studios, people, resolution on Videos-like tabs | Client | Extra sections in the popover where stock hides them | On, no switch |
+| Seeded Random sort on library lists | Both | Sorting a list by Random and paging through it gives one shuffle: no repeats, no gaps | On, no switch; falls back to stock Random (re-rolls per page) if the server patch cannot install; see section 3 |
+| Sort menu: Random and Recently edited | Both | Legacy lists (tags, people, studios, folders) gain Random; every library list gains "Recently edited" (when an item was last saved, for example after tagging) | On, no switch; see section 3 |
+| Tag lists open newest first | Client | A tag's list opens sorted by Date added, newest first, until you pick a sort on a tag list | On, no switch; picking any sort in that menu ends it |
+| Favourites sections show 100 | Client | Each Favourites section loads up to 100 items instead of 20 (not on TV) | On, no switch |
 | Filter key cache | Server patch + plugin services | Filter lists (tags, genres, years, ratings) load fast | On, no switch; see section 3 |
 | More Like This for Video items | Both | A "More Like This" row on a clip's page | On, no switch |
 | Tag and person chips on item pages | Client | Chips replace the one-line tag list (not on TV) | On, no switch |
@@ -324,6 +328,48 @@ tag nothing has: an empty list, not a wrong one.
 
 **Server side** (`src/patcher/LibraryFilterPatches.cs`, section 7.4). `excludeTagNames` is an exact
 match on the cleaned tag name, unlike the search page's substring `excludeTags`.
+
+**List pages: sort and paging** (`web/src/controller/list-requests.js`, `web/src/controller/list-sort.js`,
+models `web/src/model/list-requests.js` and `list-sort.js`; server `src/patcher/ListSortPatches.cs`, section 7.8).
+
+- **Random that pages without repeats.** Stock sorts Random with SQLite's `random()` per query, so
+  every page is a new shuffle and page 2 repeats page 1. A list-page `/Items` request that sorts by
+  Random and carries `startIndex` and `limit` now also carries `jpListSeed=<n>`; the server then orders
+  by a fixed function of (item id, n). The seed is per list (the URL without `startIndex`/`limit`), kept
+  for the page load: every page of one list is one shuffle, the other sort direction or another filter
+  is its own, a page reload or the list page's Shuffle button reshuffles. Requests that must stay
+  truly random are left alone: the playback queue (asks for Chapters), home rows and screensavers
+  (no `startIndex`), searches (`searchTerm` / `jpSeed`), requests that opt out of the total count.
+- **Sort menu.** The legacy list page (tag, person, studio, genre and folder lists) gets Random and
+  Recently edited appended to its sort menu, on lists that already offer Date added (not Live TV);
+  the modern library tabs already have Random and gain Recently edited (Movies, Videos, Music videos,
+  Folders, Mixed, Photos, Photo albums, Favourites) as one more row in the sort popover. Recently
+  edited sorts by the item's `DateLastSaved` (the server's sort list has no such key; see 7.8); in
+  the modern popover the first pick is newest first and picking it again flips the direction.
+  The legacy menu is found by shape (the list controller's default export class and the sort menu
+  class are located among webpack module exports and wrapped on their prototypes).
+- **Tag lists open newest first.** The tag link goes to `#/list?type=tag&tag=...`, which reads its sort
+  from saved view settings only. While a tag list's saved sort is the stock default (Name, ascending)
+  and no sort has been picked on it through the menu, it opens as Date added, newest first. A sort
+  you pick is remembered as picked (`jellyfinPlus.listSortChosen`) and then rules, including Name.
+- **Favourites.** Each section on the Favourites page requests 20 items (`Limit=20`, no total count,
+  a signature nothing else sends); on non-TV layouts that becomes 100. The section title still links
+  to the full list.
+- **Measured, not shipped: skipping `TotalRecordCount` (QOL 34).** On the real library the count is about
+  half of a list page's server time (page of 100: 118 ms with the count against 65 ms without for a
+  Videos list; 213 against 113 ms for a 40k-item tag list; 30 to 100 ms in every shape tried). Both
+  pagers need the number, though (the legacy one for "x-y of N" and to enable Next, the modern one for
+  its page count), so it could only be skipped by inventing a total, or on page 2 onwards by remembering
+  page 1's. A saving of 50 ms on a click that takes a human a second was judged not worth rewriting
+  response bodies. A server-side memo of the count per filtered set would be the clean route.
+- **Not changed: `IncludeItemTypes=tag` (QOL 40).** The legacy list sends the list type as an item
+  type for `type=tag`. The server's `CommaDelimitedCollectionModelBinder` catches the `FormatException`
+  an unknown enum name raises and drops the value, so the request is an unfiltered (all types) one,
+  exactly what stripping it would give. Cosmetic; nothing is rewritten.
+- **Not changed: filter button on tag lists (QOL 16).** Stock already shows it: the legacy list's
+  `getVisibleFilters` only special-cases Live TV programs and Next Up. The Alpha picker is the real gap
+  (`initAlphaPicker` runs only when the list has a parent item, and tag lists have none) and is not
+  added: it lives in closure state of the list controller that a wrapper cannot reach safely.
 
 **Filter key cache** (`src/patcher/FilterCacheEngine.cs`, `src/patcher/FilterCachePatches.cs`,
 `src/FilterCache.cs`). Stock recomputes `/Items/Filters` and `/Items/Filters2` (tags, genres, years,
@@ -893,6 +939,42 @@ The patch is not installed if any of those pieces is missing. With no user it ke
 (empty), never an unfiltered answer. Fail-soft: errors return an empty list, which is the stock answer
 for a Video.
 
+### 7.8 List sort keys: `Jellyfin.Server.Implementations.Item.OrderMapper.MapOrderByField(ItemSortBy, InternalItemsQuery, JellyfinDbContext)`
+
+Postfix (`ListSortPatches.cs`, optional "list sort (seeded random, recently edited)"). Public static, the one
+place a Random or DateLastContentAdded ORDER BY term is built; resolved by exact signature, so a changed
+overload is not patched. It replaces the returned key expression and nothing else.
+- **Seeded Random.** Sort is Random, the request path ends in `/Items`, `jpListSeed` is a positive
+  integer (digits only, at most 2147483647) and the query has no search term: the key becomes the
+  concatenation of 16 of the 32 hex digits of the item id, at positions chosen by a seeded shuffle
+  (SplitMix64), i.e. `substr(CAST(Id AS TEXT), p0 + 1, 1) || ... ` with the 16 positions as SQL
+  parameters (one EF query shape for every seed). Item ids are 36-character upper-case text (an MD5
+  formatted as a guid), so the digits are uniform and the key is a seeded pseudo-random total order. 64
+  bits of key: no two of the 47,621 Videos of the real library share one.
+- **Recently edited.** Sort is DateLastContentAdded, `jpSortKey=DateLastSaved` is present, same path and
+  search-term conditions: the key becomes the item's own `DateLastSaved`. The client cannot ask for this
+  sort by name: the enum has no such member and the query binder silently drops a sortBy name it does not
+  know, so the client sends the placeholder plus `jpSortKey` (`list-requests.js`). Without the patch the
+  placeholder keeps its stock meaning (`DateLastMediaAdded`, empty on a Video), i.e. name order.
+- **Order only.** No Where clause is added, removed or widened, so what a user may see (library access,
+  parental rating, tags) is exactly what stock decided. Every other caller of Random (Suggestions, similar
+  items, splash screen, image providers, playback shuffle) has no `jpListSeed` and keeps the real random order.
+- **Fail soft.** Any exception leaves the stock expression (logged once); an unresolved target logs a
+  warning and installs nothing.
+- **Proof on the real database** (80,464-row copy, a harness compiling the patcher source against the
+  server's DLLs, the real `BaseItemRepository`): the SQL translates (`ORDER BY substr(CAST("b"."Id" AS TEXT), @P0 + 1, 1) || ...,
+  "b"."SortName"`); for seeds 1, 7 and 2147483647, paging the 47,621 Videos 100 at a time (477 pages) gives
+  47,621 rows, all distinct, equal to the unpaged set, and the same order as a C# model of the key; seed 7
+  with page size 250 gives the same order; seeds 1 and 7 share 1 of their first 100 rows; the first 2,000
+  rows spread evenly over the SortName range; descending is the exact reverse; `GetItems` (with total),
+  `GetItemList` and `GetItemIdsList` agree and the total is unchanged; an `ExcludeTags` filter and a type
+  filter return the same row set as stock. Negative cases return stock random (two calls differ) or stock
+  order: no parameter, seed 0, negative, non-numeric, overflowing, another path, no HTTP context, a search
+  term, a non-Random sort. Recently edited: same row set, descending by `DateLastSaved` with `SortName` as the
+  tiebreaker (zero inversions), ascending non-decreasing, and stock for another `jpSortKey` value, another
+  path, a search term and other sorts. Cost: a page of 100 over 47,621 rows is about 88 ms seeded against 56 ms
+  for stock random (a string key sorts slower than a float). Not exercised: the live HTTP route end to end.
+
 ## 8. Plugin HTTP routes
 
 All under the Jellyfin API root. "Administrator" is the `RequiresElevation` policy.
@@ -934,6 +1016,8 @@ server without the plugin sees no error.
 | `jpMinDateAdded`, `jpMaxDateAdded` | `YYYY-MM-DD`, UTC day, inclusive | Same | `model/search-filters.js` |
 | `jpResolution` | Comma list of `sd`, `hd`, `4k` | Same | `model/search-filters.js` |
 | `jpSeed` | Positive integer seeding the `Random` sort; same seed and ids give the same order | `SearchManager.GetSearchResultsAsync` (needs `sortBy=Random`) | `model/search-filters.js`; a new seed on each Apply |
+| `jpListSeed` | Positive integer seeding the `Random` sort of a library listing (not a search; search uses `jpSeed`); same seed and same ids give the same order | `OrderMapper.MapOrderByField` postfix (`ListSortPatches.cs`), `/Items` only | `controller/list-requests.js` (one seed per list per page load) |
+| `jpSortKey` | `DateLastSaved`: with `sortBy=DateLastContentAdded`, order by the item's own DateLastSaved ("Recently edited") | Same | `model/list-requests.js` (`rewriteListUrl`, from a `sortBy=DateLastSaved` the sort menus produce) |
 | `jpPaged` | `true`: widen the candidate pool to 5000 so the total is meaningful from page 1 | `SearchManager.GetSearchResultsAsync` | `model/search-paging.js` (`rewritePagedUrl`) |
 | `jpPersonMatch` | `all`: with 2+ `personIds`, every person must be credited (stock is any-of) | `SearchManager.GetSearchResultsAsync` | `model/search-filters.js` |
 | `jpInf` | `1`: marks the client's own follow-up request in infinite mode | Nothing on the server (the plugin never reads it); the client uses it to skip its own rewrite and response watchers | `controller/search-pager.js` (`fetchMore`), `controller/select-all.js` (id collection; those requests also carry `enableImages=false` and `enableUserData=false`, which is how the recorder tells them from list pages) |
@@ -973,6 +1057,7 @@ keys once.
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
 | `jellyfinPlusPlaybackRate` | The saved playback speed, a number from 0.25 to 4; absent means 1x | `controller/player-speed.js` |
 | `jellyfinPlusBrightness` | The swipe brightness, 0.3 to 1.5; absent means 1 (no filter) | `controller/player-actions.js` |
+| `jellyfinPlus.listSortChosen` | JSON map of list sort settings keys (for example `items-tag`) on which the viewer picked a sort through the sort menu; a tag list opens newest first until its key is here | `model/list-sort.js` (written from `controller/list-sort.js`) |
 
 Browser `sessionStorage` (per tab, gone when the tab closes; also in try/catch):
 
@@ -1042,6 +1127,14 @@ Library and filters:
   (section 3), and for a stale or unbuilt library until the next rebuild. It has no off switch. It is
   not described in README.md, ARCHITECTURE.md or the other existing documents (a search for it found
   nothing); this file and the code comments are the only descriptions.
+
+- **List pages.** Random keeps one shuffle per list for the life of the page only (a reload, or the
+  Shuffle button, reshuffles); it is not remembered across visits. The seeded order costs about 30 ms more
+  per page than stock random on a 47k-item list. "Recently edited" in the modern popover is a cloned
+  stock menu row and had not been driven in a live browser when this was written. The tag
+  list default treats a saved "Name, ascending" as unset, so someone who deliberately chose that before
+  this plugin existed gets newest first until they pick a sort again. There is no Alpha picker on tag
+  lists, and no skipping of the total count (section 3 gives the measurement).
 
 Item pages and playback:
 - More Like This covers only items of exact type `Video`, at most 50 results, and returns nothing
