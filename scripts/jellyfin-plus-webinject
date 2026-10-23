@@ -18,6 +18,24 @@ set -euo pipefail
 WEB=${JP_WEB:-/usr/share/jellyfin/web}
 SRC=${JP_SRC:-/usr/lib/jellyfin-plus/jellyfin-plus.js}
 
+# config.json is a dpkg CONFFILE of jellyfin-web (/var/lib/dpkg/info/jellyfin-web.conffiles). The
+# theme entry below edits it, and a modified conffile makes the next jellyfin-web upgrade stop and
+# ask (or fail unattended). So the apt hook calls `--restore-conffile` BEFORE dpkg runs: if the live
+# file is not what dpkg installed but our saved original is, put the original back byte for byte;
+# dpkg then upgrades silently and the Post-Invoke run of this script re-adds the entry.
+# The md5 dpkg recorded for the file (empty when unknown: then nothing is restored or refreshed).
+CONF_MD5=${JP_CONF_MD5:-$(dpkg-query -W -f='${Conffiles}\n' jellyfin-web 2>/dev/null | awk -v f="$WEB/config.json" '$1==f{print $2}')}
+if [ "${1:-}" = "--restore-conffile" ]; then
+    cfg="$WEB/config.json"; orig="$cfg.jellyfin-plus-orig"
+    if [ -n "$CONF_MD5" ] && [ -f "$cfg" ] && [ -f "$orig" ] \
+       && [ "$(md5sum < "$cfg" | cut -d' ' -f1)" != "$CONF_MD5" ] \
+       && [ "$(md5sum < "$orig" | cut -d' ' -f1)" = "$CONF_MD5" ]; then
+        cp -a "$orig" "$cfg"
+        echo "jellyfin-plus: config.json restored to the packaged version for dpkg"
+    fi
+    exit 0
+fi
+
 [ -f "$SRC" ] || { echo "jellyfin-plus: source $SRC missing, nothing to do"; exit 0; }
 [ -f "$WEB/index.html" ] || { echo "jellyfin-plus: $WEB/index.html missing, nothing to do"; exit 0; }
 
@@ -91,13 +109,14 @@ echo "jellyfin-plus: index.html $result at v$VERSION"
 #   - config.json is backed up like index.html (.jellyfin-plus-orig once, .jellyfin-plus-bak on each
 #     change) and rewritten only when the result differs; every other key and theme is preserved.
 THEME_SRC=${JP_THEME_SRC:-/usr/lib/jellyfin-plus/jellyfinplus-theme.css}
-theme_result=$(python3 - "$WEB" "$THEME_SRC" <<'PYEOF' || echo "skipped (error)"
+theme_result=$(python3 - "$WEB" "$THEME_SRC" "$CONF_MD5" <<'PYEOF' || echo "skipped (error)"
+import hashlib
 import json
 import os
 import shutil
 import sys
 
-web, src = sys.argv[1], sys.argv[2]
+web, src, conf_md5 = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = os.path.join(web, 'config.json')
 tdir = os.path.join(web, 'themes', 'jellyfinplus')
 css = os.path.join(tdir, 'theme.css')
@@ -125,8 +144,14 @@ def set_entry(present):
     if new == themes:
         return False
     data['themes'] = new
+    # The pristine copy is what --restore-conffile hands back to dpkg, so it must be the PACKAGED
+    # file: refresh it whenever the live file still matches dpkg's recorded md5 (a new jellyfin-web
+    # brings a new config.json, and a copy kept "once" would go stale). Without a known md5, keep
+    # the first copy as before.
     orig = cfg + '.jellyfin-plus-orig'
-    if not os.path.exists(orig):
+    with open(cfg, 'rb') as f:
+        live_md5 = hashlib.md5(f.read()).hexdigest()
+    if (conf_md5 and live_md5 == conf_md5) or (not conf_md5 and not os.path.exists(orig)):
         shutil.copy2(cfg, orig)
     shutil.copy2(cfg, cfg + '.jellyfin-plus-bak')
     atomic(cfg, json.dumps(data, indent=2) + '\n')
