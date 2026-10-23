@@ -27,6 +27,7 @@ import { installPersonVideos } from './controller/person-videos.js';
 import { installBulkTags } from './controller/bulk-tags.js';
 import { installDetailNav } from './controller/detail-nav.js';
 import { installDetailDownload } from './controller/detail-download.js';
+import { installDetailActions } from './view/detail-actions.js';
 import { installTagAutocomplete } from './controller/tag-autocomplete.js';
 import { installSearchCensus } from './controller/search-census.js';
 import { installLibraryFilterHooks } from './controller/library-filters.js';
@@ -104,6 +105,7 @@ function feature(name, install) {
         feature('bulk tags', installBulkTags);
         feature('detail prev/next', installDetailNav);
         feature('detail download', installDetailDownload);
+        feature('detail actions', installDetailActions);
         feature('tag autocomplete', installTagAutocomplete);
         feature('prefs sync', installPrefsSync);
         probeServer();
