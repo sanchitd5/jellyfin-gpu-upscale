@@ -18,7 +18,7 @@
 # a new client talking to an old plugin sends axes nothing reads and says nothing about it.
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/sanchitd5/jellyfin-gpu-upscale}"
+REPO_URL="${REPO_URL:-https://github.com/sanchitd5/jellyfin-plus}"
 REPO_DIR="${REPO_DIR:-/opt/jellyfin-gpu-upscale}"
 BRANCH="${BRANCH:-main}"
 JELLYFIN_BIN="${JELLYFIN_BIN:-/usr/lib/jellyfin/bin}"

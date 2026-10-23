@@ -85,7 +85,8 @@ NVIDIA RTX 3090.
 - Buttons for maintenance tasks.
 - Enhance and search preferences follow the viewer to other browsers.
 
-> **Renamed from GPU Upscale.** The plugin began as the GPU upscaler above, hence the repository name.
+> **Renamed from GPU Upscale.** The plugin began as the GPU upscaler above. The repository was
+> `sanchitd5/jellyfin-gpu-upscale` and is now `sanchitd5/jellyfin-plus`; GitHub redirects the old URL.
 > The plugin GUID is unchanged, and settings, shader cache and browser preferences carry over:
 > - The constructor copies `Jellyfin.Plugin.GpuUpscale.xml` to `Jellyfin.Plugin.Plus.xml` on first start.
 > - The shader cache moves to `/var/cache/jellyfin/jellyfin-plus-shaders`.
