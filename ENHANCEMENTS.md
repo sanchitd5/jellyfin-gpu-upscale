@@ -50,6 +50,10 @@ setting, a control in the page, or "remove the plugin or script".
 | Poster zoom | Client | Tap the details poster to open it full size | On, no switch |
 | Mobile card actions | Client | Always-visible favourite, more and play buttons on phone cards | On, no switch |
 | Double-tap seek | Client | Double-tap the side thirds of the video page to seek 10 s | On, no switch (touch only) |
+| Saved playback speed | Client | The speed picked in the player menu is remembered across browser sessions | On, no switch; plain 1x clears it |
+| Hold for 2x | Client | Press and hold the video (touch or primary mouse button) to play at 2x until release | On, no switch (not on TV layout) |
+| Enhance badge in the OSD | Client | A chip under the OSD top bar saying what the server is doing for this stream; tap opens Enhance | On, hidden when the plugin does not answer (not on TV layout) |
+| Swipe volume and brightness | Client | Vertical swipe on the right half of the video changes volume, on the left half brightness | On, no switch (touch only, not on TV layout; volume off where the device ignores it) |
 | Clip Up Next | Client | "Next video in N s" card for queued clips | On, no switch |
 | Play-all fixes | Client | Play all and Shuffle queue up to 1000 items; Home Videos folders queue videos | On, no switch |
 | Bulk tag add/remove, Edit tags | Client | Extra rows in the selection menu and the item menu (administrators) | On for administrators |
@@ -324,10 +328,68 @@ only in a desktop hover overlay). More and Play use the stock `itemAction` handl
 `ApiClient.updateFavoriteStatus`, with the heart state read in small batches for cards that scroll into
 view. Tap targets are 40 px. The row is hidden during multi-select.
 
-**Double-tap seek** (`web/src/controller/double-tap-seek.js`). On the video page, touch only: a double
-tap on the left third seeks back 10 s, the right third forward 10 s; more taps on the same side within
-the window keep adding, with a hint. The middle third, controls and non-touch pointers are left to
-jellyfin. A single tap is untouched.
+**Video page gestures** (`web/src/controller/player-gestures.js`, arbiter in
+`web/src/model/player-gesture.js`, actions in `controller/player-actions.js`, overlays in
+`view/player-hud.js`). One arbiter classifies every press on the video surface, so the four gestures
+below cannot overlap. Stock (`apps/legacy/controllers/playback/video/index.js`) acts on the press
+itself: a touch toggles the OSD at once, a mouse press arms a 300 ms play/pause timer. So for a press
+on `#videoOsdPage` (not on a control, the bottom OSD or the header; primary pointer; touch or primary
+mouse button; not `html.layout-tv`; needs `window.PointerEvent`) the listener runs first in the capture
+phase, stops the stock `pointerdown`, and watches the press. A tap, a horizontal or diagonal move, a
+mouse drag, and a refused hold or swipe are handed back by **replaying the original pointerdown** (a
+synthetic `PointerEvent` with the same type, button and position) to its target, so stock handles it as
+before, at release for a tap and at the verdict otherwise. Stock therefore sees a tap a press-length
+late, and never sees a hold or a swipe. The thresholds, all in `THRESHOLDS`:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `HOLD_MS` | 400 ms | a press that stays within the slop this long is a hold |
+| `HOLD_SLOP_PX` | 10 px | jitter below this is still the same press; past it, a vertical touch move is a swipe, anything else is a pass |
+| `DOUBLE_TAP_MS` / `DOUBLE_TAP_SLOP_PX` | 280 ms / 60 px | second tap on the same side third, down to down (under stock's 300 ms OSD debounce) |
+| `VERTICAL_RATIO` | 1.5 | `\|dy\|` must be at least 1.5 x `\|dx\|` to be a swipe |
+| `SWIPE_RANGE` | 0.7 | a swipe of 70% of the page height sweeps the full range |
+
+- **Double-tap seek.** Touch only. A double tap on the left third seeks back 10 s, the right third
+  forward 10 s; more taps on the same side within the window keep adding, with a hint. The middle third,
+  controls and the mouse are left to jellyfin. The first tap of a pair is a normal tap.
+- **Hold for 2x.** Touch or primary mouse button, on the video surface (any third). After 400 ms a
+  "2x" pill shows at the top centre and the player plays at 2x until release, then the previous rate
+  returns (only if the rate is still 2x; a rate picked meanwhile is left alone). A paused video, or a
+  player without the rate API, refuses the hold and the press goes to stock. The 2x is set on the
+  player object (`setPlaybackRate`), not through `playbackManager.setPlaybackRate`, so it is never
+  written to sessionStorage and never saved. The mouse hold has a cost: the stock mouse press is
+  replayed at release, so a plain click pauses/plays about one press-length later than before. The
+  context menu is suppressed during a hold or swipe, and a moving mouse does not pop the OSD during a
+  hold.
+- **Swipe volume and brightness.** Touch only. A vertical swipe starting on the right half changes the
+  volume (`playbackManager.setVolume`, found by shape, unmuting if needed) and on the left half the
+  brightness, with a level bar at that edge. Brightness is a CSS `filter: brightness()` on the video
+  element, 0.3 to 1.5, snapping to 1 (no filter at all), saved per device in `jellyfinPlusBrightness`
+  and restored at startup. Volume is disabled when assigning `audio.volume` does not stick (iOS) and
+  after a swipe whose volume change did not read back; the swipe then goes to stock. The page gets
+  `touch-action: pan-x pinch-zoom` so the browser does not cancel vertical swipes; horizontal moves,
+  controls and the bottom OSD stay stock.
+
+**Saved playback speed** (`web/src/controller/player-speed.js`, `model/player-speed.js`). Stock stores
+the speed in sessionStorage `playbackRateSpeed` (`playbackManager.setPlaybackRate`, from the speed menu
+and the remote command) and the video page re-applies it on each player state change. At startup, when
+that key is absent, the saved rate is copied into it (a rate chosen earlier in the tab is never
+overwritten); on every `ratechange` of a `<video>` the session value is mirrored to localStorage
+`jellyfinPlusPlaybackRate` (1x removes it; values outside 0.25 to 4 are ignored). The mirror reads the
+session key, so the hold-for-2x is never saved.
+
+**Enhance badge in the OSD** (`web/src/controller/player-badge.js`, `model/player-badge.js`). A chip
+under the top bar, shown with the OSD (it follows jellyfin-web's `SHOW_VIDEO_OSD` event through
+`document._callbacks`, the same seam `playback-hooks.js` uses on the playbackManager; one fixed element
+on `<body>`, so it works in both the legacy and the MUI OSD header). Its text is the server's own
+`Summary` for the session record (including the honest negatives: not applied for stream copy, burn-in,
+concurrency cap, viewer chose Off) or, when there is no record, the client's existing `activeState()`
+label ("Not enhancing", "Waiting for the server", "Enhancement unavailable"); nothing is derived from
+the panel's selection. Long text is clipped with an ellipsis and carried in full in the tooltip. Tap
+opens the Enhance panel (`openEnhancePanel`). It refreshes when the OSD appears, when the play session id
+changes (playback start and landed live applies, with a few one-second follow-ups while the server
+writes its record), and every 5 s while shown, using `GET /JellyfinPlus/Session/{id}` (section 8); it
+is hidden when the probe does not answer fully, off the video page and on the TV layout.
 
 **Clip Up Next** (`web/src/controller/clip-upnext.js`). Stock shows its Up Next card only for Episodes
 of 10 minutes or more. For items of type `Video` with a next item in the queue, a small card appears
@@ -662,6 +724,8 @@ keys once.
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
+| `jellyfinPlusPlaybackRate` | The saved playback speed, a number from 0.25 to 4; absent means 1x | `controller/player-speed.js` |
+| `jellyfinPlusBrightness` | The swipe brightness, 0.3 to 1.5; absent means 1 (no filter) | `controller/player-actions.js` |
 
 Keys that belong to jellyfin-web but are read or written by Jellyfin Plus:
 `<viewType> - <parentId>` (the library tab's own settings object; the extra marker entries ride in its
@@ -728,6 +792,13 @@ Item pages and playback:
   item 38, an unverified note from a delegated reader); whether they route through the rewritten
   request was not checked here, so Play all on the Videos tab should be treated as unverified.
 - Clip Up Next only announces; it does not advance playback. Double-tap seek is touch only, 10 s.
+- **Video page gestures were exercised only against a scripted fake DOM and the pure arbiter's unit
+  tests, not in a real browser.** Things only a device can confirm: that a vertical swipe is not
+  cancelled by the browser (`touch-action: pan-x pinch-zoom` is the mechanism), that the replayed
+  pointerdown makes stock toggle the OSD / play-pause exactly as a native press does, and that a long
+  press raises no context menu. Brightness is a CSS filter on the video element only (subtitles and
+  the OSD are not dimmed), and a filter can cost hardware video overlay on some browsers while it is
+  not 1. The badge sits on `<body>`, so it does not move with the header's slide animation.
 - Bulk tag editing handles only the item types in section 6, only items still on the page, and only for
   administrators.
 
