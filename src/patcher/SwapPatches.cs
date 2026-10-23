@@ -13,7 +13,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
     ///
     /// LIVE_APPLY_DESIGN.md named "TranscodingJobHelper" as the stock class this project had never
     /// patched, flagged as unconfirmed. It does not exist under that name on this Jellyfin build
-    /// (12.1): confirmed by decompiling the actual assemblies this project builds against
+    /// (12.1, and still absent on 12.3): confirmed by decompiling the actual assemblies this project builds against
     /// (MediaBrowser.MediaEncoding.dll). The real owner of transcode-job lifecycle here is
     /// <see cref="TranscodeManager"/> (MediaBrowser.MediaEncoding.Transcoding), a public sealed
     /// class implementing MediaBrowser.Controller.MediaEncoding.ITranscodeManager.

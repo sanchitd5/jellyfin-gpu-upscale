@@ -2,7 +2,7 @@ import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
 import { runSearch } from '../controller/search-exclude.js';
 import { committedTerm } from '../controller/search-filters.js';
-import { loadRecent, saveRecent, pushTerm, removeTerm, listSig, MAX_TERM } from '../model/search-recent.js';
+import { loadRecent, saveRecent, pushTerm, removeTerm, listSig } from '../model/search-recent.js';
 
 /*
  * THE SEARCH PAGE'S RECENT SEARCHES, AND A LONGER SEARCH BOX.
@@ -16,10 +16,8 @@ import { loadRecent, saveRecent, pushTerm, removeTerm, listSig, MAX_TERM } from 
  * after the Sort & filter bar. Tapping a chip searches it through search-exclude.js's own submit
  * path (runSearch); the x forgets one, Clear forgets all.
  *
- * The 40 character cap. SearchFields.tsx puts maxLength={40} on #searchTextInput, too short for a
- * few long tags or a wildcard pattern. React never rewrites that attribute (the prop is a constant),
- * so raising it on the element sticks until React re-creates the input, and the next scan raises it
- * again. The server has no limit of its own on the term.
+ * (This module used to raise the 40-character maxLength stock put on #searchTextInput. jellyfin-web
+ * 12.3 removed that cap itself, PR #8412, so there is nothing left to raise.)
  *
  * Skipped on TV layouts, where the on-screen alpha picker searches letter by letter. Fails soft: if
  * the fields or the box are not found nothing is added, and stock behaviour is untouched.
@@ -27,7 +25,6 @@ import { loadRecent, saveRecent, pushTerm, removeTerm, listSig, MAX_TERM } from 
 
 var STYLE_ID = 'jellyfinPlusSearchRecentStyle';
 var ROW_CLASS = 'jfp-recent';
-var MAIN_INPUT = '#searchTextInput';
 
 var LINE = 'var(--jf-palette-divider, rgba(128,128,128,0.4))';
 
@@ -184,11 +181,6 @@ function scan() {
         if (!fields) {
             lastSeen = null;
             return;
-        }
-
-        var main = fields.querySelector(MAIN_INPUT);
-        if (main && main.maxLength > 0 && main.maxLength < MAX_TERM) {
-            main.maxLength = MAX_TERM;
         }
 
         var term = committedTerm().trim();

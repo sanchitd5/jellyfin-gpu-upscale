@@ -18,7 +18,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
     /// Makes the search page's <c>sortBy</c>/<c>sortOrder</c> mean something, and widens the
     /// candidate pool so a sort or a filter is not applied to only the top few hundred relevance hits.
     ///
-    /// WHY STOCK IGNORES SORT. On Jellyfin 12.1 ItemsController.GetItems with a searchTerm asks
+    /// WHY STOCK IGNORES SORT. On Jellyfin 12.1 and 12.3 ItemsController.GetItems with a searchTerm asks
     /// SearchManager for <c>limit * 3</c> candidate ids with relevance scores, loads those items
     /// through folder.GetItems (user access and every other /Items filter applied there), then ALWAYS
     /// re-orders the loaded items by the candidates' relevance score (ThenBy SortName) and pages them
@@ -81,7 +81,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
         public const string PagedParam = "jpPaged";
         public const string PersonMatchParam = "jpPersonMatch";
 
-        // The id stock's search provider uses when it has nothing to return (12.1: SqlSearchProvider).
+        // The id stock's search provider uses when it has nothing to return (12.1 and 12.3: SqlSearchProvider).
         // An empty candidate list makes ItemsController fall back to a name-substring query, which would
         // undo a narrowing; this id exists in no table, so the controller loads nothing for it.
         private static readonly Guid _placeholderId = Guid.Parse("00000000-0000-0000-0000-000000000001");

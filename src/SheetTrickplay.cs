@@ -23,7 +23,7 @@ namespace Jellyfin.Plugin.Plus
     // one-tile trickplay set, so the seek bar gets previews without another ffmpeg pass. The tile is a SYMLINK to
     // the sheet, not a copy (47k sheets would cost ~23 GB on the Jellyfin root disk).
     //
-    // Jellyfin facts this relies on (decompiled from 12.1):
+    // Jellyfin facts this relies on (decompiled from 12.1; re-read in the 12.3 sources: unchanged):
     //  - TrickplayController serves Videos/{id}/Trickplay/{width}/{index}.jpg from
     //    ITrickplayManager.GetTrickplayTilePathAsync = GetTrickplayDirectory(item, tileW, tileH, width, saveWithMedia)/{index}.jpg
     //    where saveWithMedia comes from the library option SaveTrickplayWithMedia (false here).

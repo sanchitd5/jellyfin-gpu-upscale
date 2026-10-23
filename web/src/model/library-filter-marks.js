@@ -6,7 +6,8 @@
  * "exclude this tag", "require all of these tags" or "this person" - and a field added from
  * outside would never reach the request. But Filters.Tags is a plain string array that is already
  * persisted, part of the React Query key (so a change refetches and results are cached per
- * state), cleared by the stock "reset filters" button, and sent as the `tags` parameter.
+ * state), cleared by the stock reset button (in the library toolbar since jellyfin-web 12.3, PR #8568;
+ * it sets Filters to undefined), and sent as the `tags` parameter.
  *
  * So the extra state rides in that array as MARKER entries - strings no real tag can equal -
  * and rewriteLibraryUrl() lifts them back out of the outgoing request into the parameters the

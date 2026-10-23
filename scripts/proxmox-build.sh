@@ -237,7 +237,7 @@ if [ ! -d "$PLUGIN_DIR" ]; then
   "guid": "6f2a9c31-4d7b-4e2a-9d15-8a1c0b7e3f44",
   "name": "Jellyfin Plus",
   "version": "$PLUGIN_VERSION",
-  "targetAbi": "12.1.0.0",
+  "targetAbi": "12.3.0.0",
   "owner": "",
   "overview": "GPU video enhancement plus search, filtering and library quality-of-life improvements for Jellyfin.",
   "category": "General"
@@ -246,6 +246,13 @@ META
     cp -a "$STAGE/Jellyfin.Plugin.Plus.dll" "$STAGE/Jellyfin.Plugin.Plus.deps.json" "$PLUGIN_DIR/"
     cp -a "$STAGE/Jellyfin.Plugin.Plus.Patcher.dll" "$STAGE/0Harmony.dll" "$PATCH_DIR/"
     chown -R jellyfin:jellyfin "$PLUGIN_DIR"
+fi
+
+# An existing install keeps its meta.json. Raise a 12.1-era targetAbi to the version these assemblies
+# are built against (targetAbi is the OLDEST server that loads the plugin, so 12.1.0.0 would still load
+# on 12.3; this keeps a 12.3 build from being offered to a 12.1 server).
+if [ -f "$PLUGIN_DIR/meta.json" ]; then
+    sed -i 's/"targetAbi": *"12\.1\.0\.0"/"targetAbi": "12.3.0.0"/' "$PLUGIN_DIR/meta.json"
 fi
 
 # Keep the previous activate script: it is what a rollback runs, so installing a new one and

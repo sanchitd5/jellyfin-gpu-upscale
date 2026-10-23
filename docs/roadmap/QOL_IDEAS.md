@@ -315,6 +315,7 @@ which one they patch; several need both.
 ### 39. Search box capped at 40 characters
 - **Seam:** [V] `features/search/components/SearchFields.tsx:53` `maxLength={40}` on `#searchTextInput`.
 - **Patch shape:** DOM patch removing the attribute. Client, S, no risk. Value low-med (long tag combos).
+- **Status:** fixed upstream in jellyfin-web 12.3 (PR #8412); the plugin's raise was dropped in the 12.3 port.
 
 ### 40. `type=tag` list sends `IncludeItemTypes=tag`
 - **Seam:** [V] `list.js:283` `IncludeItemTypes: params.type === 'MusicArtist' || params.type === 'Person' ? null : params.type` with `params.type === 'tag'`. [RS] confirm what the server does with an unknown `BaseItemKind` in `CommaDelimitedCollectionModelBinder` — if it 400s or empties the list, the fetch hook should strip it; if it is ignored, this is cosmetic.

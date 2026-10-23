@@ -16,7 +16,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
     /// <summary>
     /// Runtime patches over MediaBrowser.Controller.MediaEncoding.EncodingHelper.
     ///
-    /// Jellyfin 12.1 exposes no plugin hook for the video filter graph, so the chain is injected by
+    /// Jellyfin 12.1 and 12.3 expose no plugin hook for the video filter graph, so the chain is injected by
     /// patching the EncodingHelper members that decide the filter chain, the hardware device
     /// arguments, the hardware decoder and the output video encoder.
     /// </summary>

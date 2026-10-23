@@ -262,7 +262,7 @@ Most of the QoL work was built by parallel Sonnet agents, each in its own git wo
 and deployed once by the main thread. What made that work:
 
 - **A shared brief in a file** (scratchpad), naming the wire contract, the environment (jfbin, Jellyfin
-  12.1 source checkouts, the real-DB copy), build/test commands and hard rules (no deploy, no SSH,
+  12.3 source checkouts with the v12.1..v12.3 tags for diffing, the real-DB copy), build/test commands and hard rules (no deploy, no SSH,
   commit identity, no library content).
 - **Disjoint file ownership.** Shared files - `web/src/bootstrap.js`, `src/patcher/UpscalePatches.cs`
   (`ApplyOptional`), `context-map.md`, `ENHANCEMENTS.md` - take minimal additive edits only; the main
