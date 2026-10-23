@@ -17,7 +17,7 @@ import {
 } from '../controller/library-filters.js';
 
 /*
- * ADDITIONS TO THE MODERN LIBRARY PAGE'S FILTER POPOVER (jellyfin-web 12.1,
+ * ADDITIONS TO THE MODERN LIBRARY PAGE'S FILTER POPOVER (jellyfin-web 12.3,
  * apps/modern/features/libraries/components/filter/FilterButton.tsx - a MUI Popover, #filter-popover).
  *
  * Tags accordion (#filtersTags-content, mounted only while expanded):
@@ -30,7 +30,8 @@ import {
  *
  * All state goes through the tab's own settings setter (controller findFilterContext /
  * updateFilters / updateTagState), so React, the persisted copy and the request all agree and the
- * stock "reset filters" button clears everything added here. This file only draws and wires DOM.
+ * stock reset button (toolbar, outside the popover since jellyfin-web 12.3; it sets Filters to undefined)
+ * clears everything added here. This file only draws and wires DOM.
  * Found by shape (ids MUI derives from the stock aria-controls, props on the React tree), never
  * through a global; everything is in try/catch so the web client cannot break.
  */
@@ -554,7 +555,7 @@ function scan() {
 
     rootObserver = new MutationObserver(function () { scheduleSync(); });
     rootObserver.observe(root, { childList: true, subtree: true });
-    // The stock "reset filters" button and every stock checkbox change React state without
+    // Every stock checkbox changes React state without
     // necessarily changing this DOM's structure.
     root.addEventListener('click', function () { scheduleSync(true); });
     scheduleSync();

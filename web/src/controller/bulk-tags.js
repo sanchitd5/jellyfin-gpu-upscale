@@ -22,8 +22,9 @@ import { offerSelectAll, startSelectAll, extendedSelection } from './select-all.
  * be re-written, re-ordered or lost. After the save the item is read back and every field is
  * compared with what it was before; a difference is reported as a failure for that item.
  *
- * Series, Season and MusicAlbum are refused: saving them also pushes OfficialRating/CustomRating (and
- * tag changes) down onto every child, which would overwrite the children's own ratings.
+ * Series, Season and MusicAlbum are refused: saving them pushes tag changes down onto every child. (On
+ * 12.1 it also pushed OfficialRating/CustomRating down; since 12.3, jellyfin PR #18280, ratings move only
+ * when the parent's rating itself changed, which a tag edit never does. The tag push-down remains.)
  *
  * The user needs the server's elevation policy (the controller is RequiresElevation); the commands
  * are only offered to administrators, the same check multiSelect applies to "Group versions".

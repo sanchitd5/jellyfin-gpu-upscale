@@ -8,7 +8,7 @@
 
 export var STORE_KEY = 'jellyfinPlus.searchRecent';
 export var MAX_RECENT = 12;
-// Longer than the 200 characters the search box now accepts is not a search term worth keeping.
+// A term longer than 200 characters is not worth keeping as a recent search.
 export var MAX_TERM = 200;
 var MIN_TERM = 2;
 

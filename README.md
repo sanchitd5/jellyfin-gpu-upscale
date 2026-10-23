@@ -5,7 +5,7 @@ server's GPU and in the viewer's browser, and it improves the player, search, li
 tag management. It ships as one plugin plus one injected client script. Every feature installs on its
 own and falls back to stock Jellyfin when it cannot attach.
 
-Built and measured against Jellyfin **12.1.0**. The server-side video enhancement was measured on an
+Built against Jellyfin **12.3.0** (ported from 12.1.0). The server-side video enhancement was measured, on 12.1.0, on an
 NVIDIA RTX 3090.
 
 > **This is not an official Jellyfin plugin, and it works by runtime-patching Jellyfin.**
@@ -43,7 +43,7 @@ why; a feature that cannot attach leaves stock Jellyfin in place.
 
 ## Requirements
 
-- Jellyfin **12.1.0** (other versions: see [Limitations and risks](#limitations-and-risks))
+- Jellyfin **12.3.0** (other versions: see [Limitations and risks](#limitations-and-risks))
 - .NET SDK matching the server's runtime, plus Node.js and npm, on the build machine
 - The jellyfin-web client in a browser for the client features; other apps get only the server-side
   changes
@@ -106,7 +106,7 @@ GPLv2+ and links Apache-2.0 code. Build it for yourself.
   More in [the manual](docs/video-enhancement.md).
 - **Browser upscaling** switches off while native subtitles show, in iOS native fullscreen and in
   picture-in-picture. It is measured only on a desktop GPU.
-- `targetAbi` pins the plugin to a Jellyfin version; a later server may refuse to load it until raised.
+- `targetAbi` is the oldest Jellyfin that loads the plugin (12.3.0.0); a newer server still loads it, so re-verify the patches after every Jellyfin upgrade.
 
 ## Licences and credits
 

@@ -159,7 +159,7 @@ export function refetchSearch() {
 /*
  * SEARCH ON SUBMIT, NOT WHILE TYPING.
  *
- * jellyfin-web 12.1's search box is a React controlled input (SearchFields.tsx) whose onChange
+ * jellyfin-web 12.1's (and 12.3's) search box is a React controlled input (SearchFields.tsx) whose onChange
  * pushes every keystroke into the `query` URL param; search.tsx then searches 500ms after typing
  * pauses. On a large library each pause is a full set of search requests. Here a window-level
  * CAPTURE listener stops the box's `input` events before React's root listener sees them, so the

@@ -264,7 +264,7 @@ def fix(v):
     return v
 
 if src == "-":
-    m = {"targetAbi": "12.1.0.0", "owner": "", "category": "General"}
+    m = {"targetAbi": "12.3.0.0", "owner": "", "category": "General"}
 else:
     m = fix(json.load(open(src)))
 if str(m.get("guid", guid)).lower() != guid:

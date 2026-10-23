@@ -1,6 +1,6 @@
 # What Jellyfin Plus changes in Jellyfin
 
-Jellyfin Plus is a plugin for Jellyfin 12.1 that does two kinds of work. On the server it
+Jellyfin Plus is a plugin for Jellyfin 12.3 (ported from 12.1) that does two kinds of work. On the server it
 runtime-patches Jellyfin's own code (with Harmony) so transcodes can be enhanced on the GPU and so
 search, library filters, "More Like This" and the filter lists behave better. In the browser it
 injects one script, `jellyfin-plus.js`, into jellyfin-web, which adds the Enhance panel and a set of
@@ -84,7 +84,7 @@ Concise on purpose; the existing documents carry the detail: [README.md](README.
 configuration, measurements), [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md), [NEURAL.md](docs/filters/NEURAL.md),
 [LIVE_APPLY_DESIGN.md](docs/architecture/LIVE_APPLY_DESIGN.md), [WEB_PANEL_DESIGN.md](docs/architecture/WEB_PANEL_DESIGN.md).
 
-**What it does.** Jellyfin 12.1 has no plugin hook for the video filter graph, so five methods of
+**What it does.** Jellyfin 12.1 and 12.3 have no plugin hook for the video filter graph, so five methods of
 `MediaBrowser.Controller.MediaEncoding.EncodingHelper` are patched to replace the `-vf` chain with a
 libplacebo (Vulkan) chain, swap the device arguments, drop the hardware decoder, and turn a stream
 copy into a real encode when enhancement was asked for. The chain is built in
@@ -184,7 +184,7 @@ holds the box's `input` events in a window-level capture listener so typing alon
 Search button, or Enter in either box, replays one `input` event so React runs its normal flow
 (`search-exclude.js`, `holdTyping`, `submitSearch`). Not applied on TV layouts.
 
-**Sort** (`src/patcher/SearchSortPatches.cs`). On Jellyfin 12.1 the search page's `sortBy` is thrown
+**Sort** (`src/patcher/SearchSortPatches.cs`). On Jellyfin 12.1 and 12.3 the search page's `sortBy` is thrown
 away: `ItemsController` re-orders loaded items by relevance. The patch re-scores the candidates so that
 score order equals the requested order. Sort keys: `SortName`, `DateCreated`, `PremiereDate`,
 `CommunityRating`, `Runtime`, `Random`, `PlayCount`, `DatePlayed` (names outside this list are
@@ -272,9 +272,9 @@ DOM mutations, not `hashchange`: react-router changes the hash with `pushState`,
 `hashchange`. Not on TV layouts (the alpha picker searches letter by letter). If storage is refused the
 row still works for the page view.
 
-**Search box length** (`view/search-recent.js`). Stock puts `maxLength={40}` on `#searchTextInput`.
-The script raises it to 200 on the element (React never rewrites the attribute; the next scan raises it
-again if React re-creates the input). The server has no limit on the term. Not on TV layouts.
+**Search box length**: dropped in the 12.3 port. jellyfin-web 12.1 put `maxLength={40}` on
+`#searchTextInput` and `view/search-recent.js` raised it to 200; jellyfin-web 12.3 removed the cap itself
+(PR #8412), so the plugin no longer touches the input.
 
 **Suggestions for clip libraries** (`web/src/model/search-suggest.js`, called from `markSearch` in
 `controller/network.js`). The empty search page's Suggestions asks for 20 random items, favourites
@@ -323,7 +323,7 @@ when the key got seeded, it switches to the Videos tab (`&tab=3`) once. Fails so
 
 **How the extra state travels.** The page keeps filters in its own per-tab settings object, which has
 no field for these. The extra state rides as marker strings inside `Filters.Tags` (which is persisted,
-is part of the query key and is cleared by the stock reset button). Outgoing `/Items` requests are
+is part of the query key and is cleared by the stock reset button, which 12.3 moved from the filter popover to the library toolbar and which sets `Filters` to undefined). Outgoing `/Items` requests are
 rewritten to `excludeTagNames` (one parameter per tag, taken verbatim), `tagMatch=all` and `personIds`.
 Markers are removed from every other URL, and a marker that is never rewritten reaches the server as a
 tag nothing has: an empty list, not a wrong one.
@@ -710,7 +710,9 @@ Administrators only (`RequiresElevation` on the whole controller; the page itsel
   at most 20,000 items, the target may not contain `|` (it separates names in a `tags=` filter) or
   control characters. An item that would carry the target twice keeps one, spelled as the target.
   Because `UpdateItemsAsync` runs the metadata savers, a server set to write NFO files rewrites the NFO
-  of every changed item.
+  of every changed item. Since 12.3 (jellyfin PR #18279) it also recomputes each saved item's stored
+  parental-rating score (`OnMetadataChanged`), as every stock save does; a score that was stale before
+  the edit is corrected by it.
 - **Series and albums** are edited as items in their own right; stock's editor pushes tag changes down
   to children, this does not need to, since every child carrying the tag is matched itself.
 
@@ -762,6 +764,14 @@ so there is no compile-time version pin), a target that cannot be resolved logs 
 leaves Jellyfin untouched, and every patch body is wrapped in try/catch that leaves Jellyfin's own value
 or result in place. A Jellyfin upgrade that renames or changes the meaning of a target can still break a
 patch silently (Harmony cannot detect a changed meaning); re-verify after upgrades.
+
+**Verified on 12.3.** Every target in this section was resolved and patched against the 12.3 server
+assemblies with the exact signature given here. No signature changed between 12.1 and 12.3, and the
+installed set is the same on both. One target changed meaning:
+`SqlSearchProvider.SearchAsync`, whose name match also tests `SortName` in 12.3 (jellyfin PR #18223).
+The FTS prefix mirrors that test (7.3, 7.6). `MetadataService.RefreshMetadata` (scan timing) fails to
+patch on both 12.1 and 12.3 because the method is declared on the generic base, so scan timing runs
+without that one stage.
 
 ### 7.1 Transcoding: the core set (all-or-nothing) and the direct-play override
 
@@ -896,7 +906,11 @@ query (the postfix computes name and tag matches from the pattern). (2) Otherwis
 is usable and the term is one a trigram index can answer, the prefix replaces the stock query by the same
 query with one more condition, "id is among the index's candidates for the term", placed straight after the
 name predicate; the predicate, filters, version exclusion, score and ordering are the stock ones, so the
-result is identical. Any other case runs the stock method untouched.
+result is identical. Any other case runs the stock method untouched. The name predicate mirrored is 12.3's:
+`CleanName` contains the cleaned term, or `OriginalTitle LIKE %term%`, or (new in 12.3, when
+`BaseItem.GetSortName(term, true, server configuration)` is not blank) `SortName LIKE %shape%`. Since 12.3
+also tests `SortName`, the index must answer the shape too: a term whose shape is under 3 characters or
+holds `%`/`_` takes the stock path.
 
 ### 7.4 Library filters: `Jellyfin.Server.Implementations.Item.BaseItemRepository.TranslateQuery(IQueryable<BaseItemEntity>, JellyfinDbContext, InternalItemsQuery)`
 
@@ -961,8 +975,10 @@ the library filter popover is not changed by this item.
 ### 7.6 Search index: FTS5 trigram over names and tags (`FtsIndexEngine.cs`, `src/FtsIndex.cs`)
 
 Three plugin-owned tables in `jellyfin.db`, created with `IF NOT EXISTS` (Jellyfin's schema is never touched):
-`JellyfinPlus_FtsNames(ItemId UNINDEXED, CleanName, OriginalTitle)` (virtual, `fts5` trigram, one row per
-BaseItems row), `JellyfinPlus_FtsTags(ValueId UNINDEXED, CleanValue)` (one row per distinct tag VALUE, not per
+`JellyfinPlus_FtsNames(ItemId UNINDEXED, CleanName, OriginalTitle, SortName)` (virtual, `fts5` trigram, one row per
+BaseItems row; `SortName` added for 12.3's name match: a names table without it, built by a 12.1-era
+plugin, is dropped with its recorded signature on start-up and rebuilt whole, about 0.6 s on 80k items),
+`JellyfinPlus_FtsTags(ValueId UNINDEXED, CleanValue)` (one row per distinct tag VALUE, not per
 item-tag pair: 15k rows against 2.3M map rows; the item join stays on the ItemValuesMap primary key) and
 `JellyfinPlus_FtsMeta`. The index is only a PREFILTER: a trigram match returns a superset of the rows that
 contain the text, and the stock predicate still runs on the real columns, so results equal the stock
@@ -1139,7 +1155,7 @@ only, by Clip Up Next).
 | What | Where | Rebuild or clear |
 |---|---|---|
 | Filter key cache | Two tables in Jellyfin's `jellyfin.db`: `JellyfinPlus_FilterKeys(LibraryId, Kind, ItemType, CleanValue, Value, ItemCount, RefId)` and `JellyfinPlus_FilterKeysMeta(LibraryId, Kind, BuiltAtUtc, SourceItemCount, KeyCount, Fingerprint)`. Created with `CREATE TABLE IF NOT EXISTS` by raw SQL; Jellyfin's own schema and migrations are never touched. One row per distinct key per library per item type. Kinds: tags, genres, years, ratings, genre entities. | Rebuild: `POST /JellyfinPlus/FilterCache/Rebuild` or the scheduled task. A forced rebuild deletes and rewrites each library's rows in one transaction, so readers see old or new rows, never a mix. Rows of libraries that no longer exist are removed on each rebuild. Nothing in the plugin drops the tables, including on uninstall. To remove them, stop Jellyfin, back up `jellyfin.db`, and drop both tables by hand (not exercised here; the engine recreates them on its next run). |
-| Search index | Three objects in `jellyfin.db`: virtual tables `JellyfinPlus_FtsNames`, `JellyfinPlus_FtsTags` (FTS5, trigram) and `JellyfinPlus_FtsMeta(Key, Value)`, holding the signature the index was built at. Created with `IF NOT EXISTS`; Jellyfin's schema is untouched. About 45 MB on an 80k-item library. | Rebuild: `POST /JellyfinPlus/FtsIndex/Rebuild` or the scheduled task. Safe to drop by hand with Jellyfin stopped (search falls back to the stock queries; the engine recreates and rebuilds it). Nothing in the plugin drops the tables, including on uninstall. |
+| Search index | Three objects in `jellyfin.db`: virtual tables `JellyfinPlus_FtsNames`, `JellyfinPlus_FtsTags` (FTS5, trigram) and `JellyfinPlus_FtsMeta(Key, Value)`, holding the signature the index was built at. Created with `IF NOT EXISTS`; Jellyfin's schema is untouched. About 45 MB on an 80k-item library. | Rebuild: `POST /JellyfinPlus/FtsIndex/Rebuild` or the scheduled task. Safe to drop by hand with Jellyfin stopped (search falls back to the stock queries; the engine recreates and rebuilds it). The plugin drops nothing on uninstall; the only drop is the one-time rebuild of a `JellyfinPlus_FtsNames` that predates its `SortName` column (7.6). |
 | Synced preferences | The viewer's own `DisplayPreferences` (display preferences id `usersettings`, client `emby`), as three `CustomPrefs` entries: `jellyfinPlus.prefs`, `jellyfinPlus.searchPageSize`, `jellyfinPlus.searchPaging`, each `{"t": ms, "v": value}`. Written through jellyfin-web's `userSettings.set`, so Jellyfin stores them in its `CustomItemDisplayPreferences` table (key length limit 64; ours are 27 or fewer). | Delete the entries by saving display preferences without them, or ignore them: nothing on the server reads them. Removing the plugin leaves them as inert strings. |
 | Plugin settings | XML at `plugins/configurations/Jellyfin.Plugin.Plus.xml` under Jellyfin's data directory (`/var/lib/jellyfin/plugins/configurations/` in the install scripts). On first start the constructor copies `Jellyfin.Plugin.GpuUpscale.xml` over if the new file is absent. | Edit on the dashboard page; changes are pushed to the patches live. Delete the file with Jellyfin stopped to return to the defaults in section 1. |
 | Shader cache | `ShaderCacheDirectory`, default `/var/cache/jellyfin/jellyfin-plus-shaders`: composed shader files named `<level>+<level>.glsl`, and a `plcache/` subdirectory where libplacebo keeps its compiled-shader scratch files. A composed file is rewritten if any input shader is newer. | Safe to delete the contents; composed files are rebuilt on demand and libplacebo recompiles, so the first sessions afterwards start slower (inferred from the code, not timed). |
@@ -1226,7 +1242,7 @@ Item pages and playback:
 
 Enhancement (from README.md, "Limitations and risks", and the code):
 - The patches match Jellyfin methods by name and can break on any Jellyfin upgrade; targets are pinned
-  to 12.1. A jellyfin-web package upgrade deletes the injected script until the injector reruns.
+  to 12.3 (ported from 12.1; each upgrade needs the seams re-checked). A jellyfin-web package upgrade deletes the injected script until the injector reruns.
 - The client hooks depend on minified jellyfin-web internals (the `webpackChunk` global; modules matched
   by export shape). They fail safe: normal playback and menus are unaffected.
 - Subtitle burn-in sessions are never enhanced. Clients without the script are not enhanced unless

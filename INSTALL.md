@@ -2,7 +2,7 @@
 
 A complete walkthrough, from a plain Jellyfin server to working realtime upscaling.
 
-Everything here was done on **Jellyfin 12.1.0**, Ubuntu 24.04, an **NVIDIA RTX 3090** with driver
+Targets **Jellyfin 12.3.0**. The walkthrough was first done on Jellyfin 12.1.0, Ubuntu 24.04, an **NVIDIA RTX 3090** with driver
 595.84, inside an **unprivileged Proxmox LXC** with GPU passthrough. Adjust paths to your setup.
 
 > This installs software that patches Jellyfin's running code. Take a backup of
@@ -134,15 +134,15 @@ Write `/var/lib/jellyfin/plugins/JellyfinPlus_$V/meta.json`:
   "guid": "6f2a9c31-4d7b-4e2a-9d15-8a1c0b7e3f44",
   "name": "Jellyfin Plus",
   "version": "1.0.0.0",
-  "targetAbi": "12.1.0.0",
+  "targetAbi": "12.3.0.0",
   "owner": "",
   "overview": "GPU video enhancement plus search, filtering and library quality-of-life improvements for Jellyfin.",
   "category": "General"
 }
 ```
 
-`targetAbi` pins the plugin to a Jellyfin version — a later server may refuse to load it until you
-raise this.
+`targetAbi` is the oldest Jellyfin that loads the plugin (12.3.0.0 here): an older server refuses it,
+a newer one loads it. That does not make a newer server safe: re-verify the patches after every upgrade.
 
 ---
 

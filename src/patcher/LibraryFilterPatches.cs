@@ -43,7 +43,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
     /// RunTimeTicks; an item with no runtime matches neither), jpMinDateAdded/jpMaxDateAdded
     /// (YYYY-MM-DD, inclusive by UTC day, on DateCreated) and jpResolution (comma list of sd, hd, 4k;
     /// an item matches if it falls in ANY listed bucket). The resolution buckets are the stock
-    /// isHd/is4K ones, copied from BaseItemRepository.TranslateQuery on 12.1 so that this filter and
+    /// isHd/is4K ones, copied from BaseItemRepository.TranslateQuery on 12.1 (identical on 12.3) so that this filter and
     /// the stock one agree: sd = width in (0, 1200), hd = width >= 1200 and not 4K, 4k = width >= 3800
     /// or height >= 2100, where an item's resolution is the best any of its versions offers and a
     /// folder (series, box set) answers on its children. A malformed value is ignored (never
@@ -66,7 +66,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
         public const string MaxAddedParam = "jpMaxDateAdded";
         public const string ResolutionParam = "jpResolution";
 
-        // Stock TranslateQuery's isHd / is4K thresholds (12.1).
+        // Stock TranslateQuery's isHd / is4K thresholds (12.1; identical on 12.3).
         private const int HDWidth = 1200;
         private const int UHDWidth = 3800;
         private const int UHDHeight = 2100;
@@ -353,7 +353,7 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 .Select(v => v.PrimaryVersionId!.Value);
 
         /// <summary>
-        /// The stock isHd / is4K predicate (BaseItemRepository.TranslateQuery, 12.1) with the three
+        /// The stock isHd / is4K predicate (BaseItemRepository.TranslateQuery, 12.1; identical on 12.3) with the three
         /// buckets OR-ed instead of limited to what the two nullable flags can express. Kept in the
         /// stock shape on purpose, so the two cannot drift apart without it being obvious.
         /// </summary>
