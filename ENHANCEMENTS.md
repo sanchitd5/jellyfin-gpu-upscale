@@ -56,6 +56,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Tag and person chips on item pages | Client | Chips replace the one-line tag list (not on TV) | On, no switch |
 | Person and studio pages list Videos | Client | A "Videos" section appears on person and studio pages | On, no switch |
 | Poster zoom | Client | Tap the details poster to open it full size | On, no switch |
+| Image look-ahead | Client | Card images are requested before they scroll into view and are not reloaded when you scroll back | On; `localStorage jellyfinPlus.imagePreload = off` (not on TV) |
 | Mobile card actions | Client | Always-visible favourite, more and play buttons on phone cards | On, no switch |
 | Card badges | Client | Resolution, runtime and the first two tags on video cards, looked up lazily for the cards on screen | On; `localStorage jellyfinPlus.cardBadges = off` (not on TV) |
 | Select all N results | Client | "Select all N results" in the selection menu, for Add tags / Remove tags across pages (administrators) | On for administrators; offered only when the list can be identified |
@@ -443,6 +444,25 @@ it and throws without), and hidden again on a later item that fails the test. No
 stock's; nothing is re-implemented.
 
 ## 5. Cards and playback
+
+**Image look-ahead** (`web/src/controller/image-preload.js`, `web/src/model/image-preload.js`). Stock
+jellyfin-web starts a card image only when the card is within half a viewport, and empties it again
+when it scrolls back out, so returning to it fetches and fades it in a second time. The server pays
+about 0.3 s per image the first time a size is requested (it resizes, then caches; measured on CT114:
+291 ms mean, 445 ms max cold, 1 ms warm). The client patches every LazyLoader-shaped class it finds
+(found by shape, one level into module exports, because the class sits on the default-export object
+`{LazyLoader, lazyChildren}`; the same in the 12.1 and 12.3 builds). For each loader:
+- **Look-ahead pass:** a second observer, 250% of the viewport wide, requests the cards' own `data-src`
+  image URLs early. The requests are low priority, at most 4 in flight, nearest to the viewport first,
+  and each URL is fetched once per page load. The server resizes ahead of need, and the browser caches
+  the result, since tagged image URLs are served `max-age=31536000, immutable`. When stock's own fill
+  arrives, it hits the cache.
+- **No unloading:** a loaded image is no longer emptied when it scrolls out of range. Only elements
+  actually showing an image are kept; genre rows, which use the same loader for other content, behave
+  exactly as stock.
+
+Stock's own observer and the URLs it asks for are unchanged. Off switch:
+`localStorage jellyfinPlus.imagePreload = off`. Not active on the TV layout.
 
 **Mobile card actions** (`web/src/view/card-actions.js`). Under `html.layout-mobile`, a row of
 favourite, more and play buttons on each card in an items container (stock shows favourite and more
@@ -1089,6 +1109,7 @@ keys once.
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
 | `jellyfinPlus.cardBadges` | `off` switches the card badges off (read at load; never written by the script) | `controller/card-data.js`, `view/card-badges.js` |
+| `jellyfinPlus.imagePreload` | `off` switches the image look-ahead off (read at load; never written by the script) | `controller/image-preload.js` |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
 | `jellyfinPlusPlaybackRate` | The saved playback speed, a number from 0.25 to 4; absent means 1x | `controller/player-speed.js` |
 | `jellyfinPlusBrightness` | The swipe brightness, 0.3 to 1.5; absent means 1 (no filter) | `controller/player-actions.js` |

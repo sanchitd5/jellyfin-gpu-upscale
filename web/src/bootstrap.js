@@ -34,6 +34,7 @@ import { installLibraryLanding } from './controller/library-landing.js';
 import { installCardBadges } from './view/card-badges.js';
 import { installSelectAll } from './controller/select-all.js';
 import { installPrefsSync } from './controller/prefs-sync.js';
+import { installImagePreload } from './controller/image-preload.js';
 import { installListRequests } from './controller/list-requests.js';
 import { installListSort } from './controller/list-sort.js';
 
@@ -55,6 +56,8 @@ function feature(name, install) {
 (function install() {
     log('bootstrap install: start');
     try {
+        // Before hookWebpack: it arms noteLazyLoader(), which the module wrapper calls as chunks evaluate.
+        feature('image preload', installImagePreload);
         hookWebpack();
         // Innermost on purpose: it must judge a search url AFTER network.js's markings have rewritten it.
         feature('search census', installSearchCensus);

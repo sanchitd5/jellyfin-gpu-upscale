@@ -6,6 +6,7 @@ import { noteQueryClient } from './search-exclude.js';
 import { noteCardBuilder } from './detail-related.js';
 import { noteUserSettings } from './prefs-sync.js';
 import { noteListView, noteSortMenu } from './list-sort.js';
+import { noteLazyLoader } from './image-preload.js';
 
 function wrapChunkModules(chunk) {
     try {
@@ -39,6 +40,7 @@ function wrapChunkModules(chunk) {
                         noteUserSettings(exports);
                         noteListView(exports);
                         noteSortMenu(exports);
+                        noteLazyLoader(exports);
                     }
                 } catch (err) {
                     log('module wrap failed', err);
