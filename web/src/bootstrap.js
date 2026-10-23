@@ -34,6 +34,7 @@ import { installLibraryFilterPanel } from './view/library-filter-panel.js';
 import { installLibraryLanding } from './controller/library-landing.js';
 import { installCardBadges } from './view/card-badges.js';
 import { installSelectAll } from './controller/select-all.js';
+import { installSelectMode } from './controller/select-mode.js';
 import { installPrefsSync } from './controller/prefs-sync.js';
 import { installImagePreload } from './controller/image-preload.js';
 import { installListRequests } from './controller/list-requests.js';
@@ -87,6 +88,8 @@ function feature(name, install) {
         feature('card badges', installCardBadges);
         // Observes list responses only (never changes a request), so its place in the chain does not matter.
         feature('select all', installSelectAll);
+        // Explicit "Select" entry and the bottom-sheet selection bar (P8); drives stock multi-select.
+        feature('select mode', installSelectMode);
         // Gestures (double-tap seek, hold for 2x, swipe volume/brightness), the saved playback
         // speed and the Enhance badge in the OSD. All independent of the request hooks above.
         feature('player gestures', installPlayerGestures);
