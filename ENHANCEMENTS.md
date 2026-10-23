@@ -53,6 +53,9 @@ setting, a control in the page, or "remove the plugin or script".
 | Clip Up Next | Client | "Next video in N s" card for queued clips | On, no switch |
 | Play-all fixes | Client | Play all and Shuffle queue up to 1000 items; Home Videos folders queue videos | On, no switch |
 | Bulk tag add/remove, Edit tags | Client | Extra rows in the selection menu and the item menu (administrators) | On for administrators |
+| Previous / next on a details page | Client | Skip-back and skip-forward buttons step through the list the item was opened from | On, no switch (not on TV); only when the item is in the remembered list |
+| Download button for videos | Client | The stock Download button shows on a video's page when the server allows downloading | On, no switch (not on TV) |
+| Tag autocomplete in the metadata editor | Client | The tag prompt suggests existing tags, accepts "a, b, c" as three tags and refuses duplicates | On, no switch (not on TV) |
 
 ## 1. GPU upscaling and enhancement
 
@@ -316,6 +319,26 @@ instead. The rewrite matches only an Audiobook request carrying `personIds` or `
 full resolution (sizing parameters are stripped from the image URL). Tap to toggle fit/actual size;
 close with the X, the backdrop, or Escape.
 
+**Previous / next** (`web/src/controller/detail-nav.js`, `model/detail-nav.js`, shared page watcher
+`controller/detail-page.js`). Stock has no "the list I came from". A click that opens an item from a
+card or list row (the stock handler's own test: `data-action="link"`) stores, in `sessionStorage`
+(section 10), the ids of the cards in that card's items container in page order, plus the route the
+list was on. On a details page the item is looked up in that list: if it is there, skip-back and
+skip-forward buttons (a copy of the stock Replay button, so they look and focus like the rest) appear
+before Download and go to the neighbour's `#/details?id=...&serverId=...`, as a card link would, so the
+browser's Back button steps back through the clips. The list is only what was in the DOM at the click:
+a paged list gives the current page, the infinite and virtualised search results give the gap-free run
+around the click (an evicted chunk is a gap), at most 1000 ids. At either end there is no button, and an
+item outside the list, or a page opened another way, gets none. The "More like this", cast, collections
+and additional-parts rows are never captured; a list of one card clears the stored list. TV untouched.
+
+**Download button** (`web/src/controller/detail-download.js`). The stock template already carries a
+hidden `.btnDownload` and binds its click, but stock only shows it for Books. It is shown for a video
+(`MediaType` Video) whose DTO says `CanDownload` (the server's answer, from the user's
+`EnableContentDownloading` policy) and has a `Path` (the stock click handler derives the file name from
+it and throws without), and hidden again on a later item that fails the test. Not on TV. The click is
+stock's; nothing is re-implemented.
+
 ## 5. Cards and playback
 
 **Mobile card actions** (`web/src/view/card-actions.js`). Under `html.layout-mobile`, a row of
@@ -360,6 +383,27 @@ server assigns unconditionally, `LockData`, and `Tags`, and nothing else. After 
 back and every protected field is compared; a difference is reported as a failure for that item.
 Series, Season and MusicAlbum are refused (saving them pushes ratings and tags to children). Allowed
 types: Video, Movie, Trailer, Episode, Folder, BoxSet, Photo, Book. Saves run 3 at a time.
+
+**Autocomplete in the metadata editor** (`web/src/controller/tag-autocomplete.js`,
+`model/tag-input.js`). Stock adds a tag through a bare "Value:" prompt and stores whatever is typed as
+one tag, so "a, b" becomes a tag named "a, b" and a typo makes a near duplicate. For the prompt opened
+by the Tags section's "+" button only (genres and studios use the same prompt and stay stock):
+- Suggestions appear under the box for the tag being typed (the text after the last comma): names
+  containing it, prefix matches first, minus tags already in the list or already typed. They come from
+  `GET /Items/Filters` with `jpTagLimit=20` and `jpTagQuery` through `controller/tag-window.js`, after
+  180 ms of quiet, so the 12,000-tag list is never downloaded; a server without those parameters
+  returns the full list and `tag-window.js` narrows it in the browser. Answers are cached per typed text
+  for the dialog's life; a late answer for older text is dropped.
+- Adding splits on commas and uses the bulk editor's `parseTags` and `mergeTags` (trim, drop blanks,
+  case-insensitive de-duplication, the spelling already stored wins). Each new tag becomes its own row,
+  in the editor's own order, and the prompt is closed through its Back button. If every typed tag is
+  already in the list the prompt stays open and says which. An empty box is left to stock.
+- The editor's Save reads the tag list from the DOM, which is why rows added here are saved like any
+  other. How the prompt is recognised: the click on "+" arms a 15 second MutationObserver that
+  attaches to the first dialog holding `#txtInput`. If the prompt's shape is unexpected (no Back
+  button, no form), nothing is attached or intercepted. Not on TV.
+- Not changed: the bulk and single "Add tags" dialog above still loads the whole tag list once per
+  page (`loadTagNames`) for its suggestions.
 
 ## 7. Harmony patch reference
 
@@ -621,8 +665,8 @@ server without the plugin sees no error.
 | `excludeTags` | Comma- or pipe-separated substrings. Drop tag matches whose tag contains one, and name matches with any such tag. At most 20 terms of 100 characters. | Search: `SqlSearchProvider.SearchAsync` (item search, `/Search/Hints`); `/JellyfinPlus/Search/Facets` | `search-exclude.js` (`markSearchUrl`), `model/search-filters.js` (`facetPairs`) |
 | `excludeTagNames` | Exact tag names (cleaned), one per parameter value, verbatim so a name may contain commas. Drop items carrying any. At most 100 of 200 characters. | `/Items` and `/Search/Facets` through `TranslateQuery`; also triggers search pool widening | `model/library-filter-marks.js` (library popover). The search sheet does not send it |
 | `tagMatch` | `all` makes stock's `tags` list an AND (needs 2+ tags) | Same as above | `library-filter-marks.js`, `model/search-filters.js` |
-| `jpTagLimit` | Return at most this many tags (1 to 5000) from `/Items/Filters` or `/Items/Filters2`; the match count comes back in header `X-JellyfinPlus-TagTotal` | `FilterController` postfixes (`FilterCachePatches.cs`) | `controller/tag-window.js`, `library-filters.js` |
-| `jpTagQuery` | Return only tags containing this text (case- and diacritic-insensitive) | Same | `controller/tag-window.js` |
+| `jpTagLimit` | Return at most this many tags (1 to 5000) from `/Items/Filters` or `/Items/Filters2`; the match count comes back in header `X-JellyfinPlus-TagTotal` | `FilterController` postfixes (`FilterCachePatches.cs`) | `controller/tag-window.js`, `library-filters.js`, `controller/tag-autocomplete.js` (through `tag-window.js`) |
+| `jpTagQuery` | Return only tags containing this text (case- and diacritic-insensitive) | Same | `controller/tag-window.js`, `controller/tag-autocomplete.js` (through `tag-window.js`) |
 | `jpMinRuntime`, `jpMaxRuntime` | Whole minutes, inclusive, digits only | Same as above | `model/search-filters.js` (`filterPairs`) |
 | `jpMinDateAdded`, `jpMaxDateAdded` | `YYYY-MM-DD`, UTC day, inclusive | Same | `model/search-filters.js` |
 | `jpResolution` | Comma list of `sd`, `hd`, `4k` | Same | `model/search-filters.js` |
@@ -662,6 +706,12 @@ keys once.
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
+
+Browser `sessionStorage` (per tab, gone when the tab closes; also in try/catch):
+
+| Key | Holds | Module |
+|---|---|---|
+| `jellyfinPlus.detailNav` | JSON `{v:1, src, ids}`: the route of the list a card was last opened from and the ids of up to 1000 consecutive cards (32 hex characters each, about 35 KB at most), for the details page's previous / next buttons | `controller/detail-nav.js`, `model/detail-nav.js` |
 
 Keys that belong to jellyfin-web but are read or written by Jellyfin Plus:
 `<viewType> - <parentId>` (the library tab's own settings object; the extra marker entries ride in its
