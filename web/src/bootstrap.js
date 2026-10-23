@@ -44,6 +44,7 @@ import { installImagePreload } from './controller/image-preload.js';
 import { installListRequests } from './controller/list-requests.js';
 import { installListSort } from './controller/list-sort.js';
 import { installThemeFallback } from './controller/theme-fallback.js';
+import { installLibraryInfinite } from './view/library-infinite.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -81,6 +82,8 @@ function feature(name, install) {
         feature('library landing', installLibraryLanding);
         feature('list requests', installListRequests);
         feature('list sort menus', installListSort);
+        // Reads the page requests list requests records; changes none. Draws the pages after the stock one.
+        feature('library infinite', installLibraryInfinite);
         tryRequireShim();
         watchPlaybackInfoDialog();
         feature('search page', watchSearchPage);

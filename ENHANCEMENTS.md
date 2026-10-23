@@ -345,6 +345,21 @@ models `web/src/model/list-requests.js` and `list-sort.js`; server `src/patcher/
   is its own, a page reload or the list page's Shuffle button reshuffles. Requests that must stay
   truly random are left alone: the playback queue (asks for Chapters), home rows and screensavers
   (no `startIndex`), searches (`searchTerm` / `jpSeed`), requests that opt out of the total count.
+- **Library infinite scroll (P9).** `web/src/view/library-infinite.js`, `model/library-infinite.js`, and the
+  request record in `controller/list-requests.js`. On the modern library tabs the stock page stays as
+  page 1; the pages after it are fetched as the viewer nears the end (a status row watched with a
+  two-screen margin) and drawn as `.jpChunk` card groups inside the page's own `.itemsContainer`, bounded
+  by `virtual-chunks.js`. A follow-up request is the page's own request as sent (so the Random seed, sort
+  and filter markers ride along) with only `StartIndex` changed and `jpInf=1` added; the server ignores
+  `jpInf`, and the seed signature ignores it, so every page of a Random list is one shuffle. The stock
+  Previous / Next buttons are hidden (when the list starts at page 1) and a fixed "Page N of M" pill
+  shows the page under the reading line. A sort, filter or tab change is a different request, which
+  discards everything appended. On unless TV, `jellyfinPlus.mobileTheme=off`, or
+  `jellyfinPlus.libraryInfinite=off` (`on` forces it on). Fail soft: with no cardBuilder, no tab handle
+  (found by shape on the toolbar's React fiber), list view mode, Songs / Channels / Series timers, or a
+  `.itemsContainer.vertical-wrap` that does not hold a card of the first response, nothing is touched
+  and the stock pager stays. Cards are rebuilt from the tab's saved view settings; legacy list pages
+  (tag, person, genre lists) are not covered.
 - **Sort menu.** The legacy list page (tag, person, studio, genre and folder lists) gets Random and
   Recently edited appended to its sort menu, on lists that already offer Date added (not Live TV);
   the modern library tabs already have Random and gain Recently edited (Movies, Videos, Music videos,
@@ -1229,6 +1244,7 @@ keys once.
 | `jellyfinPlus.searchRecent` | JSON array of up to 12 recent search terms, newest first | `model/search-recent.js` |
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
+| `jellyfinPlus.libraryInfinite` | `on` or `off` forces library infinite scroll; empty means on (not TV, not with the Mobile theme off) | `controller/list-requests.js` (`infiniteEnabled`) |
 | `jellyfinPlus.cardBadges` | `off` switches the card badges off (read at load; never written by the script) | `controller/card-data.js`, `view/card-badges.js` |
 | `jellyfinPlus.mobileTheme` | `off` returns every visual change to stock and sets `html.jp-theme-off`; `light` forces the light scheme (read at load; never written by the script) | `view/mobile-theme.js` |
 | `jellyfinPlus.imagePreload` | `off` switches the image look-ahead off (read at load; never written by the script) | `controller/image-preload.js` |
