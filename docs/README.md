@@ -13,6 +13,10 @@ The entry points live at the repository root:
 
 Everything else is here, grouped by what it is.
 
+**[video-enhancement.md](video-enhancement.md)** is the full manual for server-side video
+enhancement: the Enhance panel, every level and axis, configuration, throughput, how the server
+applies it, and what was measured and rejected.
+
 ## architecture/ — how the pieces fit
 
 | File | About |
