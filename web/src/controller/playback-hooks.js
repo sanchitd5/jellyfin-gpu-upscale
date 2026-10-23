@@ -7,7 +7,7 @@ import { player } from './live-apply.js';
 import { probeServer } from './probe.js';
 import { fetchServerState } from './live-block.js';
 import {
-    closePanel, ensureStyle, renderPanel, panelEl, applyPanelPos, liveRows, FOCUSABLE, PANEL_ID
+    closePanel, ensureStyle, renderPanel, panelEl, applyPanelPos, liveRows, FOCUSABLE, PANEL_ID, mountPanel
 } from '../view/panel-dom.js';
 
 export function hookPlaybackEvents() {
@@ -114,7 +114,10 @@ export function openEnhancePanel() {
             panel.addEventListener('wheel', eatScroll, { passive: false });
             panel.addEventListener('touchmove', eatScroll, { passive: false });
 
-            (document.body || document.documentElement).appendChild(panel);
+            // On a phone this mounts the panel in the shared bottom sheet (view/sheet.js), which
+            // brings its own focus trap, Escape and Back handling; elsewhere it is appended to
+            // <body> as before.
+            var inSheet = mountPanel(panel);
             renderPanel(panel, caps);
 
             // A dialog nobody is focused inside is a dialog a screen reader never enters.
@@ -156,10 +159,12 @@ export function openEnhancePanel() {
                     first.focus();
                 }
             };
-            document.addEventListener('keydown', state.panelKeyHandler, true);
+            if (!inSheet) {
+                document.addEventListener('keydown', state.panelKeyHandler, true);
 
-            state.onPanelResize = function () { applyPanelPos(); };
-            window.addEventListener('resize', state.onPanelResize);
+                state.onPanelResize = function () { applyPanelPos(); };
+                window.addEventListener('resize', state.onPanelResize);
+            }
 
             state.liveTimer = setInterval(function () {
                 try {

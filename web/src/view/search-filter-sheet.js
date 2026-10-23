@@ -1,5 +1,6 @@
 import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
+import { openSheet as sharedSheet, closeSheet as sharedClose } from './sheet.js';
 import { normalize, WINDOW_SIZE, searchEntities } from '../controller/library-filters.js';
 import {
     currentFilters,
@@ -34,7 +35,7 @@ import {
  * The bar (button + badge + chips) is appended to jellyfin-web's `#searchPage .searchFields`, below
  * the exclude box that controller/search-exclude.js puts there, and re-added whenever React
  * re-renders the fields away. The sheet is a modal dialog on <body>: a bottom sheet on a phone, a
- * centred panel on a wide window. It edits a DRAFT copy of the filters; nothing is sent until
+ * centred panel on a wide window (the shell is view/sheet.js, shared). It edits a DRAFT copy of the filters; nothing is sent until
  * Apply (controller/search-filters.js commit()). Closing it any other way - backdrop, the close
  * button, Escape, the browser's Back - throws the draft away.
  *
@@ -68,28 +69,6 @@ var CSS = [
     '.jfp-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }',
     '.jfp-x { flex: none; min-width: 40px; min-height: 40px; padding: 0; margin-left: 0.1em; border: 0; background: none;'
         + ' color: inherit; font: inherit; cursor: pointer; opacity: 0.8; border-radius: 20px; }',
-    '.jfp-backdrop { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 9000; display: flex;'
-        + ' align-items: flex-end; justify-content: center; background: rgba(0,0,0,0.6); touch-action: none;'
-        + ' animation: jfp-fade 0.15s ease-out; }',
-    '.jfp-sheet { display: flex; flex-direction: column; width: 100%; max-height: 92vh; max-height: 92dvh;'
-        + ' box-sizing: border-box; border-radius: 16px 16px 0 0; touch-action: auto; outline: none;'
-        + ' background: var(--jf-palette-background-paper, #202020); color: var(--jf-palette-text-primary, #fff);'
-        + ' box-shadow: 0 -4px 24px rgba(0,0,0,0.45); animation: jfp-rise 0.2s ease-out; }',
-    '@media (min-width: 50em) { .jfp-backdrop { align-items: center; }'
-        + ' .jfp-sheet { width: min(580px, 92vw); max-height: 85vh; border-radius: 12px;'
-        + ' box-shadow: 0 8px 32px rgba(0,0,0,0.5); animation: jfp-fade 0.15s ease-out; } }',
-    '@keyframes jfp-fade { from { opacity: 0; } to { opacity: 1; } }',
-    '@keyframes jfp-rise { from { transform: translateY(40px); opacity: 0.6; } to { transform: none; opacity: 1; } }',
-    '@media (prefers-reduced-motion: reduce) { .jfp-backdrop, .jfp-sheet { animation: none; } }',
-    '.jfp-head { display: flex; align-items: center; justify-content: space-between; flex: none;'
-        + ' padding: 0.3em 0.4em 0.3em 1.1em; border-bottom: 1px solid ' + LINE + '; }',
-    '.jfp-head h2 { margin: 0; font-size: 1.15em; font-weight: 600; }',
-    '.jfp-head .jfp-x { min-width: 44px; min-height: 44px; font-size: 1.2em; }',
-    '.jfp-body { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;'
-        + ' padding: 0.3em 1.1em 1em; }',
-    '.jfp-foot { display: flex; gap: 0.7em; flex: none; padding: 0.7em 1.1em;'
-        + ' padding-bottom: calc(0.7em + env(safe-area-inset-bottom, 0px)); border-top: 1px solid ' + LINE + '; }',
-    '.jfp-foot button { flex: 1; min-height: 46px; margin: 0; border-radius: 23px; font: inherit; font-weight: 600; cursor: pointer; }',
     '.jfp-reset { background: transparent; color: inherit; border: 1px solid ' + LINE + '; }',
     '.jfp-apply { background: ' + P + '; color: var(--jf-palette-primary-contrastText, #fff); border: 1px solid ' + P + '; }',
     '.jfp-sec { padding: 0.9em 0 0.3em; border-bottom: 1px solid ' + LINE + '; }',
@@ -265,24 +244,9 @@ function openSheet(opener) {
         });
     };
 
-    var backdrop = el('div', 'jfp-backdrop');
-    var dialog = el('div', 'jfp-sheet');
-    dialog.setAttribute('role', 'dialog');
-    dialog.setAttribute('aria-modal', 'true');
-    dialog.setAttribute('aria-label', 'Sort and filter');
-    dialog.tabIndex = -1;
-
-    var head = el('div', 'jfp-head');
-    head.appendChild(el('h2', null, 'Sort & filter'));
-    var closeBtn = button('jfp-x', '✕', 'Close');
-    head.appendChild(closeBtn);
-
-    var body = el('div', 'jfp-body');
-    var foot = el('div', 'jfp-foot');
+    var body = el('div');
     var reset = button('jfp-reset', 'Reset');
     var apply = button('jfp-apply', 'Apply');
-    foot.appendChild(reset);
-    foot.appendChild(apply);
 
     /* A group of single-choice pills bound to a draft field. */
     function choice(options, get, set) {
@@ -778,55 +742,10 @@ function openSheet(opener) {
     var typeSec = section('Type');
     typeSec.appendChild(choice(TYPES, function () { return draft.type; }, function (v) { draft.type = v; }));
 
-    dialog.appendChild(head);
-    dialog.appendChild(body);
-    dialog.appendChild(foot);
-    backdrop.appendChild(dialog);
-
-    /* ---- closing: backdrop, button, Escape, Back ---- */
-    var onKey = function (e) {
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            e.stopPropagation();
-            closeSheet();
-        } else if (e.key === 'Tab') {
-            var focusable = Array.prototype.filter.call(
-                dialog.querySelectorAll('button, input, summary, [tabindex]:not([tabindex="-1"])'),
-                function (n) { return !n.disabled && n.offsetParent !== null; });
-            if (focusable.length) {
-                var first = focusable[0];
-                var last = focusable[focusable.length - 1];
-                if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-                    e.preventDefault();
-                    last.focus();
-                } else if (!e.shiftKey && document.activeElement === last) {
-                    e.preventDefault();
-                    first.focus();
-                }
-            }
-        }
-    };
-    var onPop = function () { closeSheet(true); };
-
-    sheet = {
-        backdrop: backdrop,
-        opener: opener,
-        onKey: onKey,
-        onPop: onPop,
-        pushed: false,
-        draftOf: function () { return draft; }
-    };
-
-    backdrop.addEventListener('click', function (e) {
-        if (e.target === backdrop) {
-            closeSheet();
-        }
-    });
-    closeBtn.addEventListener('click', function () { closeSheet(); });
     apply.addEventListener('click', function () {
         var next = normalizeState(draft);
         var same = JSON.stringify(next) === JSON.stringify(currentFilters());
-        closeSheet();
+        sheet.close();
         // Unchanged filters need no request - except Random, where Apply means "shuffle again".
         if (!same || next.sort === 'Random') {
             commit(next);
@@ -834,54 +753,25 @@ function openSheet(opener) {
     });
     reset.addEventListener('click', function () {
         var had = activeGroups(currentFilters()).length > 0;
-        closeSheet();
+        sheet.close();
         if (had) {
             commit(defaultState());
         }
     });
 
-    document.addEventListener('keydown', onKey, true);
-    window.addEventListener('popstate', onPop);
-    try {
-        window.history.pushState({ jfpSheet: true }, '');
-        sheet.pushed = true;
-    } catch (err) { /* no history entry: Back leaves the page instead of closing the sheet */ }
-
     refreshAll();
-    document.body.appendChild(backdrop);
-    dialog.focus();
-    log('search filter sheet opened');
-}
-
-function closeSheet(fromPop) {
-    if (!sheet) {
-        return;
-    }
-
-    var s = sheet;
-    sheet = null;
-    document.removeEventListener('keydown', s.onKey, true);
-    window.removeEventListener('popstate', s.onPop);
-    if (s.backdrop.parentNode) {
-        s.backdrop.parentNode.removeChild(s.backdrop);
-    }
-
-    // Our own history entry is still on top unless Back already took it.
-    if (!fromPop && s.pushed) {
-        try {
-            if (window.history.state && window.history.state.jfpSheet) {
-                window.history.back();
-            }
-        } catch (err) { /* nothing to pop */ }
-    }
-
-    try {
-        if (s.opener && document.contains(s.opener)) {
-            s.opener.focus();
+    var handle = sharedSheet({
+        title: 'Sort & filter',
+        content: body,
+        footer: [reset, apply],
+        opener: opener,
+        onClose: function () {
+            sheet = null;
+            log('search filter sheet closed');
         }
-    } catch (err) { /* focus is a courtesy */ }
-
-    log('search filter sheet closed');
+    });
+    sheet = { close: handle.close, el: handle.el };
+    log('search filter sheet opened');
 }
 
 /* ---- installation ---- */
@@ -891,7 +781,7 @@ function scan() {
         var page = document.getElementById('searchPage');
         if (!page && sheet) {
             // Navigated away with the sheet open (e.g. a link from a notification): drop it.
-            closeSheet(true);
+            sharedClose('navigated', true);
         }
 
         Array.prototype.forEach.call(document.querySelectorAll('#searchPage .searchFields'), function (fields) {
