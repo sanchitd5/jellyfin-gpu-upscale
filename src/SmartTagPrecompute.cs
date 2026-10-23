@@ -53,6 +53,7 @@ namespace Jellyfin.Plugin.Plus
         private readonly ILogger<SmartTagPrecomputeService> _logger;
         private readonly CancellationTokenSource _stop = new CancellationTokenSource();
         private Task _loop = Task.CompletedTask;
+        private int _truncatedLogged;
 
         public SmartTagPrecomputeService(
             ILibraryManager libraryManager, IUserManager userManager, IDbContextFactory<JellyfinDbContext> dbFactory, ILogger<SmartTagPrecomputeService> logger)
@@ -103,21 +104,53 @@ namespace Jellyfin.Plugin.Plus
                 userIds = db.Users.AsNoTracking().Select(x => x.Id).ToArray();
             }
 
+            // Capped at the cache size: a larger plan would evict and recompute itself forever. No-parent scope for
+            // every user first, then per-library entries until the cap.
+            var users = new List<Jellyfin.Database.Implementations.Entities.User>();
             foreach (var userId in userIds)
             {
-                var user = _userManager.GetUserById(userId); // the manager's loaded user: permissions and preferences included
-                if (user == null || user.HasPermission(PermissionKind.IsDisabled))
+                var loaded = _userManager.GetUserById(userId); // the manager's loaded user: permissions and preferences included
+                if (loaded != null && !loaded.HasPermission(PermissionKind.IsDisabled))
                 {
-                    continue;
+                    users.Add(loaded);
+                }
+            }
+
+            var count = 0;
+            foreach (var u in users)
+            {
+                if (count++ >= SmartTagCache.MaxEntries)
+                {
+                    LogTruncated();
+                    yield break;
                 }
 
-                var u = user;
-                yield return new SmartTagWork(SmartTagCache.KeyFor(u, null), ct => SmartTagsCore.ComputeAsync(_libraryManager, _dbFactory, u, null, ct));
-                foreach (var lib in _libraryManager.GetUserRootFolder().GetChildren(u, true).OfType<CollectionFolder>().Where(c => c.IsVisible(u)).ToList())
+                var user = u;
+                yield return new SmartTagWork(SmartTagCache.KeyFor(user, null), ct => SmartTagsCore.ComputeAsync(_libraryManager, _dbFactory, user, null, ct));
+            }
+
+            foreach (var u in users)
+            {
+                var user = u;
+                foreach (var lib in _libraryManager.GetUserRootFolder().GetChildren(user, true).OfType<CollectionFolder>().Where(c => c.IsVisible(user)).ToList())
                 {
+                    if (count++ >= SmartTagCache.MaxEntries)
+                    {
+                        LogTruncated();
+                        yield break;
+                    }
+
                     var l = lib;
-                    yield return new SmartTagWork(SmartTagCache.KeyFor(u, l.Id), ct => SmartTagsCore.ComputeAsync(_libraryManager, _dbFactory, u, l, ct));
+                    yield return new SmartTagWork(SmartTagCache.KeyFor(user, l.Id), ct => SmartTagsCore.ComputeAsync(_libraryManager, _dbFactory, user, l, ct));
                 }
+            }
+        }
+
+        private void LogTruncated()
+        {
+            if (Interlocked.Exchange(ref _truncatedLogged, 1) == 0)
+            {
+                _logger.LogInformation("JellyfinPlus: smart tag precompute plan truncated to the cache size ({Max} entries).", SmartTagCache.MaxEntries);
             }
         }
 

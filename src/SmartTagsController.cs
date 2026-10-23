@@ -372,10 +372,12 @@ namespace Jellyfin.Plugin.Plus
                 ";",
                 user.HasPermission(PermissionKind.EnableAllFolders) ? "all" : "sel",
                 Join<Guid>(PreferenceKind.EnabledFolders),
+                Join<Guid>(PreferenceKind.BlockedMediaFolders),
                 Join<string>(PreferenceKind.BlockedTags),
                 Join<string>(PreferenceKind.AllowedTags),
                 Join<UnratedItem>(PreferenceKind.BlockUnratedItems),
                 user.MaxParentalRatingScore?.ToString(CultureInfo.InvariantCulture) ?? "-",
+                user.MaxParentalRatingSubScore?.ToString(CultureInfo.InvariantCulture) ?? "-",
                 user.DisplayMissingEpisodes ? "m" : "-");
         }
 
@@ -443,35 +445,38 @@ namespace Jellyfin.Plugin.Plus
         {
             try
             {
-                var gate = GateFor(key);
-                if (!await gate.WaitAsync(0, ct).ConfigureAwait(false))
-                {
-                    return false;
-                }
-
+                // Queue on ComputeLock BEFORE taking the key's gate: a queued refresh must not pin the key, or a
+                // foreground request on a miss would wait behind the whole queue. The gate is only tried (0 ms) here
+                // and the foreground path never takes ComputeLock, so the two cannot deadlock.
+                await ComputeLock.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    var gen = Generation;
-                    if (Lookup(key, gen, out _, out var due) && !due)
+                    var gate = GateFor(key);
+                    if (!await gate.WaitAsync(0, ct).ConfigureAwait(false))
                     {
                         return false;
                     }
 
-                    await ComputeLock.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
+                        var gen = Generation;
+                        if (Lookup(key, gen, out _, out var due) && !due)
+                        {
+                            return false;
+                        }
+
                         var result = await compute(ct).ConfigureAwait(false);
                         Put(key, gen, result.Cats);
                         return true;
                     }
                     finally
                     {
-                        ComputeLock.Release();
+                        gate.Release();
                     }
                 }
                 finally
                 {
-                    gate.Release();
+                    ComputeLock.Release();
                 }
             }
             catch (Exception) when (!ct.IsCancellationRequested)

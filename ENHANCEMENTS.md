@@ -219,7 +219,7 @@ chosen). If the route is missing (an older server), the sheet falls back to a gl
 says so. The Studio picker is not scoped to the results: it lists studios from `/Studios` (40 at a
 time). The route also supports `kind=studios` and `kind=tags`; this client only asks for `people`.
 Finished answers are cached in server memory (`FacetResultCache`): key is the user, a digest of that
-user's access settings (folders, tag and rating limits) and every query parameter (sorted, credentials
+user's access settings (folders, blocked media folders, tag, rating and rating sub-score limits) and every query parameter (sorted, credentials
 removed); invalidated by any item add/update/remove or user-data save; 5 minute TTL; LRU of 200 entries.
 A hit reports `facets-cache` in `Server-Timing`.
 
@@ -375,7 +375,7 @@ of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
 
 **Smart tag categories** (`src/SmartTagCategories.cs` pure algorithm, `src/SmartTagsController.cs` route +
 loader + cache, `web/src/controller/smart-tags.js` fetch, `web/src/model/smart-tags.js` adapter).
-`GET /JellyfinPlus/Tags/Categories[?parentId=]` derives filter categories from the tag vocabulary of the
+`GET /JellyfinPlus/Tags/Categories[?parentId=][&userId=]` (`userId`: administrators only, cross-user) derives filter categories from the tag vocabulary of the
 items the requesting user can see, and answers `[{id, label, kind: prefix|exclusive|popular, prefix?,
 primary, coverage, tags: [{name, label, count}]}]`. Deterministic: the same vocabulary gives the same
 answer and ids (FNV-1a, never `GetHashCode`), whatever the row order.
@@ -403,21 +403,23 @@ answer and ids (FNV-1a, never `GetHashCode`), whatever the row order.
   "Group A", "Group B".. in coverage order (renamable per viewer through the quick-tags editor). The
   facet with the largest coverage is `primary: true` (the card pill, section 5).
 - **Popular.** The 30 largest remaining pool tags, last. Order: everything else by coverage, then id; at
-  most 8 categories, 30 chips each.
+  most 7 structured categories (prefix families and exclusive facets, by coverage) plus Popular, so 8 in all,
+  30 chips each.
 - **Access (invariant 13).** The items are `ILibraryManager.GetItemIds(new InternalItemsQuery(user))`
   (videos, movies, series, episodes, music videos; recursive; BlockedTags, AllowedTags, parental rating,
   unrated blocks and folder access applied by stock), scoped to the library's physical folders
   (`TopParentIds`) or under a folder (`AncestorIds`); a parent the user cannot see is a 404. Only map rows
   of those ids are counted, so no category, chip or count comes from an item the user cannot see.
-- **Cache.** Per user + access digest (folders, BlockedTags, AllowedTags, unrated, rating, missing
-  episodes) + parent, at most 300 entries. An entry is *due* for a refresh when a library item event happened
+- **Cache.** Per user + access digest (folders, blocked media folders, BlockedTags, AllowedTags, unrated, rating, rating
+  sub-score, missing episodes) + parent, at most 300 entries. An entry is *due* for a refresh when a library item event happened
   and it is older than 10 minutes, or when it is within 5 minutes of 30; a due entry is still served
   (stale-while-revalidate) while a background refresh runs, and only an entry past 60 minutes is a miss, so
   the route blocks on a computation only for a key that was never computed. A result computed while the
   library changed is stamped with the generation read before computing. One computation per key at a time.
 - **Precompute** (`src/SmartTagPrecompute.cs`, hosted service). 60 s after start, then every minute, it
   computes the missing or due entries for every enabled user: the no-parent scope and each library that user
-  can see. Each is computed as that user through the route's own `SmartTagsCore.ComputeAsync`
+  can see; the plan is capped at the cache size (300), no-parent scopes first, and logs once when truncated.
+  Each is computed as that user through the route's own `SmartTagsCore.ComputeAsync`
   (`InternalItemsQuery(user)`) and stored under the route's key, so the route hits the cache and no entry is
   ever shared across access digests. Computations run one at a time (a lock shared with stale-hit
   refreshes), 2 s apart, at most 40 per cycle, and a cycle is skipped, and an unfinished one stops, while

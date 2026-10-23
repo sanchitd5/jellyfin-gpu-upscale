@@ -400,10 +400,12 @@ namespace Jellyfin.Plugin.Plus
                 ";",
                 user.HasPermission(PermissionKind.EnableAllFolders) ? "all" : "sel",
                 Join<Guid>(PreferenceKind.EnabledFolders),
+                Join<Guid>(PreferenceKind.BlockedMediaFolders),
                 Join<string>(PreferenceKind.BlockedTags),
                 Join<string>(PreferenceKind.AllowedTags),
                 Join<UnratedItem>(PreferenceKind.BlockUnratedItems),
                 user.MaxParentalRatingScore?.ToString(CultureInfo.InvariantCulture) ?? "-",
+                user.MaxParentalRatingSubScore?.ToString(CultureInfo.InvariantCulture) ?? "-",
                 user.DisplayMissingEpisodes ? "m" : "-");
         }
 
