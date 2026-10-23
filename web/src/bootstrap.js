@@ -1,4 +1,5 @@
 import './lib/storage-migrate.js';
+import { installMobileTheme } from './view/mobile-theme.js';
 import { state } from './model/state.js';
 import { log } from './lib/log.js';
 import './model/prefs-store.js';
@@ -60,6 +61,8 @@ function feature(name, install) {
 (function install() {
     log('bootstrap install: start');
     try {
+        // First: the --jp-* tokens and tier classes must exist before any other module's CSS reads them.
+        feature('mobile theme', installMobileTheme);
         // Before hookWebpack: it arms noteLazyLoader(), which the module wrapper calls as chunks evaluate.
         feature('image preload', installImagePreload);
         feature('theme fallback', installThemeFallback);

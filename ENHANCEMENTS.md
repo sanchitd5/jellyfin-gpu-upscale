@@ -59,6 +59,7 @@ setting, a control in the page, or "remove the plugin or script".
 | Image look-ahead | Client | Card images are requested before they scroll into view and are not reloaded when you scroll back | On; `localStorage jellyfinPlus.imagePreload = off` (not on TV) |
 | Mobile card actions | Client | Always-visible favourite, more and play buttons on phone cards | On, no switch |
 | Card badges | Client | Resolution, runtime and the first two tags on video cards, looked up lazily for the cards on screen | On; `localStorage jellyfinPlus.cardBadges = off` (not on TV) |
+| Jellyfin Plus theme | Client | `--jp-*` tokens (blue accent `#5ccfff` dark / `#0369a1` light), `jp-phone`/`jp-tablet`/`jp-desktop` width-tier classes on `<html>`, 44 px tap targets on touch tiers, loading skeletons, reduced motion zeroing `--jp-dur*`, pinch-zoom re-enabled (viewport meta rewritten) | On; `localStorage jellyfinPlus.mobileTheme = off` (sets `jp-theme-off`); never on TV |
 | Select all N results | Client | "Select all N results" in the selection menu, for Add tags / Remove tags across pages (administrators) | On for administrators; offered only when the list can be identified |
 | Select mode entry | Client | A "Select" button on the library toolbar and a `jellyfinplus:select` window event (for the More sheet) arm a one-tap state; the tapped card starts stock multi-select. The selection bar moves to the bottom as a sheet header; the bulk tag dialog is a bottom sheet kept above the keyboard (`visualViewport`) | On; if the stock path does not start, a toast says "Press and hold a card" (`controller/select-mode.js`) |
 | Phone tap targets | Client | Selection-bar buttons and the bulk tag dialog's chips and buttons at least 40 px | On, no switch (phone layout) |
@@ -1217,6 +1218,7 @@ keys once.
 | `jellyfinPlus.searchPageSize` | JSON: chosen page size for Videos and all-types | `model/search-paging.js` |
 | `jellyfinPlus.searchPaging` | `paged` or `infinite`; empty means the layout decides (infinite on phone) | `model/search-paging.js` |
 | `jellyfinPlus.cardBadges` | `off` switches the card badges off (read at load; never written by the script) | `controller/card-data.js`, `view/card-badges.js` |
+| `jellyfinPlus.mobileTheme` | `off` returns every visual change to stock and sets `html.jp-theme-off`; `light` forces the light scheme (read at load; never written by the script) | `view/mobile-theme.js` |
 | `jellyfinPlus.imagePreload` | `off` switches the image look-ahead off (read at load; never written by the script) | `controller/image-preload.js` |
 | `jellyfinPlus.libFilterNames` | JSON map of studio and person ids to names, up to 400, for the library filter chips | `controller/library-filters.js` |
 | `jellyfinPlusPlaybackRate` | The saved playback speed, a number from 0.25 to 4; absent means 1x | `controller/player-speed.js` |

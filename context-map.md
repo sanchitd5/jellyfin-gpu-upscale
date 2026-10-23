@@ -115,6 +115,8 @@ esbuild) support natively.
 | `view/sheet.js` | `openSheet({title, content, footer, onClose, tiers, opener, flush})`, `closeSheet(reason)`, `sheetIsOpen()`, `sheetTier()`, `isBottomSheet(tiers)` (the shared modal: bottom sheet on phones, centred dialog otherwise; sets `html.jp-sheet-open`) | `lib/log.js`, `lib/dom.js` (`el`) |
 | `view/search-filter-sheet.js` | `installSearchFilterBar()` (the "Sort & filter" button, badge, active-filter chips and bottom sheet on `#searchPage`; the sheet shell is `view/sheet.js`) | `lib/log.js`, `lib/dom.js` (`el`), `view/sheet.js`, `controller/library-filters.js` (`normalize`, `WINDOW_SIZE`, `searchEntities`), `controller/search-filters.js`, `model/search-filters.js` |
 | `view/image-zoom.js` | `fullSizeUrl()`, `installImageZoom()` | `lib/log.js`, `lib/dom.js` (`el`) |
+| `view/mobile-theme.js` | `installMobileTheme()` | `lib/log.js`, `model/theme-tokens.js` |
+| `model/theme-tokens.js` | `tierOf()`, `TIERS`, `contrast()`, `DARK`, `LIGHT`, `themeCss()`, `zoomableViewport()` (pure; `theme-tokens.test.mjs`) | none |
 | `view/library-filter-panel.js` | `installLibraryFilterPanel()` | `lib/log.js`, `lib/dom.js` (`el`), `controller/library-filters.js` |
 | `view/card-actions.js` | `installCardActions()` | `lib/log.js`, `lib/dom.js` (`el`), `controller/card-data.js` (`apiClient`, `sameServer`, `cardInfo`, `onCardInfo`, `watchCard`) |
 | `view/card-badges.js` | `installCardBadges()` (resolution + runtime chips on the thumbnail, first two tags in the footer; data from `card-data.js`, never from list requests) | `lib/log.js`, `lib/dom.js` (`el`), `model/card-badges.js`, `controller/card-data.js` |
