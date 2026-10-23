@@ -92,7 +92,7 @@ function buildSection(g) {
     input.hidden = true;
     input.setAttribute('aria-label', 'Search ' + g.name);
     // The page binds keys for its own navigation; typing here must not trigger them.
-    input.addEventListener('keydown', function (e) { e.stopPropagation(); });
+    input.addEventListener('keydown', function (e) { if (e.key !== 'Escape') { e.stopPropagation(); } });
     input.addEventListener('input', function () {
         stateOf(g.name).q = input.value;
         resync();

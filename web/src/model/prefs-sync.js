@@ -15,15 +15,15 @@
  * pick the older one; for preferences that is an acceptable failure.
  */
 
-/* One entry per synced key. `drop` names a top-level JSON field that stays on the device. */
+/* One entry per synced key. `drop` names a top-level JSON field that stays on the device. `owned`: the local key is not per-user, so never push a value this user has no write record for. */
 export var SYNCED = [
     { local: 'jellyfinPlusPrefs', remote: 'jellyfinPlus.prefs', drop: 'pos' },
     { local: 'jellyfinPlus.searchPageSize', remote: 'jellyfinPlus.searchPageSize' },
     { local: 'jellyfinPlus.searchPaging', remote: 'jellyfinPlus.searchPaging' },
     // The viewer's quick tag-filter groups (model/quick-tags.js keeps the stored form well under MAX_VALUE_LENGTH).
-    { local: 'jellyfinPlus.quickTags', remote: 'jellyfinPlus.quickTags' },
-    // Which suggested groups the viewer hid or renamed (small: capped at 100 of each).
-    { local: 'jellyfinPlus.quickTagsAuto', remote: 'jellyfinPlus.quickTagsAuto' }
+    { local: 'jellyfinPlus.quickTags', remote: 'jellyfinPlus.quickTags', owned: true },
+    // Which suggested groups the viewer hid or renamed (small: capped at 50 of each).
+    { local: 'jellyfinPlus.quickTagsAuto', remote: 'jellyfinPlus.quickTagsAuto', owned: true }
 ];
 
 /* localStorage key holding {userId: {localKey: t}}, the time each local value last changed. */
@@ -76,14 +76,16 @@ export function decode(def, text) {
 
 /*
  * What to do about one key: 'adopt' (take the server's value), 'push' (send ours) or 'none'.
- *   - nothing on the server: send ours if we have one;
+ *   - nothing on the server: send ours if we have one; but for a key flagged `owned` (per-viewer content) only when this device
+ *     recorded this user writing it (tLocal > 0): an unrecorded value may be another account's on a shared
+ *     browser, so it is neither pushed nor removed;
  *   - equal values: nothing, whatever the times;
  *   - we have no value: adopt, unless we removed it after the server's copy was written (then send the removal);
  *   - otherwise the later write wins, and a tie goes to the server (every device then converges on it).
  * tLocal is 0 when this device has no record of when its value was written (a value from before sync existed).
  */
-export function decide(localCanon, tLocal, remote) {
-    if (!remote) { return localCanon == null ? 'none' : 'push'; }
+export function decide(localCanon, tLocal, remote, needsRecord) {
+    if (!remote) { return localCanon == null || (needsRecord && !tLocal) ? 'none' : 'push'; }
     if (localCanon === remote.v) { return 'none'; }
     // No local value: either never had one (adopt) or removed it after the server's copy was written (send the removal).
     if (localCanon == null) { return tLocal > remote.t ? 'push' : 'adopt'; }

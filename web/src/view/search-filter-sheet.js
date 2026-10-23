@@ -501,7 +501,20 @@ function openSheet(opener) {
         // The way into the editor. It replaces this sheet, so unapplied edits here are dropped.
         var editSec = el('div', 'jfp-pills');
         var edit = button('jfp-pill', groups.length ? '⚙ Edit quick filters' : '+ Add quick filters');
-        edit.addEventListener('click', function () { openQuickTagsEditor(opener, null, searchParentId()); });
+        edit.addEventListener('click', function () {
+            // Close this sheet first and open the editor only once its history entry has been popped
+            // (popstate, or a fallback timer): opening while it is open orphans that entry and swallows the next Back.
+            var done = false;
+            var act = function () {
+                if (done) { return; }
+                done = true;
+                window.removeEventListener('popstate', act);
+                openQuickTagsEditor(opener, null, searchParentId());
+            };
+            window.addEventListener('popstate', act);
+            setTimeout(act, 250);
+            sheet.close();
+        });
         editSec.style.marginTop = '0.7em';
         editSec.appendChild(edit);
         quickHost.appendChild(editSec);
@@ -761,14 +774,17 @@ function openSheet(opener) {
         var input = el('input', 'jfp-input');
         input.type = 'date';
         input.addEventListener('keydown', function (e) { e.stopPropagation(); });
-        input.addEventListener('change', function () {
+        function write() {
             draft[key] = input.value;
             refreshAll();
-        });
+        }
+        input.addEventListener('input', write);
+        input.addEventListener('change', write);
         label.appendChild(input);
         datePair.appendChild(label);
         refreshers.push(function () {
-            if (input.value !== draft[key]) { input.value = draft[key]; }
+            // Never rewrite a field while it is being typed in.
+            if (document.activeElement !== input && input.value !== draft[key]) { input.value = draft[key]; }
         });
     }
     dateField('From', 'addedFrom');

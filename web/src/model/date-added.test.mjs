@@ -20,15 +20,15 @@ var LIB = 'http://h/jf/Items?userId=u&ParentId=p&StartIndex=0&Limit=100&SortBy=S
 
 t('presets resolve to rolling UTC day bounds', function () {
     assert.deepEqual(rangeOf({ kind: 'preset', id: 'today' }, NOW), { from: '2026-10-23', to: '' });
-    assert.deepEqual(rangeOf({ kind: 'preset', id: '7d' }, NOW), { from: '2026-10-16', to: '' });
-    assert.deepEqual(rangeOf({ kind: 'preset', id: '30d' }, NOW), { from: '2026-09-23', to: '' });
-    assert.deepEqual(rangeOf({ kind: 'preset', id: '90d' }, NOW), { from: '2026-07-25', to: '' });
+    assert.deepEqual(rangeOf({ kind: 'preset', id: '7d' }, NOW), { from: '2026-10-17', to: '' });
+    assert.deepEqual(rangeOf({ kind: 'preset', id: '30d' }, NOW), { from: '2026-09-24', to: '' });
+    assert.deepEqual(rangeOf({ kind: 'preset', id: '90d' }, NOW), { from: '2026-07-26', to: '' });
     assert.deepEqual(rangeOf({ kind: 'preset', id: 'ytd' }, NOW), { from: '2026-01-01', to: '' });
 });
 
 t('a relative preset moves with the clock; a custom range does not', function () {
     var later = new Date(NOW.getTime() + 3 * 86400000);
-    assert.equal(rangeOf('7d', later).from, '2026-10-19');
+    assert.equal(rangeOf('7d', later).from, '2026-10-20');
     assert.deepEqual(rangeOf('c:2026-10-01~2026-10-15', later), { from: '2026-10-01', to: '2026-10-15' });
 });
 
@@ -96,7 +96,7 @@ t('library /Items request carries jpMinDateAdded for a preset; marker gone', fun
     var out = rewriteLibraryUrl(url, NOW);
     assert.ok(out.indexOf('\u0001') === -1 && out.indexOf('%01') === -1, out);
     var q = params(out);
-    assert.equal(q.jpMinDateAdded, '2026-10-16');
+    assert.equal(q.jpMinDateAdded, '2026-10-17');
     assert.equal(q.jpMaxDateAdded, undefined);
     assert.equal(q.tags, 'real');
 });

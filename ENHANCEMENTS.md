@@ -437,7 +437,7 @@ the shared sheet: Any time, Today, Last 7 days, Last 30 days, Last 90 days, This
 with native From and To date inputs (Apply; either side may be empty; a reversed pair is swapped).
 
 - Presets are stored by name and worked out when each request is built, so "Last 7 days" keeps rolling;
-  Custom stores fixed days. All days are UTC and inclusive, like the server. Active: the chip shows the
+  Custom stores fixed days. All days are UTC and inclusive, like the server ("Last N days" is today plus the N-1 before it). Active: the chip shows the
   choice ("Last 7 days", "1 Oct - 15 Oct", years added when not this year) with a ✕ that clears it.
 - Rides in `Filters.Tags` as one `d` marker (`model/library-filter-marks.js`; payload `7d` or
   `c:<from>~<to>`), so it persists per library tab, is cleared by the stock Reset, is counted by the stock

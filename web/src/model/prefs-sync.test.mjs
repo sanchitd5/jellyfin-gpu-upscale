@@ -76,8 +76,13 @@ t('decode: a prefs envelope must carry a JSON object; an oversized value is refu
     assert.equal(decode(SIZE, encode(new Array(20005).join('x'), 1)), null);
 });
 
-t('decide: no server value -> push ours, or nothing if we have none', function () {
+t('decide: no server value -> push ours if this user recorded writing it; nothing otherwise', function () {
+    assert.equal(decide('a', 5, null), 'push');
+    // For an owned key with no write time under this user: the value may be another account's on a shared browser. Keep it local, push nothing.
     assert.equal(decide('a', 0, null), 'push');
+    assert.equal(decide('a', 0, null, true), 'none');
+    assert.equal(decide('a', 5, null, true), 'push');
+    assert.equal(decide(null, 0, null, true), 'none');
     assert.equal(decide(null, 0, null), 'none');
 });
 
