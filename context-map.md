@@ -4,7 +4,7 @@ Full module list for the web client (`web/src/`), one line each: what it exports
 Written for the `real-es-modules` pass (2026-09-24, `.agent-briefs/real-es-modules.md`), which
 replaced the numbered `cat`-concatenated `web/src/NN-name.js` files with real ES modules bundled by
 esbuild into `web/jellyfin-plus.js`. See `CLAUDE.md`'s "Before you change the client" section for the
-narrative version and `WEB_PANEL_DESIGN.md` section 9/9.1 for how this came to be.
+narrative version and `docs/architecture/WEB_PANEL_DESIGN.md` section 9/9.1 for how this came to be.
 
 Layout is MVC-style: `lib/` (dependency-free leaves), `model/` (data + session logic), `controller/`
 (orchestration: network, probing, playback/webpack hooks), `view/` (DOM rendering), and one entry

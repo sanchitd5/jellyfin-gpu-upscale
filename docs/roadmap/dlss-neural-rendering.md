@@ -9,7 +9,7 @@ about a different, newer NGX feature entirely.
 ## What "DLSS5" actually is
 
 Not an NVIDIA SDK release. NVIDIA's own public DLSS SDK (`github.com/NVIDIA/DLSS`, the same repo
-[DLSS.md](../DLSS.md) already points at) is still at `v310.9.1` as of this investigation - no
+[DLSS.md](../filters/DLSS.md) already points at) is still at `v310.9.1` as of this investigation - no
 newer/transformer-model tag exists there.
 
 "DLSS5" is community jargon for **NGX feature ID 18**, internally `nvngx_dlssnr.dll`
@@ -37,7 +37,7 @@ newer/transformer-model tag exists there.
    matrices are Bjorn Ottosson's published constants, and the AP1/sRGB/PQ transforms are standard
    colour science - it's specifically the composition algorithm that's borrowed.) Not something to
    vendor here under this project's own "NOTHING FROM NVIDIA IS IN THIS REPOSITORY... always properly
-   licensed" rule ([DLSS.md](../DLSS.md), [RTXDLPP.md](../RTXDLPP.md)).
+   licensed" rule ([DLSS.md](../filters/DLSS.md), [RTXDLPP.md](../filters/RTXDLPP.md)).
 
 The forwarder itself (`nvngx.dll_dlssnr.dll`) was inspected read-only (export table only, nothing
 built against it): exports a small custom C API (`dlssnr_call_*`, `dlssnr_d3d11_*`, `dlssnr_vk_*`,

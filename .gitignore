@@ -30,7 +30,7 @@ livetestbox.md
 # filters (nvdlppx.dll, nvaivpx.dll, nvngx_dlssnr.dll, its forwarder, etc.) -
 # already covered by *.dll above, called out explicitly here since this is
 # the conventional local drop location. Never fetched or committed by us:
-# see DLSS.md / RTXDLPP.md / roadmap/dlss-neural-rendering.md.
+# see docs/filters/DLSS.md / docs/filters/RTXDLPP.md / docs/roadmap/dlss-neural-rendering.md.
 /dll/
 
 # local clones of third-party repos for reading source during investigation -

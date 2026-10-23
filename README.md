@@ -123,6 +123,8 @@ is a lie. A feature that cannot attach leaves stock Jellyfin in place rather tha
 
 **Before you rely on it** — [Limitations and risks](#limitations-and-risks) · [What was tried and rejected](#what-was-tried-and-rejected) · [Licences and credits](#licences-and-credits)
 
+**Everything else** — design documents, one document per custom filter, research, roadmap and task logs: [docs/](docs/README.md)
+
 ## Requirements
 
 For everything:
@@ -363,11 +365,11 @@ rather than being a fixed-2x network whose result gets shrunk back, which is the
 
 A fourth axis: the **Detail engine** control in the panel. It carries two families of CUDA-native
 levels (RTX DLPP and RTX VSR resampler, via PE-loader against driver DLLs — see
-[RTXDLPP.md](RTXDLPP.md) and [RTXVSR.md](RTXVSR.md)) and three ONNX super-resolution models
+[RTXDLPP.md](docs/filters/RTXDLPP.md) and [RTXVSR.md](docs/filters/RTXVSR.md)) and three ONNX super-resolution models
 running through ONNX Runtime with the CUDA execution provider, via
 [`ffmpeg/vf_ort.c`](ffmpeg/vf_ort.c). The ONNX models are **not** `sr` levels — `sr` shaders run
 inside libplacebo's scaling pass, while these are ONNX graphs applied CPU-side before `hwupload`, so
-they **compose with** an `sr` level rather than replacing one. See [NEURAL.md](NEURAL.md).
+they **compose with** an `sr` level rather than replacing one. See [NEURAL.md](docs/filters/NEURAL.md).
 
 | Level | Model / mechanism | fps (960x540 -> 1080p) | realtime |
 |---|---|---|---|
@@ -387,12 +389,12 @@ neural network directly via the PPE export table, with no NVIDIA SDK linked at c
 gain is content-dependent and modest — never negative across tested content, but not a dramatic
 jump. Four levels; level 4 applies the most processing. Requires the user to supply `nvdlppx.dll`
 (extractable from a GeForce/Studio driver package) and `WITH_RTXDLPP=1` at build time. See
-[RTXDLPP.md](RTXDLPP.md). Selecting any `dlpp` level turns off the Detail/Refine/Chroma/Debanding
+[RTXDLPP.md](docs/filters/RTXDLPP.md). Selecting any `dlpp` level turns off the Detail/Refine/Chroma/Debanding
 shader passes for that session — the CUDA-native chain owns the resize.
 
 **`vsr-rtcuda`** is a fast GPU resampler, not a neural network: it drives RTX VSR (`nvaivpx.dll`)
 in bypass mode, which skips the network entirely and delivers better-than-bicubic resampling
-at ~0.08 ms/frame. It requires `nvaivpx.dll` and `WITH_RTXVSR=1`. See [RTXVSR.md](RTXVSR.md).
+at ~0.08 ms/frame. It requires `nvaivpx.dll` and `WITH_RTXVSR=1`. See [RTXVSR.md](docs/filters/RTXVSR.md).
 
 Both CUDA-native levels are offered on the same `neural=` axis as the ONNX models, controlled by
 the Detail engine picker in the panel, and are offered only when the respective DLL is present.
@@ -418,7 +420,7 @@ resolution, which fails on the second frame size unless cleared.
 
 FSR2, DLSS Super Resolution and DLAA, running on synthesised inputs. **They are shipped degraded and
 labelled as such**, because recorded video cannot supply what they were designed for. See
-[FSR2.md](FSR2.md) and [DLSS.md](DLSS.md).
+[FSR2.md](docs/filters/FSR2.md) and [DLSS.md](docs/filters/DLSS.md).
 
 | Level | Cost index | fps (960x540 -> 1080p) |
 |---|---|---|
@@ -571,7 +573,7 @@ unavailable level is silently dropped from the chain rather than failing the ses
 ## Intel Open Image Denoise (`denoise=oidn`)
 
 A neural denoiser, running OIDN's RT filter on CUDA. It is **advanced-only, off by default, and needs
-a separately built ffmpeg** — see [OIDN.md](OIDN.md) for the filter source, the build patch and full
+a separately built ffmpeg** — see [OIDN.md](docs/filters/OIDN.md) for the filter source, the build patch and full
 reproduction instructions.
 
 There is no OIDN filter in upstream FFmpeg and no maintained wrapper anywhere, so
@@ -609,7 +611,7 @@ visually untouched. A high bitrate alone is not grain, so most libraries will se
 
 The counterpart to OIDN, and the only level here with a **temporal** model — it reprojects the
 previous denoised frame using motion vectors, which is what a purely spatial denoiser cannot do.
-See [OPTIX.md](OPTIX.md) for the filter source and build steps.
+See [OPTIX.md](docs/filters/OPTIX.md) for the filter source and build steps.
 
 `ffmpeg/vf_optix.c` is ours. It needs **no CUDA toolkit**: OptiX and the optical-flow engine are both
 `dlopen()`ed out of the display driver, and the filter writes no GPU kernels. Motion vectors come from

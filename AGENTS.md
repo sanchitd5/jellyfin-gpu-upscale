@@ -25,8 +25,8 @@ Both halves reach the same command line and compose, so a change in one can sile
 other. Two more filters, `dlpp_rtcuda` and `vsr_rtcuda`, exist in the same binary and build clean
 (commits `82bab39`, `fc999dd`) but are opt-in (`WITH_RTXDLPP`/`WITH_RTXVSR`, off by default), not
 part of the mandatory five, and NOT yet wired into the plugin's 5-place checklist below or into
-`UpscaleEngine` at all - see `TASK.md` ("Track B: DLPP", "Track C"), `RTXDLPP.md`, `RTXVSR.md`, and
-`INTEGRATION_DESIGN.md` for the proposed wiring.
+`UpscaleEngine` at all - see `docs/tasks/TASK.md` ("Track B: DLPP", "Track C"), `docs/filters/RTXDLPP.md`, `docs/filters/RTXVSR.md`, and
+`docs/architecture/INTEGRATION_DESIGN.md` for the proposed wiring.
 
 Layout:
 
@@ -49,13 +49,13 @@ shaders/                CAS shaders (ours, superseded) + the RCAS derivation scr
 scripts/                install, inject, activate/rollback, build-ffmpeg.sh
 ```
 
-Per-filter background lives in [OIDN.md](OIDN.md), [OPTIX.md](OPTIX.md), [NEURAL.md](NEURAL.md),
-[FSR2.md](FSR2.md) and [DLSS.md](DLSS.md); deployment in [INSTALL.md](INSTALL.md). The two opt-in
-filters live in [RTXDLPP.md](RTXDLPP.md) and [RTXVSR.md](RTXVSR.md); the retired Maxine VSR
-investigation (superseded by `vsr_rtcuda`) is in [VSR.md](VSR.md). Active investigation and
-findings for both tracks are in `TASK.md`; the retired AIVP neural-path investigation is in
-`TASK.L17.md`; the GPU-residency roadmap this filter/backend map feeds is in
-[roadmap/](roadmap/driver-features.md) and [roadmap/gpu-only-filters.md](roadmap/gpu-only-filters.md).
+Per-filter background lives in [OIDN.md](docs/filters/OIDN.md), [OPTIX.md](docs/filters/OPTIX.md), [NEURAL.md](docs/filters/NEURAL.md),
+[FSR2.md](docs/filters/FSR2.md) and [DLSS.md](docs/filters/DLSS.md); deployment in [INSTALL.md](INSTALL.md). The two opt-in
+filters live in [RTXDLPP.md](docs/filters/RTXDLPP.md) and [RTXVSR.md](docs/filters/RTXVSR.md); the retired Maxine VSR
+investigation (superseded by `vsr_rtcuda`) is in [VSR.md](docs/filters/VSR.md). Active investigation and
+findings for both tracks are in `docs/tasks/TASK.md`; the retired AIVP neural-path investigation is in
+`docs/tasks/TASK.L17.md`; the GPU-residency roadmap this filter/backend map feeds is in
+[roadmap/](docs/roadmap/driver-features.md) and [roadmap/gpu-only-filters.md](docs/roadmap/gpu-only-filters.md).
 
 ## Invariants - do not break these
 
@@ -124,7 +124,7 @@ binary at `<binary>.prev` on success as well as on failure, so there is somethin
 when a build lists all five filters and one of them then fails against the driver. The opt-in
 `dlpp_rtcuda`/`vsr_rtcuda` filters build into the same binary but are not in this mandatory set and
 not in the shim's own `PATCHED_FILTERS` tuple yet - compiled and present via `-filters` is not the
-same as reachable from a real session; see `TASK.md` for that gap. The shim also re-probes the
+same as reachable from a real session; see `docs/tasks/TASK.md` for that gap. The shim also re-probes the
 binary's filter list per invocation, keyed by its mtime/size, and fails open to stock ffmpeg on any
 problem - so a binary swap needs no Jellyfin restart to go live, which cuts the other way too: a
 broken rebuild degrades every session silently the moment it's staged, restart or not.
@@ -295,7 +295,7 @@ Objective metrics disagree with each other on this content, and each can be game
   back.
 - **Trusting a level name over a measurement.** The shader shipped as `CAS-low` was, at its gentlest
   setting, already a strong sharpener that overshot ground-truth detail by 15%.
-- **A doc-side instance of "renders, is stored, and is never sent."** `ARCHITECTURE.md` said
+- **A doc-side instance of "renders, is stored, and is never sent."** `docs/architecture/ARCHITECTURE.md` said
   optix's CUDA-hw-frame conversion (Tier 1) was "not yet scoped" for a full day after commit
   `61d6798` actually did it and verified it. The work was real and committed; the reference doc
   describing it was not updated in the same commit and nobody re-read it before relying on it. Same
@@ -303,7 +303,7 @@ Objective metrics disagree with each other on this content, and each can be game
   it would have read as three unrelated confusions to anyone diagnosing "why does ARCHITECTURE.md
   disagree with what the code does." Re-read the doc, not a summary of it, before trusting a
   "not yet done" claim in this repo.
-- **A design doc's assumed class name was wrong, and nobody had checked.** `LIVE_APPLY_DESIGN.md`
+- **A design doc's assumed class name was wrong, and nobody had checked.** `docs/architecture/LIVE_APPLY_DESIGN.md`
   named `TranscodingJobHelper` as the stock Jellyfin class owning transcode-job lifecycle, flagged
   as unconfirmed. It does not exist under that name on this Jellyfin build (12.1) - decompiling the
   actual assemblies this project builds against found the real one:

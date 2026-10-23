@@ -3018,7 +3018,7 @@ replacing it.
 ## Track D: DLSS Neural Rendering (feature 18), planned - not started (2026-09-24)
 
 **Status: planned, not started.** No code, no filter file, nothing committed. Cross-reference:
-[roadmap/dlss-neural-rendering.md](roadmap/dlss-neural-rendering.md) has the full investigation this
+[roadmap/dlss-neural-rendering.md](../roadmap/dlss-neural-rendering.md) has the full investigation this
 track is built from - two walls found (caller-identity check, RenoDX-derived composition shader),
 one proven-working precedent (`DLSS5VKLayer`'s snippet-direct + IAT-hook path, `0x1` success, logged
 `path=vulkan-snippet`), and the three untried causes behind `0xBAD0000B` on the core-routed path.

@@ -80,8 +80,8 @@ setting, a control in the page, or "remove the plugin or script".
 ## 1. GPU upscaling and enhancement
 
 Concise on purpose; the existing documents carry the detail: [README.md](README.md) (levels,
-configuration, measurements), [ARCHITECTURE.md](ARCHITECTURE.md), [NEURAL.md](NEURAL.md),
-[LIVE_APPLY_DESIGN.md](LIVE_APPLY_DESIGN.md), [WEB_PANEL_DESIGN.md](WEB_PANEL_DESIGN.md).
+configuration, measurements), [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md), [NEURAL.md](docs/filters/NEURAL.md),
+[LIVE_APPLY_DESIGN.md](docs/architecture/LIVE_APPLY_DESIGN.md), [WEB_PANEL_DESIGN.md](docs/architecture/WEB_PANEL_DESIGN.md).
 
 **What it does.** Jellyfin 12.1 has no plugin hook for the video filter graph, so five methods of
 `MediaBrowser.Controller.MediaEncoding.EncodingHelper` are patched to replace the `-vf` chain with a
@@ -1178,7 +1178,7 @@ Item pages and playback:
 - The person and studio "Videos" section borrows the Audio Books slot (section 4).
 - **Play all.** The rewrite covers the two requests built by jellyfin-web's playback manager (the 300
   cap, and the Home Videos photo-only queue). The new cap is 1000, not unlimited. The modern Videos
-  tab's own Play all and Shuffle buttons special-case that tab in jellyfin-web (per `QOL_IDEAS.md`,
+  tab's own Play all and Shuffle buttons special-case that tab in jellyfin-web (per `docs/roadmap/QOL_IDEAS.md`,
   item 38, an unverified note from a delegated reader); whether they route through the rewritten
   request was not checked here, so Play all on the Videos tab should be treated as unverified.
 - Clip Up Next only announces; it does not advance playback. Double-tap seek is touch only, 10 s.
