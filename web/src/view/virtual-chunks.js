@@ -19,6 +19,8 @@
  * while it is still laid out, so the pinned height is the real one.
  */
 
+import { columnsFromTemplate, columnsFromWidths } from '../model/row-fill.js';
+
 var MARGIN = '300% 0px';
 
 var records = new WeakMap();
@@ -126,13 +128,59 @@ export function estimateChunkHeight(container, n) {
     }
 
     var h = card.getBoundingClientRect().height;
-    if (!(h > 0)) {
+    var cols = measureColumns(container);
+    if (!(h > 0 && cols > 0)) {
         return 0;
     }
 
-    var cs = window.getComputedStyle(container);
-    var cols = (cs.gridTemplateColumns || '').split(' ').filter(Boolean).length || 1;
-    var gap = parseFloat(cs.rowGap) || 0;
+    var gap = parseFloat(window.getComputedStyle(container).rowGap) || 0;
     var rows = Math.ceil(n / cols);
     return rows * h + (rows - 1) * gap;
+}
+
+/*
+ * The live column count of `container`: the tracks of a grid, or for a wrapping flex row how many
+ * cards fit across. 0 when it cannot tell (nothing laid out yet).
+ */
+export function measureColumns(container) {
+    var cs = window.getComputedStyle(container);
+    if (cs.display === 'grid' || cs.display === 'inline-grid') {
+        return columnsFromTemplate(cs.gridTemplateColumns);
+    }
+
+    var card = container.querySelector('.card');
+    if (!card) {
+        return 0;
+    }
+
+    var ccs = window.getComputedStyle(card);
+    var w = card.getBoundingClientRect().width + (parseFloat(ccs.marginLeft) || 0) + (parseFloat(ccs.marginRight) || 0);
+    var inner = container.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+    return columnsFromWidths(inner, w);
+}
+
+/* Cards of the stock grid: every card that is not one of ours. */
+export function stockCount(container) {
+    var n = 0;
+    var cards = container.querySelectorAll('.card');
+    for (var i = 0; i < cards.length; i++) {
+        if (!cards[i].closest('.jpChunk, .jpHead')) {
+            n++;
+        }
+    }
+
+    return n;
+}
+
+/*
+ * Draws `items` straight into `container` (in a `display: contents` wrapper, so they sit in the
+ * stock grid's own rows) to close its last row. Never evicted: it is under one row of cards.
+ */
+export function addHead(container, items, render) {
+    var el = document.createElement('div');
+    el.className = 'jpHead';
+    el.style.display = 'contents';
+    container.appendChild(el);
+    render(el, items);
+    return el;
 }

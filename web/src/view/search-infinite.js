@@ -1,9 +1,10 @@
 import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
-import { CHUNK, chunkItems, cardOptionsFor, shapeForType, typeTitle } from '../model/search-paging.js';
+import { CHUNK, cardOptionsFor, shapeForType, typeTitle } from '../model/search-paging.js';
+import { chunkSize, headCount, planRows } from '../model/row-fill.js';
 import { infOf, fetchMore } from '../controller/search-pager.js';
 import { getCardBuilder } from '../controller/detail-related.js';
-import { addChunk, removeChunk, estimateChunkHeight } from './virtual-chunks.js';
+import { addChunk, addHead, removeChunk, measureColumns, stockCount, estimateChunkHeight } from './virtual-chunks.js';
 
 /*
  * INFINITE SCROLL, DOM SIDE. The data is controller/search-pager.js (`infOf(kind).items`, the
@@ -38,7 +39,45 @@ var rec = { video: null, all: null };
 var sentinelObserver = null;
 
 function freshRec(epoch) {
-    return { epoch: epoch, rendered: 0, chunks: [], created: [], createdBy: {}, sentinel: null, sig: '' };
+    // groups: per Type, the cards still owed to a row and the column count the rows were cut for.
+    return {
+        epoch: epoch, rendered: 0, chunks: [], heads: [], groups: {}, created: [], createdBy: {}, sentinel: null,
+        sig: '', host: null
+    };
+}
+
+var resizeObserver = null;
+var widths = new WeakMap();
+
+/* A width change is what can change a column count: re-sync the kinds whose sections are on screen. */
+function watchWidth(container) {
+    if (typeof ResizeObserver === 'undefined' || widths.has(container)) {
+        return;
+    }
+
+    if (!resizeObserver) {
+        resizeObserver = new ResizeObserver(function (entries) {
+            var changed = false;
+            entries.forEach(function (e) {
+                var w = e.contentRect.width;
+                if (widths.get(e.target) !== w) {
+                    widths.set(e.target, w);
+                    changed = true;
+                }
+            });
+            if (changed) {
+                Object.keys(rec).forEach(function (kind) {
+                    var r = rec[kind];
+                    if (r && r.host && r.host.last && r.host.last.isConnected) {
+                        syncInfinite(kind, r.host);
+                    }
+                });
+            }
+        });
+    }
+
+    widths.set(container, container.clientWidth);
+    resizeObserver.observe(container);
 }
 
 function getSentinelObserver() {
@@ -107,6 +146,11 @@ function discard(kind) {
     }
 
     r.chunks.forEach(removeChunk);
+    r.heads.forEach(function (h) {
+        if (h.parentNode) {
+            h.parentNode.removeChild(h);
+        }
+    });
     r.created.forEach(function (s) {
         if (s.parentNode) {
             s.parentNode.removeChild(s);
@@ -171,7 +215,31 @@ function drawGroup(kind, host, r, type, items, fromCache) {
         cb.buildCards(its, Object.assign(cardOptionsFor(kind, type, shape), { itemsContainer: chunkEl }));
     };
 
-    chunkItems(items, CHUNK).forEach(function (part) {
+    var g = r.groups[type] = r.groups[type] || { carry: [], need: -1, cols: 0, container: container };
+    var cols = measureColumns(container);
+    if (!cols) {
+        // Nothing laid out (a hidden page): keep the items back; the next sync places them.
+        g.carry = g.carry.concat(items);
+        return true;
+    }
+
+    g.cols = cols;
+    g.container = container;
+    watchWidth(container);
+    // Every boundary on a row edge: close the stock grid's last row first, then whole-row chunks, and
+    // keep under one row back for the next fetch (shown for good only when the list is over).
+    if (g.need < 0) {
+        g.need = headCount(stockCount(container), cols);
+    }
+
+    var plan = planRows(g.carry.concat(items), cols, chunkSize(cols, CHUNK), g.need, infOf(kind).done);
+    g.need = plan.headLeft;
+    g.carry = plan.carry;
+    if (plan.head.length) {
+        r.heads.push(addHead(container, plan.head, render));
+    }
+
+    plan.chunks.forEach(function (part) {
         var estimate = fromCache ? estimateChunkHeight(container, part.length) : 0;
         r.chunks.push(addChunk(container, part, render, estimate));
     });
@@ -185,6 +253,13 @@ function draw(kind, host, r, items, fromCache) {
 
     var order = [];
     var byType = {};
+    // A group holding carried items is revisited even with nothing new (the list may be over now).
+    Object.keys(r.groups).forEach(function (t) {
+        if (r.groups[t].carry.length) {
+            byType[t] = [];
+            order.push(t);
+        }
+    });
     items.forEach(function (it) {
         var t = it.Type || '';
         if (!byType[t]) {
@@ -199,6 +274,19 @@ function draw(kind, host, r, items, fromCache) {
         ok = drawGroup(kind, host, r, t, byType[t], fromCache) && ok;
     });
     return ok;
+}
+
+/* True when a group's container now has a different column count than its rows were cut for. */
+function columnsMoved(r) {
+    return Object.keys(r.groups).some(function (t) {
+        var g = r.groups[t];
+        if (!g.cols || !g.container || !g.container.isConnected) {
+            return false;
+        }
+
+        var now = measureColumns(g.container);
+        return now > 0 && now !== g.cols;
+    });
 }
 
 function statusText(kind, st) {
@@ -254,13 +342,18 @@ export function syncInfinite(kind, host) {
         var r = rec[kind];
         if (r && (r.epoch !== st.epoch || r.rendered > st.items.length
             || r.chunks.some(function (c) { return !c.el.isConnected; })
-            || r.created.some(function (s) { return !s.isConnected; }))) {
+            || r.created.some(function (s) { return !s.isConnected; })
+            || columnsMoved(r))) {
             discard(kind);
             r = null;
         }
 
         r = rec[kind] = r || freshRec(st.epoch);
-        if (r.rendered < st.items.length) {
+        r.host = host;
+        var owed = Object.keys(r.groups).some(function (t) {
+            return r.groups[t].carry.length && (st.done || !r.groups[t].cols);
+        });
+        if (r.rendered < st.items.length || owed) {
             var fromCache = r.rendered === 0 && st.loadedPages > 2;
             if (!draw(kind, host, r, st.items.slice(r.rendered), fromCache)) {
                 // No cardBuilder or no section to draw into: give these items up rather than

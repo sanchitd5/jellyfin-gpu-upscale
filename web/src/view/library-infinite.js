@@ -1,13 +1,13 @@
 import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
-import { chunkItems } from '../model/search-paging.js';
+import { chunkSize, headCount, planRows } from '../model/row-fill.js';
 import {
     CHUNK, pageOf, pageCount, pillText, currentPage, cardOptionsFor, supportsTab
 } from '../model/library-infinite.js';
 import { infState, onInfChanged, fetchNext, retryNext, infiniteEnabled } from '../controller/list-requests.js';
 import { findFilterContext } from '../controller/library-filters.js';
 import { getCardBuilder } from '../controller/detail-related.js';
-import { addChunk, removeChunk } from './virtual-chunks.js';
+import { addChunk, addHead, removeChunk, measureColumns, stockCount, estimateChunkHeight } from './virtual-chunks.js';
 
 /*
  * LIBRARY INFINITE SCROLL, DOM SIDE (the data and the requests are controller/list-requests.js, the
@@ -65,6 +65,42 @@ var CSS = [
 ].join('\n');
 
 var rec = null;
+var resizeObserver = null;
+var watched = null;
+var watchedWidth = 0;
+var onResize = null;
+
+function freshRec(epoch, container, ctx, settings) {
+    return {
+        epoch: epoch, container: container, ctx: ctx, settings: settings, sig: '', sentinel: null,
+        chunks: [], heads: [], rendered: 0, placed: 0, carry: [], need: -1, cols: 0, grid: false,
+        seen: settingsSig(settings)
+    };
+}
+
+/* A width change is what can change the column count: rescan then (a height change is our own chunks). */
+function watchWidth(container) {
+    if (typeof ResizeObserver === 'undefined' || watched === container) {
+        return;
+    }
+
+    if (!resizeObserver) {
+        resizeObserver = new ResizeObserver(function (entries) {
+            var w = entries[entries.length - 1].contentRect.width;
+            if (w !== watchedWidth) {
+                watchedWidth = w;
+                if (onResize) {
+                    onResize();
+                }
+            }
+        });
+    }
+
+    resizeObserver.disconnect();
+    watched = container;
+    watchedWidth = container.clientWidth;
+    resizeObserver.observe(container);
+}
 var denied = null;
 var sentinelObserver = null;
 var pill = null;
@@ -164,25 +200,6 @@ function shapeOf(container) {
     return '';
 }
 
-/* What n more cards measure here, for evicted placeholders drawn before layout; 0 when it cannot tell. */
-function estimate(container, n) {
-    var card = container.querySelector('.card');
-    if (!card) {
-        return 0;
-    }
-
-    var box = card.getBoundingClientRect();
-    if (!(box.width > 0 && box.height > 0)) {
-        return 0;
-    }
-
-    var cs = window.getComputedStyle(container);
-    var inner = container.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
-    var cols = Math.max(1, Math.round(inner / box.width));
-    var rows = Math.ceil(n / cols);
-    return rows * box.height + (rows - 1) * (parseFloat(cs.rowGap) || 0);
-}
-
 /* ---- the DOM we add ---- */
 
 function discard() {
@@ -192,6 +209,11 @@ function discard() {
     }
 
     r.chunks.forEach(removeChunk);
+    r.heads.forEach(function (h) {
+        if (h.parentNode) {
+            h.parentNode.removeChild(h);
+        }
+    });
     if (r.sentinel) {
         if (sentinelObserver) {
             sentinelObserver.unobserve(r.sentinel);
@@ -249,13 +271,26 @@ function drawSlice(r, st, items, fromCache) {
         cb.buildCards(its, Object.assign(opts(), { itemsContainer: chunkEl }));
     };
 
-    var offset = r.rendered;
-    chunkItems(items, CHUNK).forEach(function (part) {
-        var h = fromCache ? estimate(container, part.length) : 0;
+    // Every boundary on a row edge: close the stock grid's last row first, then whole-row chunks, and
+    // keep under one row back for the next page (shown for good only when the list is over).
+    if (r.need < 0) {
+        r.need = headCount(stockCount(container), r.cols);
+    }
+
+    var plan = planRows(r.carry.concat(items), r.cols, chunkSize(r.cols, CHUNK), r.need, st.done);
+    r.need = plan.headLeft;
+    r.carry = plan.carry;
+    if (plan.head.length) {
+        r.heads.push(addHead(container, plan.head, render));
+        r.placed += plan.head.length;
+    }
+
+    plan.chunks.forEach(function (part) {
+        var h = fromCache ? estimateChunkHeight(container, part.length) : 0;
         var c = addChunk(container, part, render, h);
-        c.page = Math.min(pageCount(st.total, st.limit), pageOf(st.start + st.limit + offset, st.limit));
+        c.page = Math.min(pageCount(st.total, st.limit), pageOf(st.start + st.limit + r.placed, st.limit));
         r.chunks.push(c);
-        offset += part.length;
+        r.placed += part.length;
     });
     return true;
 }
@@ -385,10 +420,7 @@ function scan() {
                 return;
             }
 
-            rec = {
-                epoch: st.epoch, container: container, ctx: ctx, settings: settings, sig: '', sentinel: null,
-                chunks: [], rendered: 0, grid: false, seen: settingsSig(settings)
-            };
+            rec = freshRec(st.epoch, container, ctx, settings);
         } else {
             // The viewer changed how cards look (title, year, image type): redraw from the cache.
             var now = settingsOf(rec.ctx);
@@ -400,10 +432,7 @@ function scan() {
 
                 var keep = { ctx: rec.ctx, epoch: rec.epoch, container: rec.container };
                 discard();
-                rec = {
-                    epoch: keep.epoch, container: keep.container, ctx: keep.ctx, settings: now, sig: '', sentinel: null,
-                    chunks: [], rendered: 0, grid: false, seen: settingsSig(now)
-                };
+                rec = freshRec(keep.epoch, keep.container, keep.ctx, now);
             }
         }
 
@@ -415,7 +444,21 @@ function scan() {
             });
         }
 
-        if (rec.rendered < st.items.length) {
+        // A different column count (resize, rotation) moves every row edge: redraw from the cache.
+        var cols = measureColumns(container);
+        if (cols && rec.cols && cols !== rec.cols) {
+            var again = { ctx: rec.ctx, epoch: rec.epoch, container: rec.container, settings: rec.settings };
+            discard();
+            rec = freshRec(again.epoch, again.container, again.ctx, again.settings);
+            rec.grid = grid;
+        }
+
+        if (cols) {
+            rec.cols = cols;
+        }
+
+        watchWidth(container);
+        if (rec.cols && (rec.rendered < st.items.length || (st.done && rec.carry.length))) {
             var fromCache = rec.rendered === 0 && st.items.length > CHUNK * 2;
             if (!drawSlice(rec, st, st.items.slice(rec.rendered), fromCache)) {
                 log('library infinite: could not draw ' + (st.items.length - rec.rendered) + ' items');
@@ -462,6 +505,7 @@ export function installLibraryInfinite() {
         new MutationObserver(schedule).observe(document.body || document.documentElement,
             { childList: true, subtree: true });
         onInfChanged(schedule);
+        onResize = schedule;
 
         var framed = false;
         document.addEventListener('scroll', function () {
