@@ -36,7 +36,7 @@ export var FAV_LIMIT = 100;
 var STOCK_FAV_LIMIT = '20';
 
 /* A repeated request for one list (same filters, same sort), whichever page, shares a shuffle. */
-var NOT_PART_OF_THE_LIST = { startindex: 1, limit: 1, jplistseed: 1, enabletotalrecordcount: 1 };
+var NOT_PART_OF_THE_LIST = { startindex: 1, limit: 1, jplistseed: 1, enabletotalrecordcount: 1, jpinf: 1 };
 
 function decode(s) {
     try {

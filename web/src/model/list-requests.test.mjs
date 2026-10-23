@@ -46,6 +46,12 @@ t('every page of one list shares a signature, other lists do not', function () {
     assert.notEqual(listSignature(a), listSignature(d));
 });
 
+t('an infinite-scroll follow-up (jpInf) shares its list signature', function () {
+    var a = parts(PAGE);
+    var b = parts(PAGE.replace('StartIndex=0', 'StartIndex=100') + '&jpInf=1');
+    assert.equal(listSignature(a), listSignature(b));
+});
+
 t('parameter order does not change the signature', function () {
     var a = parts(H + '/Items?SortBy=Random&startIndex=0&limit=10&tags=a&parentId=p');
     var b = parts(H + '/Items?parentId=p&tags=a&limit=10&startIndex=0&SortBy=Random');
