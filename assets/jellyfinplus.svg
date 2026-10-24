@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <!-- Plugin page / catalog image (16:9). Rendered with: rsvg-convert -w 1280 -h 720 assets/jellyfinplus.svg -o assets/jellyfinplus.png -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="46%" r="60%">
+      <stop offset="0" stop-color="#00a4dc" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="plus" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5ccfff"/>
+      <stop offset="1" stop-color="#aa5cc3"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="#000000"/>
+  <rect width="1280" height="720" fill="url(#glow)"/>
+  <g transform="translate(640 250)">
+    <rect x="-22" y="-80" width="44" height="160" rx="22" fill="url(#plus)"/>
+    <rect x="-80" y="-22" width="160" height="44" rx="22" fill="url(#plus)"/>
+  </g>
+  <text x="640" y="470" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="112" font-weight="700" letter-spacing="-2"><tspan fill="#f2f4f7">Jellyfin</tspan><tspan fill="#5ccfff">Plus</tspan></text>
+  <text x="640" y="548" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="38" fill="#aab2bf">GPU enhancement · search · library</text>
+</svg>

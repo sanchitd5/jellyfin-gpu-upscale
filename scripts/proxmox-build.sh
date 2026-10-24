@@ -255,6 +255,25 @@ if [ -f "$PLUGIN_DIR/meta.json" ]; then
     sed -i 's/"targetAbi": *"12\.1\.0\.0"/"targetAbi": "12.3.0.0"/' "$PLUGIN_DIR/meta.json"
 fi
 
+# The dashboard's plugin page: description, overview, owner and image come from meta.json
+# (assets/plugin-meta.json, merged key by key so status/version/guid stay Jellyfin's), image beside it.
+# Read at Jellyfin startup, so the restart below picks it up. Fails soft: a bad merge leaves meta.json as it was.
+if [ -f "$PLUGIN_DIR/meta.json" ] && [ -f assets/plugin-meta.json ]; then
+    install -m 0644 assets/jellyfinplus.png "$PLUGIN_DIR/jellyfinplus.png"
+    python3 - "$PLUGIN_DIR/meta.json" assets/plugin-meta.json <<'PYEOF' || echo "==> meta.json merge skipped"
+import json, os, sys
+path, extra = sys.argv[1], sys.argv[2]
+meta = json.load(open(path))
+add = {k: v for k, v in json.load(open(extra)).items() if not k.startswith('_')}
+new = dict(meta, **add)
+if new != meta:
+    tmp = path + '.tmp'
+    json.dump(new, open(tmp, 'w'), indent=2)
+    os.replace(tmp, path)
+    print('==> meta.json: plugin page fields updated')
+PYEOF
+fi
+
 # Keep the previous activate script: it is what a rollback runs, so installing a new one and
 # immediately executing it should not be the only copy on the box.
 [ -f /usr/local/sbin/jellyfin-plus-activate ] && \

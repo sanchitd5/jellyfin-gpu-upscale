@@ -1,0 +1,7 @@
+{
+  "_comment": "Merged into the plugin's meta.json by scripts/proxmox-build.sh (description must match Plugin.DescriptionText).",
+  "description": "GPU video enhancement and better search and browsing for Jellyfin. Enhancement: real-time upscaling, denoise, unblur, deblock, deband and more, applied inside the transcode and picked per playback from the player's Enhance panel; your files are never changed. Search and library: tag-aware search with wildcards and exclusions, a Sort & filter sheet, quick and smart tag filters, a date-added filter, infinite scroll, More Like This, bulk tag editing and card badges. Every part falls back to stock Jellyfin if it cannot apply. Options: the Settings button. Full list: ENHANCEMENTS.md at github.com/sanchitd5/jellyfin-plus.",
+  "overview": "GPU video enhancement plus search, filtering and library improvements.",
+  "owner": "Sanchit Dang",
+  "imagePath": "jellyfinplus.png"
+}

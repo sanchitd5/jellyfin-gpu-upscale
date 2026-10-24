@@ -77,20 +77,17 @@ namespace Jellyfin.Plugin.Plus
         /// section leads with its own label). Keep it accurate
         /// to what ships: ENHANCEMENTS.md is the full list.
         /// </summary>
-        public override string Description =>
-            "Jellyfin Plus extends Jellyfin with GPU video enhancement and a set of search, browsing and library improvements.\n\n"
-            + "Video enhancement: real-time super-resolution upscaling, denoising, deblurring, deblocking, debanding and other "
-            + "GPU filters, applied inside the transcode and chosen per session from the player's Enhance panel. Source files "
-            + "are never rewritten; direct play is untouched unless enhancement is requested.\n\n"
-            + "Search: matches tags as well as titles, supports * and ? wildcards (case-insensitive), per-tag exclusion, "
-            + "sorting, and a Sort & filter sheet (cast & crew, tags, studio, runtime, date added, resolution, played, "
-            + "favourites), with pages or infinite scroll in a grid on desktop and mobile.\n\n"
-            + "Library: tag exclude and match-all filters, a searchable tag list served from a filter cache that is rebuilt "
-            + "after library scans (manual rebuild: Scheduled Tasks > Jellyfin Plus: rebuild filter cache), More Like This "
-            + "and tag/person chips for videos, bulk tag editing, and tap-friendly card actions on mobile.\n\n"
-            + "Everything is applied at runtime through Harmony patches and an injected web-client script. Each part falls "
-            + "back to stock Jellyfin behaviour if it cannot be applied. The full list of changes is in ENHANCEMENTS.md in "
-            + "the project repository.";
+        public override string Description => DescriptionText;
+
+        /// <summary>The same text goes into meta.json (scripts/proxmox-build.sh), which is what the page reads.</summary>
+        internal const string DescriptionText =
+            "GPU video enhancement and better search and browsing for Jellyfin. "
+            + "Enhancement: real-time upscaling, denoise, unblur, deblock, deband and more, applied inside the transcode "
+            + "and picked per playback from the player's Enhance panel; your files are never changed. "
+            + "Search and library: tag-aware search with wildcards and exclusions, a Sort & filter sheet, quick and smart "
+            + "tag filters, a date-added filter, infinite scroll, More Like This, bulk tag editing and card badges. "
+            + "Every part falls back to stock Jellyfin if it cannot apply. Options: the Settings button. "
+            + "Full list: ENHANCEMENTS.md at github.com/sanchitd5/jellyfin-plus.";
 
         public IEnumerable<PluginPageInfo> GetPages()
         {
