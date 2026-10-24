@@ -345,7 +345,7 @@ of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
 - Where: the library Filter popover on the modern library tabs (not artists / studios or TV; see "In the
   filter menus" below), and a section per group in the search Sort & filter sheet (the picks are
   active-filter chips; each group counts once in the badge). Groups are not drawn above the grid: the row
-  there holds only the Date chip. The popover ends in "⚙ Edit quick filters" ("+ Add quick filters" with no
+  there shows only an active Date-added range. The popover ends in "⚙ Edit quick filters" ("+ Add quick filters" with no
   groups), and the More sheet has a "Quick filters" row, both opening the editor in the shared sheet.
 - Editor: add, rename, reorder and remove groups; tags are found with a search box answered by the
   server's tag window (`jpTagQuery`, 20 at a time), never the whole list; a prefix shows a live preview of
@@ -363,7 +363,7 @@ of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
   Picks are not pruned until every source has answered.
 - The one source registered (bootstrap, "smart tag groups") is the smart categories below, through
   `getSmartGroups(parentId)` in `controller/smart-tags.js`.
-- **In the filter menus.** The library Filter popover (a bottom sheet on phones) gets one collapsible
+- **In the filter menus.** The library Filter popover (a right side pane on desktop, a bottom sheet on phones) gets one collapsible
   `<details>` section per group (own groups, then suggested, "auto" tagged),
   header = name + count of picks (`web/src/view/library-filter-groups.js`, called from
   `view/library-filter-panel.js`; pure `model/quick-tags-menu.js`). Body = tag chips (`aria-pressed`, 44 px);
@@ -432,11 +432,14 @@ answer and ids (FNV-1a, never `GetHashCode`), whatever the row order.
 - **Client.** Fetched once per library scope (from the hash's `parentId`/`topParentId`), cached 10 minutes,
   a failure (old server, no route) cached as "none" for a minute. Fail soft: no route, no categories.
 
-**Date added filter on library tabs** (`web/src/view/date-sheet.js`, the "Date" chip in `view/quick-tags.js`,
-pure part `model/date-added.js`; server part is only `jpMinDateAdded` / `jpMaxDateAdded`, section 7.4 - no
-server change). A "Date" chip leads the quick-filter row (also shown with no groups configured). It opens
-the shared sheet: Any time, Today, Last 7 days, Last 30 days, Last 90 days, This year, and a Custom section
-with native From and To date inputs (Apply; either side may be empty; a reversed pair is swapped).
+**Date added filter on library tabs** (`web/src/view/library-filter-date.js` in the Filter popover,
+`view/date-sheet.js`, the active-range chip in `view/quick-tags.js`, pure part `model/date-added.js`; server
+part is only `jpMinDateAdded` / `jpMaxDateAdded`, section 7.4 - no server change). Picked in a "Date added"
+section of the library Filter popover, above the quick tag groups: Any time, Today, Last 7 days, Last 30
+days, Last 90 days, This year as toggle chips (tapping the picked one clears it), and a Custom section with
+native From and To date inputs (Apply; either side may be empty; a reversed pair is swapped). The section
+header shows the active range. While a range is set, a chip above the grid shows it (tap: the same choices in
+the shared sheet) with a ✕; with none, nothing is drawn above the grid.
 
 - Presets are stored by name and worked out when each request is built, so "Last 7 days" keeps rolling;
   Custom stores fixed days. All days are UTC and inclusive, like the server ("Last N days" is today plus the N-1 before it). Active: the chip shows the
@@ -616,7 +619,8 @@ resize. Under `.jpGrid` the title sits over the picture, chips top-left, heart +
 (play is dropped; a tap on the picture opens or plays). Image requests are unchanged (cardBuilder's
 own `getPostersPerRow`). Search's phone grid is `auto-fill` too. On phones the library filter popover
 is restyled as a bottom sheet (same stock MUI Popover, so state and request are stock's; Done presses
-the stock backdrop); `html.jp-sheet-open` is set while open. The card-actions heart now shows on every
+the stock backdrop); `html.jp-sheet-open` is set while open. On desktop and tablet (theme on, not TV) the
+same popover is a full-height pane sliding in from the right edge, with the same title and Done. The card-actions heart now shows on every
 non-TV tier (44 px) and on `.listItem` rows that have no stock heart, kept in step with stock's
 hearts through `data-isfavorite`.
 

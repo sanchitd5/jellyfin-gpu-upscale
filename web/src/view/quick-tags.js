@@ -11,7 +11,9 @@ import { encode as encodeDate, decode as decodeDate, labelOf } from '../model/da
  * DATE CHIP ABOVE A LIBRARY LIST, AND THE KEEPER OF QUICK TAG PICKS (the search page has its own section in
  * the Sort & filter sheet).
  *
- * The row, drawn just before the page's `.itemsContainer.vertical-wrap`, holds only the Date-added chip.
+ * The row, drawn just before the page's `.itemsContainer.vertical-wrap` only while a Date-added range is
+ * set, shows that range (tap: the date sheet) and a clear button. Date added is picked in the Filter popover
+ * (view/library-filter-date.js).
  * Quick tag groups are picked in the library Filter popover (view/library-filter-groups.js); picked chips of
  * a group are OR-ed, groups are AND-ed (model/quick-tags.js). This module still prunes stale picks.
  * The picks are stored the way every other extra library filter is: as marker entries in the tab's own
@@ -81,7 +83,8 @@ function removeRow() {
 }
 
 /*
- * The row holds the Date chip only. Quick tag groups live in the library Filter popover
+ * The row holds the active Date-added range only (drawn only while one is set; scan removes it
+ * otherwise). Date added and the quick tag groups are picked in the library Filter popover
  * (view/library-filter-groups.js), together with the entry that edits them.
  */
 function render(row, ctx, added) {
@@ -165,6 +168,13 @@ function scan() {
     if (live.length !== picks.length) {
         updateTagState(ctx, function (p) { p.any = pruneSelection(p.any, groups); });
         picks = live;
+    }
+
+    // Date added is picked in the Filter popover (view/library-filter-date.js); the row only shows an active
+    // range, with its clear button.
+    if (!added) {
+        removeRow();
+        return;
     }
 
     var row = document.querySelector('.' + ROW);

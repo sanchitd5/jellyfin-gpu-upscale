@@ -4,7 +4,7 @@ import { openSheet } from './sheet.js';
 import { PRESETS, normalize, validDay } from '../model/date-added.js';
 
 /*
- * THE DATE-ADDED SHEET for a library tab (opened by the Date chip, view/quick-tags.js).
+ * THE DATE-ADDED SHEET for a library tab (opened by the active-range chip, view/quick-tags.js).
  *
  * Presets apply on tap and close the sheet. The Custom section holds two native date inputs and an
  * Apply button; a custom range is stored as fixed days, a preset as its name (so it keeps rolling,

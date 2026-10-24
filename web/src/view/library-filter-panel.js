@@ -16,6 +16,7 @@ import {
     searchEntities
 } from '../controller/library-filters.js';
 import { syncGroupSections, GROUP_CSS } from './library-filter-groups.js';
+import { syncDateSection, DATE_CSS } from './library-filter-date.js';
 
 /*
  * ADDITIONS TO THE MODERN LIBRARY PAGE'S FILTER POPOVER (jellyfin-web 12.3,
@@ -49,6 +50,8 @@ var EXTRA_TABS = ['videos', 'folders', 'mixed', 'musicvideos'];
 
 /* A phone: the phone tier, or stock's mobile layout until the tier classes exist. Never TV or theme-off. */
 var PHONE_TIER = 'html:not(.jp-theme-off):not(.layout-tv):is(.jp-phone, .layout-mobile:not(.jp-tablet):not(.jp-desktop))';
+/* Everything else with the theme on (desktop, tablet): the exact complement of PHONE_TIER. */
+var SIDE_TIER = 'html:not(.jp-theme-off):not(.layout-tv):not(.jp-phone):is(:not(.layout-mobile), .jp-tablet, .jp-desktop)';
 
 var CSS = [
     '#' + TAGS_REGION_ID + ' label.MuiFormControlLabel-root { display: flex; width: 100%; margin-right: 0; }',
@@ -93,6 +96,21 @@ var CSS = [
         + ' transform: none !important; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;'
         + ' border-radius: var(--jp-radius-l, 16px) var(--jp-radius-l, 16px) 0 0 !important;'
         + ' padding-bottom: env(safe-area-inset-bottom, 0px); }',
+
+    /*
+     * DESKTOP / TABLET: the same popover, drawn as a pane sliding in from the right edge, full height. Same
+     * approach as the phone sheet: only the paper's frame is restyled. MUI's Grow transition animates
+     * `transform`, which loses to !important here; the slide uses the separate `translate` property.
+     */
+    SIDE_TIER + ' #' + POPOVER_ID + ' .MuiBackdrop-root { background: rgba(0,0,0,0.35) !important; opacity: 1 !important; }',
+    SIDE_TIER + ' #' + POPOVER_ID + ' .MuiPopover-paper {'
+        + ' position: fixed !important; top: 0 !important; bottom: 0 !important; right: 0 !important; left: auto !important;'
+        + ' width: min(420px, 92vw) !important; max-width: 92vw !important; height: 100% !important; max-height: 100% !important;'
+        + ' transform: none !important; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;'
+        + ' border-radius: 0 !important; animation: jpFsSlide 0.2s ease-out; }',
+    SIDE_TIER + ' #' + POPOVER_ID + ' .jpFsHead .jpFsHandle { display: none; }',
+    '@keyframes jpFsSlide { from { translate: 100% 0; } to { translate: 0 0; } }',
+    '@media (prefers-reduced-motion: reduce) { #' + POPOVER_ID + ' .MuiPopover-paper { animation: none !important; } }',
     '.jpFsHead { position: sticky; top: 0; z-index: 3; background: inherit; display: flex; align-items: center;'
         + ' flex-wrap: wrap; padding: 0 8px 0 16px; border-bottom: 1px solid rgba(128,128,128,0.3); }',
     '.jpFsHead .jpFsHandle { flex: 0 0 100%; height: 4px; width: 36px; margin: 8px auto 0; border-radius: 2px;'
@@ -101,7 +119,7 @@ var CSS = [
         + ' display: flex; align-items: center; }',
     '.jpFsHead button { min-width: var(--jp-tap, 44px); min-height: var(--jp-tap, 44px); background: none; border: 0;'
         + ' color: var(--jp-accent, inherit); font: inherit; font-weight: 600; cursor: pointer; }'
-].join('\n') + '\n' + GROUP_CSS;
+].join('\n') + '\n' + GROUP_CSS + '\n' + DATE_CSS;
 
 // html.jp-sheet-open is the shared sheet's flag (view/sheet.js); only take it down if this set it.
 var ownsSheetClass = false;
@@ -119,12 +137,24 @@ function isPhoneSheet() {
         && (c.contains('jp-phone') || (c.contains('layout-mobile') && !c.contains('jp-tablet') && !c.contains('jp-desktop')));
 }
 
-/* Handle, title and Done at the top of the paper. Done presses the stock backdrop: the stock close. */
+/* The desktop / tablet side pane (SIDE_TIER): theme on, not TV, not a phone. */
+function isSidePane() {
+    var c = document.documentElement.classList;
+    return !c.contains('layout-tv') && !c.contains('jp-theme-off') && !isPhoneSheet();
+}
+
+/*
+ * Title and Done at the top of the paper (plus a handle on the phone sheet). Done presses the stock
+ * backdrop: the stock close.
+ */
 function syncSheetHead(root) {
     var c = document.documentElement.classList;
-    if (!isPhoneSheet()) {
+    var phone = isPhoneSheet();
+    if (!phone) {
         releaseSheetClass();
-        return;
+        if (!isSidePane()) {
+            return;
+        }
     }
 
     var paper = root.querySelector('.MuiPopover-paper');
@@ -132,7 +162,7 @@ function syncSheetHead(root) {
         return;
     }
 
-    if (!c.contains('jp-sheet-open')) {
+    if (phone && !c.contains('jp-sheet-open')) {
         c.add('jp-sheet-open');
         ownsSheetClass = true;
     }
@@ -597,9 +627,10 @@ function sync() {
         syncExtras(root, ctx);
     }
 
-    // Quick tag groups as sections (same jpTagAnyOf picks as the chip row); tabs with their own endpoint ignore the parameter.
+    // Date added, then the quick tag groups, as sections; tabs with their own endpoint ignore both parameters.
     var paper = root.querySelector('.MuiPopover-paper');
     if (paper && !OTHER_ENDPOINT_TABS.includes(ctx.viewType)) {
+        syncDateSection(paper, ctx, currentContext, scheduleSync);
         syncGroupSections(paper, ctx, currentContext, scheduleSync);
     }
 }
