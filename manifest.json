@@ -1,0 +1,21 @@
+[
+  {
+    "guid": "6f2a9c31-4d7b-4e2a-9d15-8a1c0b7e3f44",
+    "name": "Jellyfin Plus",
+    "description": "GPU video enhancement and better search and browsing for Jellyfin. See ENHANCEMENTS.md at github.com/sanchitd5/jellyfin-plus.",
+    "overview": "GPU video enhancement plus search, filtering and library improvements.",
+    "owner": "Sanchit Dang",
+    "category": "General",
+    "imageUrl": "https://raw.githubusercontent.com/sanchitd5/jellyfin-plus/main/assets/jellyfinplus.png",
+    "versions": [
+      {
+        "version": "1.0.0.0",
+        "changelog": "Installed with scripts/proxmox-build.sh, not from this repository (see docs/roadmap/plugin-conversion.md).",
+        "targetAbi": "12.3.0.0",
+        "sourceUrl": "https://github.com/sanchitd5/jellyfin-plus",
+        "checksum": "00000000000000000000000000000000",
+        "timestamp": "2026-10-24T00:00:00Z"
+      }
+    ]
+  }
+]
