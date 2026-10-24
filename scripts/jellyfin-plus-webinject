@@ -68,18 +68,34 @@ mv "$WEB/jellyfin-plus.js.tmp.$$" "$WEB/jellyfin-plus.js"
 # loads, whichever order the deferred bundles run in. Every earlier tag of ours, including the
 # pre-rename gpu-upscale.js one, is removed first and the current one inserted once, so this is
 # idempotent and converges whatever state index.html was left in. It only touches the file (and
-# takes the .jellyfin-plus-bak copy) when the result differs.
+# takes the .jellyfin-plus-bak copy) when the result differs. The same pass writes the splash-logo
+# <style id="jellyfinPlusSplash"> into <head> (see the comment inside), also replaced, never doubled.
 result=$(python3 - "$WEB/index.html" "$TAG" <<'PYEOF'
 import os
 import re
 import shutil
 import sys
 
+from urllib.parse import quote
+
 path, tag = sys.argv[1], sys.argv[2]
 html = open(path).read()
 new = re.sub(r'<script[^>]*src="(?:gpu-upscale|jellyfin-plus)\.js[^"]*"[^>]*></script>', '', html)
+new = re.sub(r'<style id="jellyfinPlusSplash">.*?</style>', '', new, flags=re.S)
 i = new.index('<script defer="defer"')
 new = new[:i] + tag + new[i:]
+
+# The loading splash (.splashLogo) is markup in index.html itself and is painted before any deferred
+# script runs, so the client's brand CSS (web/src/view/brand.js) arrives too late for it. This static
+# rule replaces the Jellyfin icon / banner with the JellyfinPlus wordmark from the first paint. The
+# off switch (html.jp-theme-off, set later by the script) still restores stock once the app is up.
+svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 100"><text x="0" y="74"'
+       ' font-family="Segoe UI,Roboto,Helvetica,Arial,sans-serif" font-size="78" font-weight="600"'
+       ' letter-spacing="-1"><tspan fill="#f2f4f7">Jellyfin</tspan><tspan fill="#00a4dc">Plus</tspan></text></svg>')
+style = ('<style id="jellyfinPlusSplash">html:not(.jp-theme-off) .splashLogo{background-image:url("data:image/svg+xml,'
+         + quote(svg, safe='') + '")!important;width:min(60vw,520px)!important}</style>')
+j = new.index('</head>')
+new = new[:j] + style + new[j:]
 if new == html:
     print('unchanged')
 else:
