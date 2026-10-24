@@ -52,6 +52,10 @@ var EXTRA_TABS = ['videos', 'folders', 'mixed', 'musicvideos'];
 var PHONE_TIER = 'html:not(.jp-theme-off):not(.layout-tv):is(.jp-phone, .layout-mobile:not(.jp-tablet):not(.jp-desktop))';
 /* Everything else with the theme on (desktop, tablet): the exact complement of PHONE_TIER. */
 var SIDE_TIER = 'html:not(.jp-theme-off):not(.layout-tv):not(.jp-phone):is(:not(.layout-mobile), .jp-tablet, .jp-desktop)';
+/* The popover in either form (side pane or phone sheet): theme on, not TV. */
+var PANE = 'html:not(.jp-theme-off):not(.layout-tv) #filter-popover';
+var LINE = 'var(--jp-border, rgba(128,128,128,0.22))';
+var ROW_H = '52px';
 
 var CSS = [
     '#' + TAGS_REGION_ID + ' label.MuiFormControlLabel-root { display: flex; width: 100%; margin-right: 0; }',
@@ -109,6 +113,46 @@ var CSS = [
         + ' transform: none !important; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;'
         + ' border-radius: 0 !important; animation: jpFsSlide 0.2s ease-out; }',
     SIDE_TIER + ' #' + POPOVER_ID + ' .jpFsHead .jpFsHandle { display: none; }',
+    SIDE_TIER + ' #' + POPOVER_ID + ' .MuiPopover-paper { box-shadow: -12px 0 32px rgba(0,0,0,0.45) !important;'
+        + ' border-left: 1px solid var(--jp-border, rgba(128,128,128,0.25)); }',
+    SIDE_TIER + ' #' + POPOVER_ID + ' .jpFsHead { min-height: 60px; padding: 0 12px 0 20px; }',
+
+    /*
+     * ONE ROW STYLE for the pane / sheet: the stock MUI accordions (Filters, Genres, Tags, Years), the extras
+     * (Resolution, Studios, People), Date added and the quick tag groups all get the same height, inset, flat
+     * background and a right-hand chevron that turns down when open. Small headings split the three blocks.
+     */
+    PANE + ' .MuiAccordion-root { background: transparent !important; box-shadow: none !important; margin: 0 !important;'
+        + ' border-radius: 0 !important; border-bottom: 1px solid ' + LINE + '; }',
+    PANE + ' .MuiAccordion-root::before { display: none !important; }',
+    PANE + ' .MuiAccordionSummary-root { min-height: ' + ROW_H + ' !important; padding: 0 16px 0 20px !important; }',
+    PANE + ' .MuiAccordionSummary-content { margin: 0 !important; }',
+    PANE + ' .MuiAccordionSummary-expandIconWrapper { opacity: 0.6; }',
+    PANE + ' .MuiAccordionDetails-root { padding: 4px 20px 14px !important; }',
+    PANE + ' .gu-extras, ' + PANE + ' .jpFg, ' + PANE + ' .jpFdSec { border-top: 0 !important; }',
+    PANE + ' .gu-sec, ' + PANE + ' .jpFgSec { border-bottom: 1px solid ' + LINE + '; }',
+    PANE + ' .gu-sec > summary, ' + PANE + ' .jpFgSec > summary { display: flex; align-items: center; gap: 0.5em;'
+        + ' min-height: ' + ROW_H + '; padding: 0 22px 0 20px; list-style: none; cursor: pointer; font-size: 1rem; }',
+    PANE + ' .gu-sec > summary::-webkit-details-marker, ' + PANE + ' .jpFgSec > summary::-webkit-details-marker { display: none; }',
+    PANE + ' .gu-sec > summary::after, ' + PANE + ' .jpFgSec > summary::after { content: ""; flex: none; margin-left: auto;'
+        + ' width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;'
+        + ' opacity: 0.6; transform: rotate(-45deg); transition: transform 0.15s ease; }',
+    PANE + ' .gu-sec[open] > summary::after, ' + PANE + ' .jpFgSec[open] > summary::after { transform: rotate(45deg); }',
+    PANE + ' .gu-sec > summary:hover, ' + PANE + ' .jpFgSec > summary:hover, ' + PANE + ' .MuiAccordionSummary-root:hover'
+        + ' { background: rgba(128,128,128,0.08); }',
+    PANE + ' .gu-sec > summary:focus-visible, ' + PANE + ' .jpFgSec > summary:focus-visible'
+        + ' { outline: 2px solid var(--jp-accent, #00a4dc); outline-offset: -2px; }',
+    PANE + ' .gu-sec > div, ' + PANE + ' .jpFgBody { padding: 4px 20px 16px !important; }',
+    // Block headings.
+    PANE + ' .gu-extras::before, ' + PANE + ' .jpFg::before { display: block;'
+        + ' padding: 20px 20px 6px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;'
+        + ' opacity: 0.55; border-bottom: 1px solid ' + LINE + '; }',
+    PANE + ' .gu-extras::before { content: "More filters"; }',
+    PANE + ' .jpFg::before { content: "Quick filters"; }',
+    // The edit entry: a full-width ghost button under the groups.
+    PANE + ' .jpFgEdit { display: flex; align-items: center; justify-content: center; width: calc(100% - 40px);'
+        + ' margin: 16px 20px 24px; border-radius: 10px; opacity: 0.85; }',
+    PANE + ' .jpFgEdit:hover { opacity: 1; background: rgba(128,128,128,0.08); }',
     '@keyframes jpFsSlide { from { translate: 100% 0; } to { translate: 0 0; } }',
     '@media (prefers-reduced-motion: reduce) { #' + POPOVER_ID + ' .MuiPopover-paper { animation: none !important; } }',
     '.jpFsHead { position: sticky; top: 0; z-index: 3; background: inherit; display: flex; align-items: center;'

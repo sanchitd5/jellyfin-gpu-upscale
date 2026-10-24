@@ -620,7 +620,10 @@ resize. Under `.jpGrid` the title sits over the picture, chips top-left, heart +
 own `getPostersPerRow`). Search's phone grid is `auto-fill` too. On phones the library filter popover
 is restyled as a bottom sheet (same stock MUI Popover, so state and request are stock's; Done presses
 the stock backdrop); `html.jp-sheet-open` is set while open. On desktop and tablet (theme on, not TV) the
-same popover is a full-height pane sliding in from the right edge, with the same title and Done. The card-actions heart now shows on every
+same popover is a full-height pane sliding in from the right edge, with the same title and Done. In both forms
+every row (stock accordions, Resolution / Studios / People, Date added, quick tag groups) shares one style:
+52 px, same inset, flat background, right chevron that turns down when open; "More filters" and "Quick
+filters" headings split the blocks, and the edit entry is a full-width button. The card-actions heart now shows on every
 non-TV tier (44 px) and on `.listItem` rows that have no stock heart, kept in step with stock's
 hearts through `data-isfavorite`.
 
