@@ -6,6 +6,11 @@
 </head>
 <body>
 <div id="JellyfinPlusConfigPage" data-role="page" class="page type-interior pluginConfigurationPage">
+    <style>
+        #JellyfinPlusConfigPage .jpTable { width: 100%; text-align: left; }
+        #JellyfinPlusConfigPage .jpScroll { overflow-x: auto; }
+        #JellyfinPlusConfigPage .jpHidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    </style>
     <div data-role="content">
         <div class="content-primary">
             <form id="JellyfinPlusConfigForm">
@@ -575,7 +580,13 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="Encoder" data-config="Encoder" data-kind="text" data-default="hevc_nvenc" label="Encoder" />
+                    <input is="emby-input" type="text" list="jpEncoders" id="Encoder" data-config="Encoder" data-kind="text" data-default="hevc_nvenc" label="Encoder" />
+                    <datalist id="jpEncoders">
+                        <option value="auto"></option>
+                        <option value="hevc_nvenc"></option>
+                        <option value="h264_nvenc"></option>
+                        <option value="av1_nvenc"></option>
+                    </datalist>
                     <div class="fieldDescription">
                         The video encoder used for any transcode this plugin enhances, including one it forces
                         out of a stream copy. Leave blank or set to <code>auto</code> to follow whatever codec
@@ -694,10 +705,12 @@
             <div class="verticalSection">
                 <h2 class="sectionTitle">Recent sessions</h2>
                 <p class="fieldDescription">What the server actually did, as it went into the ffmpeg command.</p>
-                <table style="width:100%;text-align:left">
+                <div class="jpScroll">
+                <table class="jpTable">
                     <thead><tr><th>Time (UTC)</th><th>Source</th><th>Source size</th><th>Output size</th><th>Ratio</th><th>Viewer</th><th>Result</th><th>Encoder</th><th>Why that encoder</th><th>Super-resolution</th><th>Status</th></tr></thead>
                     <tbody id="activityBody"></tbody>
                 </table>
+                </div>
             </div>
 
             <div class="verticalSection" id="jpMaintenance">
@@ -726,9 +739,9 @@
                         <option value="name">Name</option>
                     </select>
                 </div>
-                <div style="overflow-x:auto">
-                    <table style="width:100%;text-align:left">
-                        <thead><tr><th></th><th>Tag</th><th>Items</th><th></th></tr></thead>
+                <div class="jpScroll">
+                    <table class="jpTable">
+                        <thead><tr><th><span class="jpHidden">Select</span></th><th>Tag</th><th>Items</th><th><span class="jpHidden">Notes</span></th></tr></thead>
                         <tbody id="jpTagBody"></tbody>
                     </table>
                 </div>
@@ -1120,6 +1133,7 @@
                     var c0 = document.createElement('td');
                     var cb = document.createElement('input');
                     cb.type = 'checkbox';
+                    cb.setAttribute('aria-label', 'Select tag ' + r.name);
                     cb.checked = selected.has(r.name);
                     cb.addEventListener('change', function () {
                         if (cb.checked) { selected.set(r.name, r.count); } else { selected.delete(r.name); }
