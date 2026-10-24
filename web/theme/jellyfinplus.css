@@ -22,20 +22,20 @@
 
 /* Dark scheme (default). */
 :where(html[data-theme="jellyfinplus"]) {
-    --jp-bg: #0f1115;
-    --jp-surface: #181b21;
-    --jp-surface-2: #22262e;
+    --jp-bg: #000000;
+    --jp-surface: #000000;
+    --jp-surface-2: #0d0d0d;
     --jp-text: #f2f4f7;
     --jp-text-muted: #aab2bf;
-    --jp-border: #3a404b;
+    --jp-border: #262626;
     --jp-accent: #5ccfff;
     --jp-accent-hover: #8ddcff;
     --jp-on-accent: #0b1a22;
     --jp-error: #ff6b6b;
-    --jp-scrim: rgba(0, 0, 0, .6);
+    --jp-scrim: rgba(0, 0, 0, .75);
     /* r g b triplets, for the alpha-blended palette entries below. */
     --jp-accent-rgb: 92 207 255;
-    --jp-surface-rgb: 24 27 33;
+    --jp-surface-rgb: 0 0 0;
 
     --jp-radius-s: 6px;
     --jp-radius-m: 10px;

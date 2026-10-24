@@ -16,12 +16,21 @@ export function tierOf(width) {
     return w < 600 ? 'jp-phone' : w < 1024 ? 'jp-tablet' : 'jp-desktop';
 }
 
+// OLED black: every surface is true black (pixels off); structure comes from hairline borders, not
+// grey fills. surface2 is the one near-black, for inputs and skeletons that need to read as a field.
 export var DARK = {
-    bg: '#0f1115', surface: '#181b21', surface2: '#22262e', text: '#f2f4f7', muted: '#aab2bf',
+    bg: '#000000', surface: '#000000', surface2: '#0d0d0d', text: '#f2f4f7', muted: '#aab2bf',
     accent: '#5ccfff', accentHover: '#8fdfff', onAccent: '#0b1a22', error: '#ff6b6b',
-    border: '#3a404b', scrim: 'rgba(0,0,0,.6)',
-    elev1: '0 0 0 1px rgba(255,255,255,.04)', elev2: '0 -8px 24px rgba(0,0,0,.35)'
+    border: '#262626', scrim: 'rgba(0,0,0,.75)',
+    elev1: '0 0 0 1px #262626', elev2: '0 -8px 24px rgba(0,0,0,.6)'
 };
+
+// Stock surfaces jellyfin-web's dark theme paints with a fixed grey instead of a palette variable, plus
+// MUI's dark-mode elevation overlay (a white gradient over every elevated Paper). Dark scheme only.
+var OLED_FILL = ['.collapseContent', '.formDialogHeader:not(.formDialogHeader-clear)',
+    '.formDialogFooter:not(.formDialogFooter-clear)', '.paperList', '.visualCardBox',
+    '.cardBox:not(.visualCardBox) .cardPadder', '.detailRibbon', '.toast', '.fab', '.raised',
+    'a[data-role=button]', '.emby-select-withcolor', '.programCell-active'].join(',');
 export var LIGHT = {
     bg: '#f7f8fa', surface: '#ffffff', surface2: '#eef0f4', text: '#15181e', muted: '#4b5563',
     accent: '#0369a1', accentHover: '#075985', onAccent: '#ffffff', error: '#b42318',
@@ -92,6 +101,19 @@ export function themeCss() {
     // Follow the OS only while the stock theme is not pinned (no data-theme yet / none set).
     out.push('@media (prefers-color-scheme:light){' + BASE + ':not([data-theme]){color-scheme:light;' + scheme(LIGHT) + '}}');
     out.push(light + '{color-scheme:light;' + scheme(LIGHT) + '}');
+    // OLED: hard-coded stock greys and MUI's elevation tint, dark scheme only (not light, not OS-light).
+    var dark = BASE + ':not([data-theme="light"]):not(.jp-scheme-light)';
+    var notOsLight = '@media not (prefers-color-scheme:light){';
+    var darkRules = dark + ' :is(' + OLED_FILL + '){background-color:var(--jp-surface)!important;background-image:none!important}'
+        + dark + ' :is(.raised,.fab,a[data-role=button],.toast){box-shadow:inset 0 0 0 1px var(--jp-border)!important}'
+        + dark + ' .MuiPaper-root{background-image:none!important;--Paper-overlay:none}'
+        + dark + ' .MuiPaper-root.MuiPopover-paper,' + dark + ' .MuiPaper-root.MuiMenu-paper,' + dark + ' .MuiDialog-paper'
+        + '{box-shadow:0 0 0 1px var(--jp-border),0 12px 32px rgba(0,0,0,.8)!important}'
+        + dark + '{--jf-palette-Button-inheritContainedBg:var(--jp-surface-2);--jf-palette-SnackbarContent-bg:var(--jp-surface-2)'
+        + ';--jf-palette-FilledInput-bg:var(--jp-surface-2);scrollbar-color:#333 #000}';
+    // [data-theme] pinned dark applies always; with no theme pinned, only while the OS is not light.
+    out.push(darkRules.split(dark).join(dark + '[data-theme]'));
+    out.push(notOsLight + darkRules.split(dark).join(dark + ':not([data-theme])') + '}');
     out.push(BASE + '.jp-tablet{' + type(16, 14, 24) + '}');
     out.push(BASE + '.jp-desktop{' + type(15, 13, 22) + '}');
     // Stock shrinks the root to 93% then 90% on mobile (about 13.4px body); put it back at 100%.

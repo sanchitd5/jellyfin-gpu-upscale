@@ -193,15 +193,15 @@ scratchpad):
 
 | Token | Dark | Light | Role |
 |---|---|---|---|
-| `--jp-bg` | `#0f1115` | `#f7f8fa` | page |
-| `--jp-surface` | `#181b21` | `#ffffff` | cards, sheets, app bar |
-| `--jp-surface-2` | `#22262e` | `#eef0f4` | chips, inputs, pressed |
+| `--jp-bg` | `#000000` (OLED) | `#f7f8fa` | page |
+| `--jp-surface` | `#000000` | `#ffffff` | cards, sheets, app bar |
+| `--jp-surface-2` | `#0d0d0d` | `#eef0f4` | chips, inputs, pressed |
 | `--jp-text` | `#f2f4f7` | `#15181e` | primary text |
 | `--jp-text-2` | `#aab2bf` | `#4b5563` | secondary text |
 | `--jp-accent` | `#5ccfff` | `#0369a1` | links, active tab, focus ring, primary button |
 | `--jp-on-accent` | `#0b1a22` | `#ffffff` | text on accent |
 | `--jp-error` | `#ff6b6b` | `#b42318` | destructive |
-| `--jp-stroke` | `#3a404b` | `#c9ced6` | hairlines (decorative, not a contrast carrier) |
+| `--jp-stroke` | `#262626` | `#c9ced6` | hairlines (decorative, not a contrast carrier) |
 | `--jp-scrim` | `rgba(0,0,0,.6)` | `rgba(0,0,0,.35)` | sheet backdrop, poster title gradient |
 
 Contrast (WCAG AA needs 4.5:1 text, 3:1 large text and UI):

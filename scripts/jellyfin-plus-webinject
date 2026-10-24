@@ -137,7 +137,7 @@ cfg = os.path.join(web, 'config.json')
 tdir = os.path.join(web, 'themes', 'jellyfinplus')
 css = os.path.join(tdir, 'theme.css')
 ID = 'jellyfinplus'
-ENTRY = {'name': 'Jellyfin Plus', 'id': ID, 'color': '#0f1115'}
+ENTRY = {'name': 'Jellyfin Plus', 'id': ID, 'color': '#000000'}
 
 
 def atomic(path, text):
