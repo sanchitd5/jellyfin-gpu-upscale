@@ -856,9 +856,8 @@ namespace Jellyfin.Plugin.Plus.Patcher
                 // Asked for BY THE SESSION, not inherited from the dashboard: the *Applied flags
                 // are true for a dashboard default too, so reading them here would replace the
                 // stream copy on every eligible playback as soon as an admin set one.
+                // (Deblur and denoise included: a session naming either is caught by SessionNamedEnhancement.)
                 bool explicitlyAsked = plan.ClientOptIn
-                    || plan.DeblurApplied
-                    || plan.DenoiseApplied
                     || UpscaleEngine.SessionNamedEnhancement(state);
                 if (!explicitlyAsked && !cfg.ForceTranscode)
                 {
