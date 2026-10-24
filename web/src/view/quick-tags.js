@@ -124,19 +124,17 @@ function render(row, ctx, groups, picks, added) {
         row.appendChild(box);
     });
 
-    // The edit entry: a small chip at the end of the last line, or alone ("Add quick filters") with no groups.
-    var lines = row.querySelectorAll('.jpQtChips');
-    var host = lines.length ? lines[lines.length - 1] : null;
-    if (!host) {
-        var solo = el('div', 'jpQtGroup');
-        host = el('div', 'jpQtChips');
-        solo.appendChild(host);
-        row.appendChild(solo);
-        lines = [host];
-    }
+    // The Date chip gets its own line ahead of every group: inside a group's line it read as one of
+    // that group's tags. With a range set it carries its label and a clear button.
+    var dateBox = el('div', 'jpQtGroup');
+    var first = el('div', 'jpQtChips');
+    dateBox.appendChild(first);
+    row.insertBefore(dateBox, row.firstChild);
 
-    // The Date chip leads the first line; with a range set it carries its label and a clear button.
-    var first = lines[0];
+    // The edit entry: a small chip at the end of the last group's line, or beside the Date chip with no groups.
+    var lines = row.querySelectorAll('.jpQtChips');
+    var host = lines[lines.length - 1];
+
     var date = el('button', 'jpQtChip jpQtDate', added ? labelOf(added) : 'Date');
     date.type = 'button';
     date.setAttribute('data-date', '1');
@@ -151,7 +149,7 @@ function render(row, ctx, groups, picks, added) {
         lead.push(clear);
     }
 
-    lead.reverse().forEach(function (n) { first.insertBefore(n, first.firstChild); });
+    lead.forEach(function (n) { first.appendChild(n); });
 
     var edit = el('button', 'jpQtChip jpQtEdit', groups.length ? '⚙' : '+ Add quick filters');
     edit.type = 'button';
