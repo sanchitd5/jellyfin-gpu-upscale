@@ -6,37 +6,86 @@
 </head>
 <body>
 <div id="JellyfinPlusConfigPage" data-role="page" class="page type-interior pluginConfigurationPage">
+    <style>
+        #JellyfinPlusConfigPage .jpTable { width: 100%; text-align: left; }
+        #JellyfinPlusConfigPage .jpScroll { overflow-x: auto; }
+        #JellyfinPlusConfigPage .jpHidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    </style>
     <div data-role="content">
         <div class="content-primary">
             <form id="JellyfinPlusConfigForm">
                 <div class="verticalSection">
                     <h2 class="sectionTitle">Jellyfin Plus</h2>
                     <p id="patchStatus" class="fieldDescription"></p>
+                    <p class="fieldDescription">Changes apply to the next playback started after Save. No restart is needed; sessions already playing keep the settings they started with.</p>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="Enabled" />
-                        <span>Enable upscaling</span>
+                        <input is="emby-checkbox" type="checkbox" id="Enabled" data-config="Enabled" data-kind="bool" data-default="true" />
+                        <span>Enable video enhancement</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        When off, Jellyfin transcodes exactly as it normally would.
-                    </div>
+                    Master switch for everything on this page. Off: Jellyfin transcodes exactly as stock, and the player's Enhance menu does nothing. Search, library and tag features are not affected.
+                </div>
+                </div>
+
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">When it upscales</h2>
+                    <p class="fieldDescription">These five values only mean something together; the example below works them out from what is in the boxes.</p>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="TargetHeight" label="Target height (px)" min="240" max="4320" required />
-                    <div class="fieldDescription">Height to upscale to. Width follows the source aspect ratio.</div>
+                    <input is="emby-input" type="number" id="TargetHeight" data-config="TargetHeight" data-kind="int" data-default="1080" label="Target height (px)" min="240" max="4320" required />
+                    <div class="fieldDescription">
+                    Height to upscale to when a session does not ask for a size of its own. Width follows the source aspect ratio. Ignored while "Only upscale when the viewer asks for it" is on. Default 1080.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxTargetHeight" label="Maximum target height (px)" min="240" max="4320" required />
-                    <div class="fieldDescription">Hard ceiling applied to the target height.</div>
+                    <input is="emby-input" type="number" id="MaxTargetHeight" data-config="MaxTargetHeight" data-kind="int" data-default="2160" label="Maximum target height (px)" min="240" max="4320" required />
+                    <div class="fieldDescription">
+                    Ceiling on any upscale, including sizes the player asks for. Default 2160.
+                </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MinScaleFactor" data-config="MinScaleFactor" data-kind="float" data-default="1.15" label="Minimum scale factor" step="0.01" min="1" max="8" required />
+                    <div class="fieldDescription">
+                    No upscale unless the target is more than this multiple of the source height; a 1080p source to 1080p is 1.0 and is skipped. Also decides which items the direct-play option below applies to. Default 1.15.
+                </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="SrMinScaleFactor" data-config="SrMinScaleFactor" data-kind="float" data-default="1.6" label="Super-resolution minimum ratio" step="0.01" min="0" max="8" required />
+                    <div class="fieldDescription">
+                    Run the super-resolution network only at or above this ratio; below it the upscale still happens, with plain scaling plus unblur and refinement. The fixed-2x networks measured no better than plain scaling under about 1.5x while costing about 15% of throughput, so the default keeps 720p to 1080p on plain scaling. RAVU-Zoom scales to any ratio and is never skipped. 0 disables the check. Default 1.60.
+                </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MaxSourceHeight" data-config="MaxSourceHeight" data-kind="int" data-default="1440" label="Maximum source height (px)" min="240" max="4320" required />
+                    <div class="fieldDescription">
+                    Sources taller than this are not upscaled (other enhancements still apply). Portrait video is judged on its long edge instead. Default 1440.
+                </div>
+                </div>
+
+                <div class="fieldDescription">
+                    <b>What those five values do together</b>, worked out from what is in the boxes above
+                    right now rather than from an example typed here, so it cannot drift from what is saved.
+                    This is the dashboard default path: a session that asks for a size of its own is judged
+                    against that size instead of the target height.
+                    <div id="thresholdExample"></div>
+                </div>
+
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">Default levels and what players may use</h2>
+                    <p class="fieldDescription">Each level applies when a session does not pick its own. The Allow box beside it is a master switch for that enhancement.</p>
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="SrLevel" label="Super-resolution shader (default)">
-                        <option value="off">Off - plain ewa_lanczos scaling</option>
+                    <select is="emby-select" id="SrLevel" data-config="SrLevel" data-kind="select" data-default="fsrcnnx" label="Super-resolution shader (default)">
+                        <option value="off">Off - plain scaling (kernel below)</option>
                         <option value="fsrcnnx">FSRCNNX - FSRCNNX x2 8-0-4-1</option>
                         <option value="fsrcnnx-heavy">FSRCNNX heavy - FSRCNNX x2 16-0-4-1</option>
                         <option value="anime4k-s">Anime4K S - Upscale CNN x2 (small)</option>
@@ -49,347 +98,71 @@
                         <option value="cunny-ds">CuNNy 4x16 DS - the denoise-and-sharpen training (GPU moderate, ~14%)</option>
                     </select>
                     <div class="fieldDescription">
-                        Used when a playback session does not pick its own shader. Two different networks
-                        are offered, not one quality ladder, because which looks right on this content is a
-                        matter for the eye rather than for a benchmark.
-                        <br /><br />
-                        <b>FSRCNNX is the default.</b> It is the light 8-weight, deliberately: the old
-                        "Standard" tier was the 16-weight, which measured LOWER real-footage detail at roughly
-                        double the GPU cost, so the 8-weight now carries the plain family name. FSRCNNX was the
-                        only shader that raised detail above plain scaling at BOTH scale ratios tested
-                        (2.0x and 1.5x) on real captures.
-                        <br /><br />
-                        <b>Anime4K M</b> is a generic 2x CNN upscaler despite the name - the anime-specific work
-                        in that family is in the Restore shaders, which are not installed. At its native 2.0x
-                        (540p to 1080p) it ties FSRCNNX. But at 1.5x (720p to 1080p) it fell BELOW plain
-                        ewa_lanczos on every source tested: off its native ratio it softens rather than
-                        reconstructs, and on skin it flattens texture into a slightly waxy look. Its weights
-                        were trained on animation. Try it and judge by eye - if your sources are mostly 540p it
-                        is a genuine alternative.
-                        <br /><br />
-                        A sixth level, <code>fsrcnnx-max</code> (FSRCNN_x2_r1_32-0-2), is installed and accepted
-                        by the API but not offered here: it measured no better again at about twice the cost.
-                        The old names <code>light</code>, <code>standard</code> and <code>max</code> are still
-                        accepted by the API and map onto this ladder.
-                    </div>
+                    Used when the player does not pick its own. FSRCNNX (default) measured best on real footage at both 1.5x and 2x. Anime4K is a generic 2x network that only matches FSRCNNX at exactly 2x (540p to 1080p); try it by eye. The percentage after an option is its GPU cost relative to plain scaling, from one 480p to 1080p run; the same applies to the refinement and chroma options below. A level whose shader file is missing from the shader directory (see File locations) falls back to plain scaling without an error; the Recent sessions table shows what ran.
+                </div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DeblurAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="DeblurAllowed" data-config="DeblurAllowed" data-gates="DeblurLevel" data-kind="bool" data-default="true" />
                         <span>Allow unblur (sharpening)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn unblur on.
-                    </div>
+                    Master switch. Off: no session can turn it on, and the default below is ignored.
+                </div>
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="DeblurLevel" label="Unblur level (default)">
+                    <select is="emby-select" id="DeblurLevel" data-config="DeblurLevel" data-kind="select" data-default="off" label="Unblur level (default)">
                         <option value="off">Off</option>
-                        <option value="low">Gentle - RCAS 2.0</option>
-                        <option value="medium">Medium - RCAS 1.7</option>
-                        <option value="high">Strong - RCAS 1.4</option>
-                        <option value="nvsharpen">NVSharpen - NVIDIA Image Sharpening 0.25</option>
-                        <option value="nvsharpen-strong">NVSharpen strong - NVIDIA Image Sharpening 0.65</option>
+                        <option value="low">Gentle</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">Strong</option>
+                        <option value="nvsharpen">NVSharpen</option>
+                        <option value="nvsharpen-strong">NVSharpen strong</option>
                     </select>
                     <div class="fieldDescription">
-                        AMD FidelityFX <strong>RCAS</strong> (FSR v1.0.2, MIT, mpv port by agyild), derived at
-                        install time by <code>shaders/install-shaders.sh</code>. It replaced this project's own
-                        CAS build after measurement: against a clean ground truth RCAS was better on PSNR and
-                        SSIM at both 1.5x and 2.0x, and its detail energy landed 5-10% above ground truth where
-                        CAS landed 19-63% above - that gap is over-sharpening. It is also nearly free, because
-                        RCAS hooks LUMA and so runs at the network's output size rather than at full output
-                        size.
-                        <br /><br />
-                        <strong>The RCAS sharpness scale is inverted and clamped.</strong> 0.0 is maximum
-                        sharpening, larger is gentler, and anything above 2.0 is silently identical to 2.0.
-                        Gentle/Medium/Strong here read in the normal direction; the inversion is handled in
-                        the level mapping, not by you.
-                        <br /><br />
-                        The old CAS shaders stay installed and are still reachable by the API under
-                        <code>cas-low</code>, <code>cas-medium</code> and <code>cas-high</code> as a rollback
-                        path. They are not offered here or in the player menu.
-                    </div>
+                    Sharpening applied after scaling. Gentle to Strong is AMD RCAS, nearly free. NVSharpen gives slightly more visible detail at about 10x the GPU cost of RCAS; a matter of taste. Dropped automatically when the NVScaler shader is selected, which sharpens on its own. Default Off.
+                </div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DenoiseAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="DenoiseAllowed" data-config="DenoiseAllowed" data-gates="DenoiseLevel" data-kind="bool" data-default="true" />
                         <span>Allow denoise</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn denoise on.
-                    </div>
+                    Master switch. Off: no session can turn it on, and the default below is ignored.
+                </div>
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="RefineLevel" label="Post-scale refinement (default)">
-                        <option value="off">Off</option>
-                        <option value="ssimsuperres">SSimSuperRes - adjust the scaled image to match the source when downscaled (GPU light, ~9%)</option>
-                    </select>
-                    <div class="fieldDescription">
-                        <strong>Not a super-resolution level, and not an alternative to one.</strong> It hooks
-                        <code>POSTKERNEL</code>, so it runs after the scale and corrects an enlargement rather
-                        than producing one - it composes with FSRCNNX, Anime4K, CuNNy, ravu-zoom or plain
-                        scaling, and with the unblur pass, instead of replacing any of them.
-                        <br /><br />
-                        It is also ratio-agnostic, so unlike the fixed-2x networks it is <em>not</em> skipped
-                        below the super-resolution threshold below. That is the reason it is here: between the
-                        minimum scale factor and the super-resolution threshold - 720p to 1080p is 1.5x and
-                        lands in that band - the chain is otherwise plain scaling plus a sharpener.
-                        <br /><br />
-                        Off by default. It costs a pass, and nothing on this server has measured whether it is
-                        worth one on this material - which is also why it is not in the player's quality ladder.
-                        <br /><br />
-                        The percentages beside these options are one throughput reading each, 854x480 to
-                        1920x1080, 300 frames, on a shared GPU whose encoder capped that run at about 120 fps.
-                        They order the options by cost and say nothing at all about how they look.
-                    </div>
-                </div>
-
-                <div class="checkboxContainer checkboxContainer-withDescription">
-                    <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="RefineAllowed" />
-                        <span>Allow post-scale refinement</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn the refinement pass on.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="ChromaLevel" label="Chroma upscaling (default)">
-                        <option value="off">Off</option>
-                        <option value="krigbilateral">KrigBilateral - reconstruct 4:2:0 chroma guided by the luma plane (GPU moderate, ~24%)</option>
-                    </select>
-                    <div class="fieldDescription">
-                        A different axis from everything else on this page: every other shader here works on the
-                        luma plane only. These sources are 4:2:0, so the colour planes are stored at a quarter of
-                        the luma resolution and are enlarged by the plain kernel while luma gets a trained
-                        network. This hooks <code>CHROMA</code> and reconstructs them using luma as a guide, so
-                        it composes with any super-resolution level rather than replacing one.
-                        <br /><br />
-                        Off by default, and unmeasured here, for the same reason as the refinement pass above.
-                    </div>
-                </div>
-
-                <div class="checkboxContainer checkboxContainer-withDescription">
-                    <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="ChromaAllowed" />
-                        <span>Allow chroma upscaling</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn the chroma pass on.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="NeuralLevel" label="Neural super-resolution (default)">
-                        <option value="off">Off</option>
-                        <option value="realesr-anime-x2">Real-ESRGAN compact x2, anime video (advanced, far below realtime)</option>
-                        <option value="realesr-anime-x4">Real-ESRGAN compact x4, anime video v3 (advanced, far below realtime)</option>
-                        <option value="realesr-general-x4">Real-ESRGAN compact x4, general v3 (advanced, slowest thing here)</option>
-                    </select>
-                    <div class="fieldDescription">
-                        <strong>A separate thing from Detail below, and it is slow.</strong> These are ONNX
-                        networks run by ONNX Runtime on the CUDA execution provider, through the
-                        <code>ort</code> filter in the same separate patched ffmpeg build that carries
-                        <code>oidn</code> and <code>optix</code>. They run on the CPU side of the chain
-                        <em>before</em> the libplacebo scaling pass, so they compose with whatever Detail
-                        shader is selected rather than replacing it.
-                    </div>
-                    <div class="fieldDescription">
-                        <strong>Measured once each, in the deployed chain, on a 960x540 source at a 1080p
-                        target</strong> - purely so the cost hint is not invented. With this off: 265 fps.
-                        <code>realesr-anime-x2</code> 24 fps (0.56x realtime),
-                        <code>realesr-anime-x4</code> 15 fps (0.34x),
-                        <code>realesr-general-x4</code> 10 fps (0.24x).
-                        <strong>None of them sustains realtime for a single session</strong>, and all three
-                        are about an order of magnitude more expensive than the shader that ships as the
-                        default. They are offered because they are worth having available, not because they
-                        are better; no quality stage will ever select one.
-                    </div>
-                    <div class="fieldDescription">
-                        The weights are <strong>not shipped with this plugin</strong>. A level whose
-                        <code>.onnx</code> file is not present in
-                        <code>/usr/lib/jellyfin-ffmpeg-oidn/models</code> is not listed and not offered.
-                        See <code>NEURAL.md</code> for how to export them from the official Real-ESRGAN
-                        checkpoints. If the patched binary is missing entirely the shim strips the node and
-                        the session plays without the network instead of failing.
-                    </div>
-                </div>
-
-                <div class="checkboxContainer checkboxContainer-withDescription">
-                    <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="NeuralAllowed" />
-                        <span>Allow neural super-resolution</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn a network on.
-                    </div>
-                </div>
-
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="GameLevel" label="Game temporal upscaler (default)">
-                        <option value="off">Off</option>
-                        <option value="fsr2">FSR2 (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
-                        <option value="dlss">DLSS SR (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
-                        <option value="dlaa">DLAA (degraded: no true jitter, so close to a pass-through)</option>
-                    </select>
-                    <div class="fieldDescription">
-                        <strong>Read this before turning one on. These are not image upscalers.</strong>
-                        FSR2 and DLSS are temporal reconstruction algorithms for a <em>renderer</em>.
-                        Everything they gain over a plain resize comes from the renderer handing them
-                        exact screen-space motion vectors, a depth buffer, the exact sub-pixel jitter it
-                        offset the camera by each frame, and a mask saying where history must not be
-                        trusted. <strong>A recording contains none of those.</strong> Every one is
-                        synthesised here: NVOFA optical flow for the motion vectors, a monocular estimate
-                        (or a flat plane) for depth, a measured global phase-correlation offset for
-                        jitter, and forward/backward flow inconsistency for the mask.
-                    </div>
-                    <div class="fieldDescription">
-                        <strong>The jitter one cannot be fixed, and it was measured rather than assumed.</strong>
-                        FSR2's jitter is a single <em>global</em> value; this content's sub-pixel motion is
-                        <em>local</em>. The median textured block departs from the global estimate by
-                        0.29 px against FSR2's entire &plusmn;0.5 px budget, and AMD's own documentation
-                        says the sequence must never produce a null vector - which is exactly what a fixed
-                        camera produces. With a near-null sequence the algorithm's locks never sweep the
-                        display grid, and what is left is a temporal denoise plus a fixed Lanczos
-                        upsample. <strong>Expect ghosting, and do not expect super-resolution.</strong>
-                    </div>
-                    <div class="fieldDescription">
-                        <code>fsr2</code> and <code>dlss</code> produce the target size themselves, so the
-                        Detail shader and the refinement pass are dropped for those two rather than run a
-                        second upscaler against the first. <code>dlaa</code> is 1:1 and runs as a
-                        restoration pass <em>before</em> the normal scale, so it composes with everything.
-                    </div>
-                    <div class="fieldDescription">
-                        <strong>Nothing from NVIDIA is shipped with this plugin.</strong>
-                        <code>dlss</code> and <code>dlaa</code> are listed only when a DLSS runtime
-                        (<code>libnvidia-ngx-dlss.so.*</code>, NVIDIA proprietary) has been installed into
-                        <code>/usr/lib/jellyfin-ffmpeg-oidn/dlss</code> by hand - see <code>DLSS.md</code>.
-                        The monocular depth weights are not shipped either; without them depth falls back
-                        to a flat plane. FSR2 itself is MIT and is built from source - see
-                        <code>FSR2.md</code>. If the patched binary is missing the shim strips the node and
-                        the session plays unenhanced instead of failing.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="GameJitter" label="Game upscaler: jitter source">
-                        <option value="measured">Measured global sub-pixel offset (phase correlation)</option>
-                        <option value="cancel">Measured, and declared present in the motion vectors</option>
-                        <option value="zero">None</option>
-                        <option value="halton">Halton sequence (a renderer's, and fiction on a recording)</option>
-                    </select>
-                    <div class="fieldDescription">
-                        All four are wrong; they are wrong differently. <code>measured</code> is real but
-                        global where the motion is local. <code>halton</code> tells the algorithm sample
-                        positions that were never used.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="GameDepth" label="Game upscaler: depth source">
-                        <option value="model">Monocular estimate</option>
-                        <option value="model-stable">Monocular estimate, flow-warped and smoothed</option>
-                        <option value="flat">Flat plane</option>
-                    </select>
-                    <div class="fieldDescription">
-                        A monocular estimate is <em>relative</em> and renormalised every frame, and the
-                        algorithms compare depth across frames to find disocclusion, so an unstable
-                        estimate manufactures ghosting. <code>model-stable</code> warps the previous frame's
-                        depth by the flow and blends. <code>flat</code> turns every depth-driven decision
-                        into a no-op, which is at least a known failure rather than a noisy one. Falls back
-                        to <code>flat</code> when the weights are absent or ONNX Runtime has no CUDA
-                        execution provider.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="GameReactive" label="Game upscaler: reactive mask">
-                        <option value="flow">Forward/backward flow inconsistency</option>
-                        <option value="none">None</option>
-                    </select>
-                    <div class="fieldDescription">
-                        The reactive mask is the algorithm's own designed control for ghosting: it marks
-                        where history must not be trusted. Flow inconsistency finds occlusion and
-                        disocclusion, which is where most of the ghosting comes from. It costs one extra
-                        NVOFA pass and does not find transparency or shading change.
-                    </div>
-                </div>
-
-                <div class="checkboxContainer checkboxContainer-withDescription">
-                    <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="GameAllowed" />
-                        <span>Allow game temporal upscalers</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn one on.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="DenoiseLevel" label="Denoise (default)">
+                    <select is="emby-select" id="DenoiseLevel" data-config="DenoiseLevel" data-kind="select" data-default="off" label="Denoise (default)">
                         <option value="off">Off</option>
                         <option value="light">Light - atadenoise (temporal, cheap)</option>
-                        <option value="strong">Strong - nlmeans (spatial, slower)</option>
-                        <option value="max">Max - nlmeans s=2.0 (slowest)</option>
+                        <option value="strong">Strong - nlmeans (GPU)</option>
+                        <option value="max">Max - nlmeans, stronger (GPU)</option>
                         <option value="oidn">OIDN - Intel Open Image Denoise (advanced, slowest)</option>
                         <option value="optix">OptiX - NVIDIA AI denoiser, spatial (advanced)</option>
                         <option value="optix-temporal">OptiX temporal - NVIDIA AI denoiser + motion vectors (advanced)</option>
                     </select>
                     <div class="fieldDescription">
-                        Runs before the upscale, so the network is not asked to reconstruct noise into detail.
-                        Light is <code>atadenoise</code> (temporal, CPU); Strong and Max are
-                        <code>nlmeans_vulkan</code>, which recovered 46% and 53% of the structural damage
-                        noise had done to a visibly noisy source.
-                        <br /><br />
-                        <strong>OIDN is advanced, and slow.</strong> Intel Open Image Denoise, run through a
-                        separate patched ffmpeg build that only sessions choosing this level ever touch -
-                        no other playback goes near it. On a genuinely grainy high-bitrate source it is by
-                        far the best denoiser measured here (74-86% of the fidelity lost to noise recovered,
-                        against 34-53% for nlmeans and 4-6% for atadenoise, with no over-smoothing). On this
-                        library\'s normal material it measures as a no-op: within 0.01 dB of doing nothing.
-                        It is not in the quality ladder for that reason.
-                        <br /><br />
-                        <strong>OptiX is advanced too.</strong> Both OptiX levels run through the same
-                        patched ffmpeg build as OIDN. Plain <code>optix</code> is spatial, like OIDN and
-                        like everything here except <code>atadenoise</code>; on a grainy source it cut
-                        flicker 66% against OIDN's 61%, at about 1.4x OIDN's speed.
-                        <code>optix-temporal</code> is the only level that uses motion between frames: it
-                        feeds the denoiser the previous denoised frame plus a motion field computed on
-                        this GPU's optical-flow engine. Measured, it cut flicker 60% - less than the
-                        spatial models, because the noise being removed also corrupts the motion estimate
-                        it depends on. It is offered and costed honestly rather than promoted. Neither
-                        OptiX level is in the quality ladder.
-                        <br /><br />
-                        <strong>hqdn3d used to be "Light" and has been retired.</strong> It recovered 0.00 dB
-                        and 12% of the structural damage - it traded noise for blur one for one. Do not put it
-                        back for being cheap.
-                        <br /><br />
-                        Off by default: denoise costs roughly 60% of throughput (still about 2.5x realtime at
-                        4K), and on a clean source there is nothing to recover. Worth turning on for a noisy
-                        source you are also sharpening: RCAS on a visibly noisy source with no denoise measured
-                        a net loss (-0.14 dB, -0.0007 SSIM), because a sharpener amplifies noise as readily as
-                        detail.
-                    </div>
+                    Runs before the upscale so noise is not reconstructed as detail. Light is a cheap temporal CPU filter; Strong and Max are nlmeans on the GPU. OIDN and both OptiX levels run through the patched ffmpeg and are the best measured on genuinely grainy sources, and a no-op on clean ones; none is in the player's quality ladder. Denoise costs about 60% of throughput, so it is worth turning on only for noisy sources, especially if unblur is also on: sharpening a noisy source without it measured a net loss. If a session combines a GPU denoise with a patched-only filter on an older ffmpeg build, the denoise is dropped and the session record says so. Default Off.
+                </div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DeblockAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="DeblockAllowed" data-config="DeblockAllowed" data-gates="DeblockLevel" data-kind="bool" data-default="true" />
                         <span>Allow deblock</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn deblock on.
-                    </div>
+                    Master switch. Off: no session can turn it on, and the default below is ignored.
+                </div>
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="DeblockLevel" label="Deblock (default)">
+                    <select is="emby-select" id="DeblockLevel" data-config="DeblockLevel" data-kind="select" data-default="off" label="Deblock (default)">
                         <option value="off">Off</option>
                         <option value="light">Light - deblock, gentle</option>
                         <option value="strong">Strong - deblock, harder</option>
@@ -397,192 +170,233 @@
                         <option value="pp7">pp7 - libpostproc, strongest and most expensive</option>
                     </select>
                     <div class="fieldDescription">
-                        <strong>Not the same job as denoise above.</strong> Denoise removes noise in the
-                        picture. Deblock removes the SOURCE's own compression damage: the DCT block edges
-                        a low-bitrate encode leaves behind, and the mosquito ringing around hard edges.
-                        It runs at source resolution, before any super-resolution pass.
-                        <br /><br />
-                        It matters because every network here was trained on clean downsampled images. A
-                        block edge is not something those networks were ever shown, so they treat it as
-                        real detail and reconstruct it - the artefact comes out of the upscale larger and
-                        sharper than it went in.
-                        <br /><br />
-                        <code>light</code> and <code>strong</code> are libavfilter's <code>deblock</code>
-                        filter and address blocking only. <code>fspp</code> and <code>pp7</code> come from
-                        libpostproc and also remove ringing, at more CPU cost. All four are single-threaded
-                        CPU passes at source resolution, so they cost more on a large source than on a
-                        small one.
-                        <br /><br />
-                        Off by default, because no strength has been measured on this content yet.
-                    </div>
+                    Removes the source encode's block edges and ringing before anything scales them up; the networks otherwise treat them as detail. Light and Strong address blocking only; fspp and pp7 also remove ringing at more CPU cost. All are single-threaded CPU passes at source resolution. Not run together with the RTX DLPP/VSR neural levels. Default Off; no strength has been measured on this content.
+                </div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="Deband" />
-                        <span>Deband</span>
+                        <input is="emby-checkbox" type="checkbox" id="RefineAllowed" data-config="RefineAllowed" data-gates="RefineLevel" data-kind="bool" data-default="true" />
+                        <span>Allow post-scale refinement</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        libplacebo debanding, with the strength and the grain set below. Measured within
-                        run-to-run variance of free. Low-bitrate camera h264 bands visibly in dark
-                        gradients, which is what this removes.
-                    </div>
+                    Master switch. Off: no session can turn it on, and the default below is ignored.
                 </div>
-
-                <div class="inputContainer">
-                    <input is="emby-input" type="number" id="DebandThreshold" label="Deband threshold" min="0" max="255" step="1" required />
-                    <div class="fieldDescription">
-                        How hard debanding cuts. Higher smooths more banding, and more real gradient
-                        with it. Default: 3.
-                    </div>
-                </div>
-
-                <div class="inputContainer">
-                    <input is="emby-input" type="number" id="DebandGrain" label="Deband grain" min="0" max="255" step="1" required />
-                    <div class="fieldDescription">
-                        Grain added back after debanding. 0 on purpose: libplacebo's own default of 6
-                        dithers synthetic grain over the picture, which is wrong for this content.
-                    </div>
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="Upscaler" label="Upscaler kernel"></select>
+                    <select is="emby-select" id="RefineLevel" data-config="RefineLevel" data-kind="select" data-default="off" label="Post-scale refinement (default)">
+                        <option value="off">Off</option>
+                        <option value="ssimsuperres">SSimSuperRes - adjust the scaled image to match the source when downscaled (GPU light, ~9%)</option>
+                    </select>
                     <div class="fieldDescription">
-                        libplacebo scaling kernel used underneath the shaders. Default: ewa_lanczos.
-                        The list comes from the server, because a kernel name libplacebo does not know
-                        fails the whole transcode rather than falling back.
-                    </div>
+                    Corrects the scaled image so that shrinking it back reproduces the source. Runs on top of any super-resolution shader or plain scaling, and at every ratio, including between the minimum scale factor and the super-resolution minimum ratio, where nothing but unblur runs. Costs one GPU pass; unmeasured for quality. Default Off.
                 </div>
-
-                <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MinScaleFactor" label="Minimum scale factor" step="0.01" min="1" max="8" required />
-                    <div class="fieldDescription">Skip unless the target height is at least this multiple of the source height.</div>
-                </div>
-
-                <div class="inputContainer">
-                    <input is="emby-input" type="number" id="SrMinScaleFactor" label="Super-resolution minimum ratio" step="0.01" min="0" max="8" required />
-                    <div class="fieldDescription">
-                        Run the super-resolution network only at or above this ratio. Below it the upscale
-                        still happens, with plain scaling plus whatever unblur is selected, and the network's
-                        GPU time is not spent. 0 disables the bypass.
-                        <br /><br />
-                        Both shipped networks are fixed 2x, so below 2x their output is shrunk back down.
-                        Measured against a clean ground truth, FSRCNNX's detail advantage over plain scaling
-                        is -2.2% at 1.41x, -0.3% at 1.50x, +3.6% at 1.70x, +7.2% at 1.90x and +19.3% at 2.00x:
-                        the crossover is about 1.52 and the network costs ~15% of throughput. The default of
-                        1.60 therefore keeps 720p to 1080p (exactly 1.5x, and a large share of real sessions)
-                        on plain scaling. Unblur is what fills the detail in at those ratios, at about 1% of
-                        the cost: at 1.5x, plain scaling plus RCAS 2.0 measured detail energy 3.5950 against a
-                        ground truth of 3.5179, where the network alone managed 3.2726.
-                    </div>
-                </div>
-
-                <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxSourceHeight" label="Maximum source height (px)" min="240" max="4320" required />
-                    <div class="fieldDescription">Never upscale sources taller than this.</div>
-                </div>
-
-                <div class="fieldDescription">
-                    <b>What those five values do together</b>, worked out from what is in the boxes above
-                    right now rather than from an example typed here, so it cannot drift from what is saved.
-                    This is the dashboard default path: a session that asks for a size of its own is judged
-                    against that size instead of the target height.
-                    <div id="thresholdExample"></div>
-                </div>
-
-                <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxConcurrent" label="Maximum concurrent upscales" min="0" max="16" required />
-                    <div class="fieldDescription">Past this many live upscaling transcodes, new sessions use the stock path.</div>
-                </div>
-
-                <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxConcurrentSwaps" label="Maximum concurrent live-apply swaps" min="0" max="16" required />
-                    <div class="fieldDescription">A mid-playback setting change briefly runs a second ffmpeg process (the A/B swap) so the
-                        old stream keeps serving until the new one is ready. Separate from the cap above, which it also counts against
-                        while it runs. Past this many at once, a live-apply change falls back to today's tear-down-and-restart.</div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="GpuResidentEncode" />
-                        <span>Hand frames to NVENC without leaving the GPU (experimental)</span>
+                        <input is="emby-checkbox" type="checkbox" id="ChromaAllowed" data-config="ChromaAllowed" data-gates="ChromaLevel" data-kind="bool" data-default="true" />
+                        <span>Allow chroma upscaling</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        <b>Off by default, and read this before turning it on.</b>
-                        <br /><br />
-                        Normally the enhanced chain ends with <code>hwdownload,format=yuv420p</code>, moving
-                        every output frame from GPU to system memory before NVENC uploads it again for
-                        encoding - a full frame's worth of PCIe traffic each way, paid at output size. This
-                        setting instead hands NVENC the frame while it is still on the GPU
-                        (<code>hwmap=derive_device=cuda</code>), skipping that round trip.
-                        <br /><br />
-                        It depends on Vulkan-CUDA interop in the patched ffmpeg build, which has not been
-                        confirmed on every server. If sessions fail to start after enabling this, turn it back
-                        off; nothing else about the enhancement chain changes.
-                    </div>
+                    Master switch. Off: no session can turn it on, and the default below is ignored.
+                </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="ChromaLevel" data-config="ChromaLevel" data-kind="select" data-default="off" label="Chroma upscaling (default)">
+                        <option value="off">Off</option>
+                        <option value="krigbilateral">KrigBilateral - reconstruct 4:2:0 chroma guided by the luma plane (GPU moderate, ~24%)</option>
+                    </select>
+                    <div class="fieldDescription">
+                    Rebuilds the colour planes (stored at quarter resolution in 4:2:0 video) using the luma plane as a guide. Works with any super-resolution level and also without an upscale. GPU moderate; unmeasured for quality. Default Off.
+                </div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="RequireClientOptIn" />
+                        <input is="emby-checkbox" type="checkbox" id="NeuralAllowed" data-config="NeuralAllowed" data-gates="NeuralLevel" data-kind="bool" data-default="true" />
+                        <span>Allow neural super-resolution</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                    Master switch. Off: no session can turn it on, and the default below is ignored.
+                </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="NeuralLevel" data-config="NeuralLevel" data-kind="select" data-default="off" label="Neural super-resolution (default)">
+                        <option value="off">Off</option>
+                        <option value="realesr-anime-x2">Real-ESRGAN compact x2, anime video (advanced, far below realtime)</option>
+                        <option value="realesr-anime-x4">Real-ESRGAN compact x4, anime video v3 (advanced, far below realtime)</option>
+                        <option value="realesr-general-x4">Real-ESRGAN compact x4, general v3 (advanced, slowest thing here)</option>
+                    </select>
+                    <div class="fieldDescription">
+                    Real-ESRGAN networks run through the patched ffmpeg before the scaling pass; they combine with the super-resolution shader rather than replacing it. All three are far below realtime on this GPU (24, 15 and 10 fps at 540p to 1080p, against 265 fps without) and the player's quality ladder never selects them. The weights are not shipped: a level whose .onnx file is missing from the Neural model directory (see File locations) is not offered to players. The RTX DLPP and RTX VSR levels can be chosen in the player but not set as a default here. Default Off.
+                </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="GameAllowed" data-config="GameAllowed" data-gates="GameLevel GameJitter GameDepth GameReactive" data-kind="bool" data-default="true" />
+                        <span>Allow game temporal upscalers</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                    Master switch. Off: no session can turn a game upscaler on, and the default and the three sources below are ignored.
+                </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameLevel" data-config="GameLevel" data-kind="select" data-default="off" label="Game temporal upscaler (default)">
+                        <option value="off">Off</option>
+                        <option value="fsr2">FSR2 (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
+                        <option value="dlss">DLSS SR (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
+                        <option value="dlaa">DLAA (degraded: no true jitter, so close to a pass-through)</option>
+                    </select>
+                    <div class="fieldDescription">
+                    FSR2 and DLSS are built for game engines that supply motion vectors, depth and camera jitter. A video has none of those, so every input is estimated and the result is a temporal denoise plus a fixed upsample: expect ghosting, not super-resolution. Offered because they were asked for, labelled degraded everywhere, never chosen automatically. fsr2 and dlss replace the super-resolution shader and refinement; dlaa runs 1:1 before the normal scale. dlss and dlaa need the NVIDIA DLSS runtime installed by hand (see File locations) and are otherwise not run. Not available together with the RTX DLPP/VSR neural levels. Default Off.
+                </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameJitter" data-config="GameJitter" data-kind="select" data-default="measured" label="Game upscaler: jitter source">
+                        <option value="measured">Measured global sub-pixel offset (phase correlation)</option>
+                        <option value="cancel">Measured, and declared present in the motion vectors</option>
+                        <option value="zero">None</option>
+                        <option value="halton">Halton sequence (a renderer's, and fiction on a recording)</option>
+                    </select>
+                    <div class="fieldDescription">
+                    Only used when a game upscaler is active. None of the four is correct for recorded video; "measured" is the least wrong. Default measured.
+                </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameDepth" data-config="GameDepth" data-kind="select" data-default="model" label="Game upscaler: depth source">
+                        <option value="model">Monocular estimate</option>
+                        <option value="model-stable">Monocular estimate, flow-warped and smoothed</option>
+                        <option value="flat">Flat plane</option>
+                    </select>
+                    <div class="fieldDescription">
+                    Only used when a game upscaler is active. "Monocular estimate" needs the depth model file (see File locations) and falls back to a flat plane without it; the session record says so. "Flat" is a known no-op; the estimate can add ghosting. Default Monocular estimate.
+                </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="GameReactive" data-config="GameReactive" data-kind="select" data-default="flow" label="Game upscaler: reactive mask">
+                        <option value="flow">Forward/backward flow inconsistency</option>
+                        <option value="none">None</option>
+                    </select>
+                    <div class="fieldDescription">
+                    Only used when a game upscaler is active. Flow inconsistency marks occluded areas so history is not reused there. It is the main anti-ghosting control, at the cost of one extra optical-flow pass. Default flow.
+                </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="Deband" data-config="Deband" data-gates="DebandThreshold DebandGrain" data-kind="bool" data-default="true" />
+                        <span>Deband</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                    libplacebo debanding on the scaling pass. Removes the banding low-bitrate video shows in dark gradients; measured as free. Players can turn it off per session. Default On.
+                </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="DebandThreshold" data-config="DebandThreshold" data-kind="int" data-default="3" label="Deband threshold" min="0" max="1000" step="1" required />
+                    <div class="fieldDescription">
+                    How aggressively banding is smoothed. Higher removes more banding and more real gradient with it. 0 to 1000, default 3.
+                </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="DebandGrain" data-config="DebandGrain" data-kind="int" data-default="0" label="Deband grain" min="0" max="1000" step="1" required />
+                    <div class="fieldDescription">
+                    Synthetic grain added back after debanding. 0 by default on purpose: libplacebo's own default (6) adds texture this content does not need. 0 to 1000.
+                </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="Upscaler" data-config="Upscaler" data-kind="select" data-default="ewa_lanczos" label="Upscaler kernel"></select>
+                    <div class="fieldDescription">
+                    Scaling kernel under the shaders. Players can pick another per session. The list comes from the server, because a kernel name libplacebo does not know fails the whole transcode. Default ewa_lanczos.
+                </div>
+                </div>
+
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">Transcode policy</h2>
+                    <p class="fieldDescription">Which sessions are enhanced, and how they are encoded.</p>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="RequireClientOptIn" data-config="RequireClientOptIn" data-kind="bool" data-default="false" />
                         <span>Only upscale when the viewer asks for it</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        On: upscaling happens only for a session that carried an <code>upscale</code>
-                        request, which is what the injected player script sends when a viewer picks a
-                        size in the Enhance panel. A session with no such request is transcoded
-                        untouched, so clients that do not run the script never spend GPU time.
-                        Off: every eligible transcode is upscaled to the target height above, whether
-                        or not anybody asked.
-                    </div>
+                    On: the target height above is ignored and a session is upscaled only when the player's Enhance menu asked for a size. This gates the upscale only: the other defaults on this page (unblur, denoise, deblock and so on) still apply to every transcode, so set those to Off too if you want untouched sessions. "Enhance direct play too" below ignores this setting. Default Off.
+                </div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="ForceTranscode" />
-                        <span>Upscale direct streams too (force transcode)</span>
+                        <input is="emby-checkbox" type="checkbox" id="ForceTranscode" data-config="ForceTranscode" data-kind="bool" data-default="false" />
+                        <span>Enhance direct streams too (force transcode)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        Turns a would-be video stream copy into a real transcode so it can be upscaled. Costs GPU time.
-                    </div>
+                    When Jellyfin would copy the video stream unchanged (remux), transcode it instead so the enhancement chain can run. Applies to any enhancement set on this page, not only upscaling, and to every client. Costs a GPU transcode per session. Default Off.
+                </div>
                 </div>
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="ForceTranscodeForDirectPlay" />
+                        <input is="emby-checkbox" type="checkbox" id="ForceTranscodeForDirectPlay" data-config="ForceTranscodeForDirectPlay" data-kind="bool" data-default="false" />
                         <span>Enhance direct play too (stop clients playing files directly)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        <b>Off by default, and read this before turning it on.</b>
-                        <br /><br />
-                        When a client can play a file directly, the server never builds an ffmpeg command,
-                        so there is nothing to enhance and playback info honestly reports "No enhancement".
-                        This setting tells the server to refuse direct play for any item that is eligible for
-                        upscaling, which forces a transcode the enhancement chain can run in.
-                        <br /><br />
-                        <b>The cost is large and it applies to every client.</b> With this on, direct play
-                        effectively stops being used for eligible material, and each of those sessions becomes
-                        a GPU transcode subject to the concurrency limit above. Sessions past that limit fall
-                        back to stock transcoding, which is more expensive than the direct play they replaced.
-                        Leave it off unless you want enhancement everywhere and have the GPU headroom for it.
-                        <br /><br />
-                        With it off, the injected player script still forces a transcode for the web player
-                        when a viewer picks something in the Enhance menu, so per-session enhancement works
-                        either way. This setting is what reaches clients that do not run that script.
-                    </div>
+                    Off by default; expensive. When a client could play a file directly there is no ffmpeg process and nothing to enhance. On: direct play and direct stream are refused for every item the upscale settings above would act on (size, minimum scale factor, maximum source height), on every client, so each becomes a GPU transcode subject to the concurrency cap, and past the cap a plain transcode that costs more than the direct play it replaced. Only needed for clients that do not run the web player script; the web player already forces a transcode when a viewer picks something in the Enhance menu. It ignores "Only upscale when the viewer asks for it", so with that on, clients are refused direct play and then get no enhancement.
+                </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="GpuResidentEncode" data-config="GpuResidentEncode" data-kind="bool" data-default="true" />
+                        <span>Keep frames on the GPU for encoding</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                    Hands NVENC the finished frame directly instead of copying it to system memory and back, which saves one full frame of PCIe traffic each way at output size. On by default. If sessions fail to start on your build, turn it off; nothing else in the chain changes.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="Encoder" label="Encoder" />
+                    <input is="emby-input" type="text" list="jpEncoders" id="Encoder" data-config="Encoder" data-kind="text" data-default="hevc_nvenc" label="Encoder" />
+                    <datalist id="jpEncoders">
+                        <option value="auto"></option>
+                        <option value="hevc_nvenc"></option>
+                        <option value="h264_nvenc"></option>
+                        <option value="av1_nvenc"></option>
+                    </datalist>
                     <div class="fieldDescription">
-                        The video encoder used for any transcode this plugin enhances, including one it forces
-                        out of a stream copy. Leave blank or set to <code>auto</code> to follow whatever codec
-                        the client negotiated. A named encoder (for example <code>hevc_nvenc</code> or
-                        <code>h264_nvenc</code>) is applied only when this ffmpeg build actually has it AND the
-                        playback session declared that codec playable; otherwise the negotiated codec is kept,
-                        because handing a client a codec it cannot decode is a black screen, not a worse
-                        picture. The Recent sessions table below reports which was used and why.
-                    </div>
+                    Video encoder for transcodes this plugin enhances, including ones it forces out of a stream copy. Blank or auto follows the codec the client negotiated. A named encoder (hevc_nvenc, h264_nvenc, ...) is used only if this ffmpeg has it and the client said it can play that codec; otherwise the negotiated codec is kept and Recent sessions shows why. Default hevc_nvenc.
+                </div>
+                </div>
+
+                <div class="verticalSection">
+                    <h2 class="sectionTitle">Capacity</h2>
+                    <p class="fieldDescription">How many enhanced transcodes may run at once.</p>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MaxConcurrent" data-config="MaxConcurrent" data-kind="int" data-default="4" label="Maximum concurrent enhanced transcodes" min="0" max="16" required />
+                    <div class="fieldDescription">
+                    Past this many enhanced ffmpeg processes, new sessions play through the stock path and the session record says "all enhancement slots busy". 0 turns enhancement off for everyone. Counts processes running the GPU shader chain; a session using only the RTX DLPP/VSR levels is not counted. Default 4.
+                </div>
+                </div>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="number" id="MaxConcurrentSwaps" data-config="MaxConcurrentSwaps" data-kind="int" data-default="4" label="Maximum concurrent live-apply swaps" min="0" max="16" required />
+                    <div class="fieldDescription">
+                    A setting change during playback briefly runs a second ffmpeg so the old stream keeps serving until the new one is ready. That second process also counts against the cap above. Past this many swaps at once (or 0), a live change falls back to stop-and-restart. Default 4.
+                </div>
                 </div>
 
                 <div class="verticalSection">
@@ -594,75 +408,52 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="ShaderDirectory" label="Shader directory" />
+                    <input is="emby-input" type="text" id="ShaderDirectory" data-config="ShaderDirectory" data-kind="path" data-default="/usr/share/jellyfin-shaders" label="Shader directory" />
                     <div class="fieldDescription">
-                        Where the shader files live. Default:
-                        <code>/usr/share/jellyfin-shaders</code>. Point this at a directory without the
-                        shaders in it and the levels that need them stop being offered, silently: there
-                        is no error, the options simply disappear from this page and from the player.
-                    </div>
+                    Where the .glsl shader files live. Default /usr/share/jellyfin-shaders. A level whose file is missing disappears from the player menu and, if set as a default above, silently falls back to plain scaling.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="ShaderCacheDirectory" label="Shader cache directory" />
+                    <input is="emby-input" type="text" id="ShaderCacheDirectory" data-config="ShaderCacheDirectory" data-kind="path" data-default="/var/cache/jellyfin/jellyfin-plus-shaders" label="Shader cache directory" />
                     <div class="fieldDescription">
-                        Where composed shaders are cached. Default:
-                        <code>/var/cache/jellyfin/jellyfin-plus-shaders</code>. It must be writable by the
-                        user the Jellyfin service runs as.
-                    </div>
+                    Where composed shaders and libplacebo's compiled-shader cache are written. Must be writable by the Jellyfin service user; if it is not, shader passes silently do not run. Default /var/cache/jellyfin/jellyfin-plus-shaders.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="NeuralModelDirectory" label="Neural model directory" />
+                    <input is="emby-input" type="text" id="NeuralModelDirectory" data-config="NeuralModelDirectory" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/models" label="Neural model directory" />
                     <div class="fieldDescription">
-                        Where the Real-ESRGAN ONNX weights live. Default:
-                        <code>/usr/lib/jellyfin-ffmpeg-oidn/models</code>. The weights are not shipped
-                        with this plugin, and a neural level whose file is missing is not offered at
-                        all. See <code>NEURAL.md</code> for how to export them from the official
-                        Real-ESRGAN checkpoints.
-                    </div>
+                    Where the Real-ESRGAN ONNX weights live. Not shipped with this plugin; a neural level whose file is missing is not offered. See <code>NEURAL.md</code> for how to export them from the official checkpoints.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="DlssRuntimeDirectory" label="DLSS runtime directory" />
+                    <input is="emby-input" type="text" id="DlssRuntimeDirectory" data-config="DlssRuntimeDirectory" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/dlss" label="DLSS runtime directory" />
                     <div class="fieldDescription">
-                        Where the NVIDIA DLSS runtime lives. Default:
-                        <code>/usr/lib/jellyfin-ffmpeg-oidn/dlss</code>. It is proprietary and nothing
-                        from NVIDIA ships with this plugin, so until you put it here by hand the
-                        <code>dlss</code> and <code>dlaa</code> levels are not offered. See
-                        <code>DLSS.md</code> for which file is needed and where to get it.
-                    </div>
+                    Directory containing <code>libnvidia-ngx-dlss.so.*</code> (NVIDIA proprietary, not shipped). Until it is there, dlss and dlaa are not run. Default /usr/lib/jellyfin-ffmpeg-oidn/dlss. See <code>DLSS.md</code>.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="DepthModelPath" label="Depth model path" />
+                    <input is="emby-input" type="text" id="DepthModelPath" data-config="DepthModelPath" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx" label="Depth model path" />
                     <div class="fieldDescription">
-                        The monocular depth ONNX model the game upscalers are fed instead of a real depth
-                        buffer. Default:
-                        <code>/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx</code>.
-                        Not shipped either; without it those levels fall back to a flat plane.
-                    </div>
+                    The monocular depth ONNX model the game upscalers are fed instead of a real depth buffer. Not shipped; without it those levels fall back to a flat plane. Default /usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="RtxDlppDllPath" label="RTX DLPP DLL path" />
+                    <input is="emby-input" type="text" id="RtxDlppDllPath" data-config="RtxDlppDllPath" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll" label="RTX DLPP DLL path" />
                     <div class="fieldDescription">
-                        Where <code>nvdlppx.dll</code> lives, for the <code>dlpp-1</code>..<code>dlpp-4</code>
-                        neural levels. Default:
-                        <code>/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll</code>. Proprietary and
-                        nothing from NVIDIA ships with this plugin, so until you put it here by hand these
-                        levels are not offered. See <code>RTXDLPP.md</code>.
-                    </div>
+                    Where <code>nvdlppx.dll</code> lives, for the <code>dlpp-1</code> to <code>dlpp-4</code> neural levels. Proprietary and not shipped, so until you put it here by hand these levels are not offered to players. They are player-only: this page cannot set them as a default. Default /usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll. See <code>RTXDLPP.md</code>.
+                </div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="RtxVsrDllPath" label="RTX VSR DLL path" />
+                    <input is="emby-input" type="text" id="RtxVsrDllPath" data-config="RtxVsrDllPath" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll" label="RTX VSR DLL path" />
                     <div class="fieldDescription">
-                        Where <code>nvaivpx.dll</code> lives, for the <code>vsr-rtcuda</code> neural level - a
-                        fast GPU resample, not a network. Default:
-                        <code>/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll</code>. Same rule as above:
-                        not shipped, so not offered until installed. See <code>RTXVSR.md</code>.
-                    </div>
+                    Where <code>nvaivpx.dll</code> lives, for the <code>vsr-rtcuda</code> neural level, a fast GPU resample rather than a network. Same rules as above: not shipped, not offered until installed, player-only. Default /usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll. See <code>RTXVSR.md</code>.
+                </div>
                 </div>
 
                 <div>
@@ -675,10 +466,12 @@
             <div class="verticalSection">
                 <h2 class="sectionTitle">Recent sessions</h2>
                 <p class="fieldDescription">What the server actually did, as it went into the ffmpeg command.</p>
-                <table style="width:100%;text-align:left">
+                <div class="jpScroll">
+                <table class="jpTable">
                     <thead><tr><th>Time (UTC)</th><th>Source</th><th>Source size</th><th>Output size</th><th>Ratio</th><th>Viewer</th><th>Result</th><th>Encoder</th><th>Why that encoder</th><th>Super-resolution</th><th>Status</th></tr></thead>
                     <tbody id="activityBody"></tbody>
                 </table>
+                </div>
             </div>
 
             <div class="verticalSection" id="jpMaintenance">
@@ -707,9 +500,9 @@
                         <option value="name">Name</option>
                     </select>
                 </div>
-                <div style="overflow-x:auto">
-                    <table style="width:100%;text-align:left">
-                        <thead><tr><th></th><th>Tag</th><th>Items</th><th></th></tr></thead>
+                <div class="jpScroll">
+                    <table class="jpTable">
+                        <thead><tr><th><span class="jpHidden">Select</span></th><th>Tag</th><th>Items</th><th><span class="jpHidden">Notes</span></th></tr></thead>
                         <tbody id="jpTagBody"></tbody>
                     </table>
                 </div>
@@ -875,67 +668,73 @@
                 });
             }
 
+            // Every control carrying data-config is loaded and saved here, so a setting is markup-only:
+            // data-config is the PluginConfiguration property, data-kind one of bool/int/float/text/
+            // path/select, data-default the value shown when the stored one is missing (it equals the
+            // default in PluginConfiguration.cs). path differs from text only in that a blank stored
+            // value also shows the default; a blank Encoder is meaningful (auto), a blank path is not.
+            function configFields(page) {
+                return Array.prototype.slice.call(page.querySelectorAll('[data-config]'));
+            }
+            function applyConfig(page, config) {
+                configFields(page).forEach(function (el) {
+                    var name = el.getAttribute('data-config');
+                    var kind = el.getAttribute('data-kind');
+                    var def = el.getAttribute('data-default');
+                    var v = config[name];
+                    if (kind === 'bool') {
+                        el.checked = v == null ? def === 'true' : !!v;
+                    } else if (kind === 'select') {
+                        // A legacy SrLevel name maps the way the server does. A value the select does
+                        // not list leaves it blank; saveConfig then keeps the stored one.
+                        if (name === 'SrLevel' && SR_ALIASES[v]) { v = SR_ALIASES[v]; }
+                        if (name !== 'Upscaler') { el.value = v || def; }
+                    } else if (kind === 'path') {
+                        el.value = v || def;
+                    } else {
+                        el.value = v == null ? def : v;
+                    }
+                });
+                // The kernel list comes from the server, so that select is filled asynchronously.
+                loadUpscalers(page, config.Upscaler || page.querySelector('#Upscaler').getAttribute('data-default'));
+            }
+            function collectConfig(page, config) {
+                configFields(page).forEach(function (el) {
+                    var name = el.getAttribute('data-config');
+                    var kind = el.getAttribute('data-kind');
+                    if (kind === 'bool') {
+                        config[name] = el.checked;
+                    } else if (kind === 'select') {
+                        // Blank means the stored value is not in the list (fsrcnnx-max, a retired
+                        // name) or the list is still loading: keep what is stored.
+                        if (el.value) { config[name] = el.value; }
+                    } else if (kind === 'int' || kind === 'float') {
+                        var n = kind === 'int' ? parseInt(el.value, 10) : parseFloat(el.value);
+                        if (!isNaN(n)) { config[name] = n; }
+                    } else {
+                        config[name] = el.value;
+                    }
+                });
+            }
+
+            // A box with data-gates="A B" switches the controls with those ids off while it is
+            // unticked. Display only: the server already treats an unticked Allow as off, and a
+            // disabled control still saves its value.
+            function syncGates(page) {
+                Array.prototype.forEach.call(page.querySelectorAll('[data-gates]'), function (master) {
+                    master.getAttribute('data-gates').split(' ').forEach(function (id) {
+                        var dep = page.querySelector('#' + id);
+                        if (dep) { dep.disabled = !master.checked; }
+                    });
+                });
+            }
+
             document.querySelector('#JellyfinPlusConfigPage').addEventListener('pageshow', function () {
                 var page = this;
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                    page.querySelector('#Enabled').checked = config.Enabled;
-                    page.querySelector('#TargetHeight').value = config.TargetHeight;
-                    page.querySelector('#MaxTargetHeight').value = config.MaxTargetHeight;
-                    // The select only lists the real level names. A persisted legacy name
-                    // (light / standard / max) would otherwise leave the control blank and then
-                    // save that blank back over a good setting, so map it the same way the server
-                    // does before assigning.
-                    page.querySelector('#SrLevel').value = SR_ALIASES[config.SrLevel] || config.SrLevel || 'anime4k-m';
-                    page.querySelector('#DeblurLevel').value = config.DeblurLevel || 'off';
-                    page.querySelector('#DeblurAllowed').checked = config.DeblurAllowed !== false;
-                    page.querySelector('#RefineLevel').value = config.RefineLevel || 'off';
-                    page.querySelector('#RefineAllowed').checked = config.RefineAllowed !== false;
-                    page.querySelector('#ChromaLevel').value = config.ChromaLevel || 'off';
-                    page.querySelector('#ChromaAllowed').checked = config.ChromaAllowed !== false;
-                    page.querySelector('#NeuralLevel').value = config.NeuralLevel || 'off';
-                    page.querySelector('#NeuralAllowed').checked = config.NeuralAllowed !== false;
-                    page.querySelector('#GameLevel').value = config.GameLevel || 'off';
-                    page.querySelector('#GameJitter').value = config.GameJitter || 'measured';
-                    page.querySelector('#GameDepth').value = config.GameDepth || 'model';
-                    page.querySelector('#GameReactive').value = config.GameReactive || 'flow';
-                    page.querySelector('#GameAllowed').checked = config.GameAllowed !== false;
-                    page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
-                    page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
-                    page.querySelector('#DeblockLevel').value = config.DeblockLevel || 'off';
-                    page.querySelector('#DeblockAllowed').checked = config.DeblockAllowed !== false;
-                    page.querySelector('#Deband').checked = config.Deband !== false;
-                    page.querySelector('#DebandThreshold').value =
-                        config.DebandThreshold == null ? 3 : config.DebandThreshold;
-                    page.querySelector('#DebandGrain').value =
-                        config.DebandGrain == null ? 0 : config.DebandGrain;
-                    loadUpscalers(page, config.Upscaler || 'ewa_lanczos');
-                    page.querySelector('#MinScaleFactor').value = config.MinScaleFactor;
-                    page.querySelector('#SrMinScaleFactor').value =
-                        config.SrMinScaleFactor == null ? 1.6 : config.SrMinScaleFactor;
-                    page.querySelector('#MaxSourceHeight').value = config.MaxSourceHeight;
-                    page.querySelector('#MaxConcurrent').value = config.MaxConcurrent;
-                    page.querySelector('#MaxConcurrentSwaps').value =
-                        config.MaxConcurrentSwaps == null ? 4 : config.MaxConcurrentSwaps;
-                    page.querySelector('#GpuResidentEncode').checked = config.GpuResidentEncode === true;
-                    page.querySelector('#RequireClientOptIn').checked = config.RequireClientOptIn;
-                    page.querySelector('#ForceTranscode').checked = config.ForceTranscode;
-                    page.querySelector('#ForceTranscodeForDirectPlay').checked = config.ForceTranscodeForDirectPlay === true;
-                    page.querySelector('#Encoder').value = config.Encoder;
-                    page.querySelector('#ShaderDirectory').value =
-                        config.ShaderDirectory || '/usr/share/jellyfin-shaders';
-                    page.querySelector('#ShaderCacheDirectory').value =
-                        config.ShaderCacheDirectory || '/var/cache/jellyfin/jellyfin-plus-shaders';
-                    page.querySelector('#NeuralModelDirectory').value =
-                        config.NeuralModelDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/models';
-                    page.querySelector('#DlssRuntimeDirectory').value =
-                        config.DlssRuntimeDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/dlss';
-                    page.querySelector('#DepthModelPath').value =
-                        config.DepthModelPath || '/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx';
-                    page.querySelector('#RtxDlppDllPath').value =
-                        config.RtxDlppDllPath || '/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll';
-                    page.querySelector('#RtxVsrDllPath').value =
-                        config.RtxVsrDllPath || '/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll';
+                    applyConfig(page, config);
+                    syncGates(page);
                     updateThresholdExample(page);
                     Dashboard.hideLoadingMsg();
                 });
@@ -943,6 +742,9 @@
                 // once rather than stacked up.
                 if (!exampleWired) {
                     exampleWired = true;
+                    Array.prototype.forEach.call(page.querySelectorAll('[data-gates]'), function (m) {
+                        m.addEventListener('change', function () { syncGates(page); });
+                    });
                     ['#TargetHeight', '#MaxTargetHeight', '#MinScaleFactor', '#SrMinScaleFactor', '#MaxSourceHeight']
                         .forEach(function (id) {
                             page.querySelector(id).addEventListener('input', function () {
@@ -958,54 +760,7 @@
                 var page = document.querySelector('#JellyfinPlusConfigPage');
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                    config.Enabled = page.querySelector('#Enabled').checked;
-                    config.TargetHeight = parseInt(page.querySelector('#TargetHeight').value, 10);
-                    config.MaxTargetHeight = parseInt(page.querySelector('#MaxTargetHeight').value, 10);
-                    // fsrcnnx-max is a real level but is not offered in the select. If the config
-                    // holds it, the select reads back empty - do not let that overwrite it.
-                    var srPicked = page.querySelector('#SrLevel').value;
-                    if (srPicked) { config.SrLevel = srPicked; }
-                    config.DeblurLevel = page.querySelector('#DeblurLevel').value;
-                    config.DeblurAllowed = page.querySelector('#DeblurAllowed').checked;
-                    config.RefineLevel = page.querySelector('#RefineLevel').value;
-                    config.RefineAllowed = page.querySelector('#RefineAllowed').checked;
-                    config.ChromaLevel = page.querySelector('#ChromaLevel').value;
-                    config.ChromaAllowed = page.querySelector('#ChromaAllowed').checked;
-                    config.NeuralLevel = page.querySelector('#NeuralLevel').value;
-                    config.NeuralAllowed = page.querySelector('#NeuralAllowed').checked;
-                    config.GameLevel = page.querySelector('#GameLevel').value;
-                    config.GameJitter = page.querySelector('#GameJitter').value;
-                    config.GameDepth = page.querySelector('#GameDepth').value;
-                    config.GameReactive = page.querySelector('#GameReactive').value;
-                    config.GameAllowed = page.querySelector('#GameAllowed').checked;
-                    config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
-                    config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
-                    config.DeblockLevel = page.querySelector('#DeblockLevel').value;
-                    config.DeblockAllowed = page.querySelector('#DeblockAllowed').checked;
-                    config.Deband = page.querySelector('#Deband').checked;
-                    config.DebandThreshold = parseInt(page.querySelector('#DebandThreshold').value, 10);
-                    config.DebandGrain = parseInt(page.querySelector('#DebandGrain').value, 10);
-                    // The select is filled asynchronously, so a save during that window reads empty.
-                    // Keep the stored kernel rather than writing a blank one over it.
-                    var kernelPicked = page.querySelector('#Upscaler').value;
-                    if (kernelPicked) { config.Upscaler = kernelPicked; }
-                    config.MinScaleFactor = parseFloat(page.querySelector('#MinScaleFactor').value);
-                    config.SrMinScaleFactor = parseFloat(page.querySelector('#SrMinScaleFactor').value);
-                    config.MaxSourceHeight = parseInt(page.querySelector('#MaxSourceHeight').value, 10);
-                    config.MaxConcurrent = parseInt(page.querySelector('#MaxConcurrent').value, 10);
-                    config.MaxConcurrentSwaps = parseInt(page.querySelector('#MaxConcurrentSwaps').value, 10);
-                    config.GpuResidentEncode = page.querySelector('#GpuResidentEncode').checked;
-                    config.RequireClientOptIn = page.querySelector('#RequireClientOptIn').checked;
-                    config.ForceTranscode = page.querySelector('#ForceTranscode').checked;
-                    config.ForceTranscodeForDirectPlay = page.querySelector('#ForceTranscodeForDirectPlay').checked;
-                    config.Encoder = page.querySelector('#Encoder').value;
-                    config.ShaderDirectory = page.querySelector('#ShaderDirectory').value;
-                    config.ShaderCacheDirectory = page.querySelector('#ShaderCacheDirectory').value;
-                    config.NeuralModelDirectory = page.querySelector('#NeuralModelDirectory').value;
-                    config.DlssRuntimeDirectory = page.querySelector('#DlssRuntimeDirectory').value;
-                    config.DepthModelPath = page.querySelector('#DepthModelPath').value;
-                    config.RtxDlppDllPath = page.querySelector('#RtxDlppDllPath').value;
-                    config.RtxVsrDllPath = page.querySelector('#RtxVsrDllPath').value;
+                    collectConfig(page, config);
                     ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
                         Dashboard.processPluginConfigurationUpdateResult(result);
                         loadStatus(page);
@@ -1139,6 +894,7 @@
                     var c0 = document.createElement('td');
                     var cb = document.createElement('input');
                     cb.type = 'checkbox';
+                    cb.setAttribute('aria-label', 'Select tag ' + r.name);
                     cb.checked = selected.has(r.name);
                     cb.addEventListener('change', function () {
                         if (cb.checked) { selected.set(r.name, r.count); } else { selected.delete(r.name); }
