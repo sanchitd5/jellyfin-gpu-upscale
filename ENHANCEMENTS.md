@@ -342,10 +342,11 @@ viewer builds their own one-tap tag groups in the client. A group is a name plus
 or a tag PREFIX (every tag starting with it is a chip, labelled with the rest of its name). Picked chips
 of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
 
-- Where: a chip row above the grid on the modern library tabs (not artists / studios, TV, or without
-  groups: with none it is one small "+ Add quick filters" chip), and a section per group in the search
-  Sort & filter sheet (the picks are active-filter chips; each group counts once in the badge). The row
-  ends in a ⚙ chip, and the More sheet has a "Quick filters" row, both opening the editor in the shared sheet.
+- Where: the library Filter popover on the modern library tabs (not artists / studios or TV; see "In the
+  filter menus" below), and a section per group in the search Sort & filter sheet (the picks are
+  active-filter chips; each group counts once in the badge). Groups are not drawn above the grid: the row
+  there holds only the Date chip. The popover ends in "⚙ Edit quick filters" ("+ Add quick filters" with no
+  groups), and the More sheet has a "Quick filters" row, both opening the editor in the shared sheet.
 - Editor: add, rename, reorder and remove groups; tags are found with a search box answered by the
   server's tag window (`jpTagQuery`, 20 at a time), never the whole list; a prefix shows a live preview of
   the tags that start with it. Saved on Save only. At most 10 groups, 30 tags each, 14,000 stored characters.
@@ -363,14 +364,15 @@ of a group are OR-ed, groups are AND-ed, a group with no pick adds nothing.
 - The one source registered (bootstrap, "smart tag groups") is the smart categories below, through
   `getSmartGroups(parentId)` in `controller/smart-tags.js`.
 - **In the filter menus.** The library Filter popover (a bottom sheet on phones) gets one collapsible
-  `<details>` section per group, same order as the chip row (own groups, then suggested, "auto" tagged),
+  `<details>` section per group (own groups, then suggested, "auto" tagged),
   header = name + count of picks (`web/src/view/library-filter-groups.js`, called from
   `view/library-filter-panel.js`; pure `model/quick-tags-menu.js`). Body = tag chips (`aria-pressed`, 44 px);
   a group with 12+ chips gets a search box, more than 20 shows the first 20 plus every picked chip and
-  "Show more". A tick writes the same `a` marker in `Filters.Tags` as the chip row (`updateTagState`), so the
-  request is the identical `jpTagAnyOf`, the chip row is nudged (`refreshQuickTags`), and Reset, the filter
-  dot, persistence and infinite scroll are the stock ones; menu and chip row are one state. No groups, groups
-  still loading, tabs with their own endpoint, no tab context or TV: no section. The search page's Sort &
+  "Show more". A tick writes the `a` marker in `Filters.Tags` (`updateTagState`), so the request is
+  `jpTagAnyOf`, the row above the grid is nudged (`refreshQuickTags`, it prunes stale picks), and Reset, the
+  filter dot, persistence and infinite scroll are the stock ones. The edit entry closes the popover (Escape)
+  and then opens the editor. Groups still loading: only the edit entry. Tabs with their own endpoint, no tab
+  context or TV: nothing. The search page's Sort &
   filter sheet already lists suggested groups with the viewer's own (`loadVisible`), so nothing was added there.
 
 **Smart tag categories** (`src/SmartTagCategories.cs` pure algorithm, `src/SmartTagsController.cs` route +

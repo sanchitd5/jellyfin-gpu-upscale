@@ -1,18 +1,19 @@
 import { log } from '../lib/log.js';
 import { el } from '../lib/dom.js';
 import { parseTags } from '../model/library-filter-marks.js';
-import { chipsFor, isSelected, toggleSelection, selectedIn, pruneSelection } from '../model/quick-tags.js';
+import { pruneSelection } from '../model/quick-tags.js';
 import { findFilterContext, readFilters, updateTagState } from '../controller/library-filters.js';
-import { groupsFor, namesNow, namesFresh, resolveNames, onGroupsChanged } from '../controller/quick-tags.js';
-import { openQuickTagsEditor } from './quick-tags-editor.js';
+import { groupsFor, onGroupsChanged } from '../controller/quick-tags.js';
 import { openDateSheet } from './date-sheet.js';
 import { encode as encodeDate, decode as decodeDate, labelOf } from '../model/date-added.js';
 
 /*
- * QUICK TAG CHIPS ABOVE A LIBRARY LIST (the search page has its own section in the Sort & filter sheet).
+ * DATE CHIP ABOVE A LIBRARY LIST, AND THE KEEPER OF QUICK TAG PICKS (the search page has its own section in
+ * the Sort & filter sheet).
  *
- * One row per configured group, drawn just before the page's `.itemsContainer.vertical-wrap`. A chip is
- * a toggle (aria-pressed); picked chips of a group are OR-ed, groups are AND-ed (model/quick-tags.js).
+ * The row, drawn just before the page's `.itemsContainer.vertical-wrap`, holds only the Date-added chip.
+ * Quick tag groups are picked in the library Filter popover (view/library-filter-groups.js); picked chips of
+ * a group are OR-ed, groups are AND-ed (model/quick-tags.js). This module still prunes stale picks.
  * The picks are stored the way every other extra library filter is: as marker entries in the tab's own
  * Filters.Tags (model/library-filter-marks.js, kind `a`), written through the tab's settings setter
  * (controller/library-filters.js updateTagState). So React, the persisted copy, the React Query key and
@@ -79,83 +80,37 @@ function removeRow() {
     }
 }
 
-function chipsOfGroup(group, selected) {
-    return chipsFor(group, namesNow(group), selected);
-}
-
-function render(row, ctx, groups, picks, added) {
-    var sig = ctx.viewType + '|' + ctx.parentId + '|' + (added ? labelOf(added) : '-') + '|' + groups.length + '|' + groups.map(function (g) {
-        return (g.auto ? 'A:' : '') + g.name + '=' + chipsOfGroup(g, selectedIn(picks, g.name)).map(function (c) {
-            return c.tag + (isSelected(picks, g.name, c.tag) ? '*' : '');
-        }).join(',');
-    }).join(';');
+/*
+ * The row holds the Date chip only. Quick tag groups live in the library Filter popover
+ * (view/library-filter-groups.js), together with the entry that edits them.
+ */
+function render(row, ctx, added) {
+    var sig = ctx.viewType + '|' + ctx.parentId + '|' + (added ? labelOf(added) : '-');
     if (row.getAttribute('data-sig') === sig) {
         return;
     }
 
     row.setAttribute('data-sig', sig);
     row.textContent = '';
-    groups.forEach(function (g) {
-        var chips = chipsOfGroup(g, selectedIn(picks, g.name));
-        if (!chips.length) {
-            return;
-        }
+    var box = el('div', 'jpQtGroup');
+    var line = el('div', 'jpQtChips');
+    box.appendChild(line);
+    row.appendChild(box);
 
-        var box = el('div', 'jpQtGroup');
-        box.setAttribute('role', 'group');
-        box.setAttribute('aria-label', g.auto ? g.name + ', suggested' : g.name);
-        var title = el('span', 'jpQtName', g.name);
-        if (g.auto) {
-            // Marked, so a suggestion is never mistaken for one the viewer made (pin it in the editor to own it).
-            title.appendChild(el('small', 'jpQtAuto', ' auto'));
-        }
-
-        box.appendChild(title);
-        var line = el('div', 'jpQtChips');
-        chips.forEach(function (c) {
-            var b = el('button', 'jpQtChip', c.label);
-            b.type = 'button';
-            b.setAttribute('aria-pressed', isSelected(picks, g.name, c.tag) ? 'true' : 'false');
-            b.setAttribute('data-group', g.name);
-            b.setAttribute('data-tag', c.tag);
-            line.appendChild(b);
-        });
-        box.appendChild(line);
-        row.appendChild(box);
-    });
-
-    // The Date chip gets its own line ahead of every group: inside a group's line it read as one of
-    // that group's tags. With a range set it carries its label and a clear button.
-    var dateBox = el('div', 'jpQtGroup');
-    var first = el('div', 'jpQtChips');
-    dateBox.appendChild(first);
-    row.insertBefore(dateBox, row.firstChild);
-
-    // The edit entry: a small chip at the end of the last group's line, or beside the Date chip with no groups.
-    var lines = row.querySelectorAll('.jpQtChips');
-    var host = lines[lines.length - 1];
-
+    // With a range set the chip carries its label and a clear button.
     var date = el('button', 'jpQtChip jpQtDate', added ? labelOf(added) : 'Date');
     date.type = 'button';
     date.setAttribute('data-date', '1');
     date.setAttribute('aria-pressed', added ? 'true' : 'false');
     date.setAttribute('aria-label', added ? 'Date added: ' + labelOf(added) : 'Filter by date added');
-    var lead = [date];
+    line.appendChild(date);
     if (added) {
-        var clear = el('button', 'jpQtChip jpQtDateX', '✕');
+        var clear = el('button', 'jpQtChip jpQtDateX', '\u2715');
         clear.type = 'button';
         clear.setAttribute('data-date-clear', '1');
         clear.setAttribute('aria-label', 'Clear date filter');
-        lead.push(clear);
+        line.appendChild(clear);
     }
-
-    lead.forEach(function (n) { first.appendChild(n); });
-
-    var edit = el('button', 'jpQtChip jpQtEdit', groups.length ? '⚙' : '+ Add quick filters');
-    edit.type = 'button';
-    edit.setAttribute('data-edit', '1');
-    edit.setAttribute('aria-label', groups.length ? 'Edit quick filters' : 'Add quick filters');
-    host.appendChild(edit);
 }
 
 function onClick(e) {
@@ -184,26 +139,6 @@ function onClick(e) {
 
             return;
         }
-
-        if (b.getAttribute('data-edit')) {
-            var at = tabContext();
-            openQuickTagsEditor(b, function () { schedule(0); }, at ? at.parentId : '');
-            return;
-        }
-
-        var ctx = tabContext();
-        if (!ctx) {
-            return;
-        }
-
-        var group = b.getAttribute('data-group');
-        var tag = b.getAttribute('data-tag');
-        var on = b.getAttribute('aria-pressed') !== 'true';
-        // Immediate feedback; the stored state (and so the request) follows through the tab's own setter.
-        b.setAttribute('aria-pressed', on ? 'true' : 'false');
-        updateTagState(ctx, function (p) { p.any = toggleSelection(p.any, group, tag, on); });
-        schedule(0);
-        setTimeout(function () { schedule(0); }, 150);
     } catch (err) {
         log('quick tag chip click failed', err);
     }
@@ -243,12 +178,7 @@ function scan() {
         row.removeAttribute('data-sig');
     }
 
-    groups.forEach(function (g) {
-        if (!g.tags.length && !namesFresh(g)) {
-            resolveNames(g).then(function () { schedule(0); });
-        }
-    });
-    render(row, ctx, groups, picks, added);
+    render(row, ctx, added);
 }
 
 /* At most one scan per 250 ms; a burst of React mutations costs one. */

@@ -11,7 +11,7 @@ import {
 
 /*
  * THE "QUICK FILTERS" EDITOR: the viewer's own tag-filter groups (see model/quick-tags.js). Opened from the
- * chip row above a library list, the search Sort & filter sheet and the More sheet; shown in the shared
+ * library Filter popover, the search Sort & filter sheet and the More sheet; shown in the shared
  * sheet (view/sheet.js). It edits a draft; Save stores it (controller/quick-tags.js saveGroups, which
  * prefs-sync mirrors to the server), Cancel, Back and the backdrop discard it.
  *

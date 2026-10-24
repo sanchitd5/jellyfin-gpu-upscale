@@ -6,23 +6,24 @@ import { menuChips, pickedLabel } from '../model/quick-tags-menu.js';
 import { readFilters, updateTagState } from '../controller/library-filters.js';
 import { groupsFor, namesNow, namesFresh, resolveNames, onGroupsChanged } from '../controller/quick-tags.js';
 import { refreshQuickTags } from './quick-tags.js';
+import { openQuickTagsEditor } from './quick-tags-editor.js';
 
 /*
  * QUICK TAG GROUPS INSIDE THE LIBRARY FILTER MENU (the stock Filter popover, a bottom sheet on phones).
  *
- * One collapsible section per group, in the order of the chip row above the grid: the viewer's own groups,
- * then the suggested ("auto") ones. The header carries the group name, "auto" for a suggestion and a count of
+ * The only place library tabs show quick tag groups. One collapsible section per group: the viewer's own
+ * groups, then the suggested ("auto") ones, then an "Edit quick filters" / "+ Add quick filters" entry. The header carries the group name, "auto" for a suggestion and a count of
  * what is picked; the body has tag chips (aria-pressed), a search box for a long group and "Show more".
  * A prefix group's chips are labelled by what follows the prefix (model/quick-tags.js chipsFor).
  *
- * The picks are NOT stored here. A chip writes the same `jpTagAnyOf` marker in the tab's Filters.Tags that the
- * chip row writes (controller/library-filters.js updateTagState, model/library-filter-marks.js kind `a`), so
- * the two views are one state: Reset, the filter dot, persistence and infinite scroll are the stock ones, and
- * the request is the same OR-within-a-group, AND-across-groups `jpTagAnyOf`. After a tick the chip row is
- * nudged (refreshQuickTags); the menu itself re-reads the state on every sync.
+ * The picks are NOT stored here. A chip writes a `jpTagAnyOf` marker in the tab's Filters.Tags
+ * (controller/library-filters.js updateTagState, model/library-filter-marks.js kind `a`): Reset, the filter
+ * dot, persistence and infinite scroll are the stock ones, and the request is the OR-within-a-group,
+ * AND-across-groups `jpTagAnyOf`. After a tick the row above the grid (view/quick-tags.js, which prunes stale
+ * picks) is nudged (refreshQuickTags); the menu itself re-reads the state on every sync.
  *
- * Fail soft: no groups, a missing categories route, an unproved tab context or groups that are still loading
- * add no section and touch nothing. Not drawn on the TV layout (the panel is not installed there).
+ * Fail soft: no groups, a missing categories route or groups still loading leave only the edit entry. Not
+ * drawn on the TV layout (the panel is not installed there).
  */
 
 var ROOT_CLASS = 'jpFg';
@@ -174,6 +175,18 @@ function onClick(e) {
             return;
         }
 
+        if (t && t.closest('[data-edit]')) {
+            e.stopPropagation();
+            var ectx = e.currentTarget.__jpCtx ? e.currentTarget.__jpCtx() : null;
+            // Close the popover first (MUI's Modal closes on Escape from inside it), then open the editor
+            // on its own: two stacked modals fight over focus.
+            t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            setTimeout(function () {
+                openQuickTagsEditor(null, function () { resync(); }, ectx ? ectx.parentId : '');
+            }, 150);
+            return;
+        }
+
         var b = t && t.closest('.jpFgChip[data-tag]');
         var ctx = b && e.currentTarget.__jpCtx ? e.currentTarget.__jpCtx() : null;
         if (!b || !ctx) {
@@ -215,13 +228,6 @@ export function syncGroupSections(paper, ctx, getCtx, again) {
     var host = paper.querySelector(':scope > .' + ROOT_CLASS);
     var picks = pickedTags(ctx);
     var usable = groups.filter(function (g) { return chipsFor(g, namesNow(g), selectedIn(picks, g.name)).length > 0; });
-    if (!usable.length) {
-        if (host) {
-            host.remove();
-        }
-
-        return;
-    }
 
     if (!host) {
         host = el('div', ROOT_CLASS);
@@ -236,8 +242,22 @@ export function syncGroupSections(paper, ctx, getCtx, again) {
         paper.appendChild(host);
     }
 
+    // The edit entry closes the list: "Edit quick filters" with groups, "+ Add quick filters" without.
+    var label = usable.length ? '⚙ Edit quick filters' : '+ Add quick filters';
+    var edit = host.querySelector(':scope > .jpFgEdit');
+    if (!edit) {
+        edit = el('button', 'jpFgChip jpFgMore jpFgEdit');
+        edit.type = 'button';
+        edit.setAttribute('data-edit', '1');
+        host.appendChild(edit);
+    }
+
+    if (edit.textContent !== label) {
+        edit.textContent = label;
+    }
+
     var byName = {};
-    Array.prototype.forEach.call(host.children, function (s) { byName[s.getAttribute('data-group')] = s; });
+    Array.prototype.forEach.call(host.querySelectorAll(':scope > .jpFgSec'), function (s) { byName[s.getAttribute('data-group')] = s; });
     var keep = {};
     usable.forEach(function (g, i) {
         keep[g.name] = true;
