@@ -16,7 +16,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="Enabled" />
+                        <input is="emby-checkbox" type="checkbox" id="Enabled" data-config="Enabled" data-kind="bool" data-default="true" />
                         <span>Enable upscaling</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -25,17 +25,17 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="TargetHeight" label="Target height (px)" min="240" max="4320" required />
+                    <input is="emby-input" type="number" id="TargetHeight" data-config="TargetHeight" data-kind="int" data-default="1080" label="Target height (px)" min="240" max="4320" required />
                     <div class="fieldDescription">Height to upscale to. Width follows the source aspect ratio.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxTargetHeight" label="Maximum target height (px)" min="240" max="4320" required />
+                    <input is="emby-input" type="number" id="MaxTargetHeight" data-config="MaxTargetHeight" data-kind="int" data-default="2160" label="Maximum target height (px)" min="240" max="4320" required />
                     <div class="fieldDescription">Hard ceiling applied to the target height.</div>
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="SrLevel" label="Super-resolution shader (default)">
+                    <select is="emby-select" id="SrLevel" data-config="SrLevel" data-kind="select" data-default="fsrcnnx" label="Super-resolution shader (default)">
                         <option value="off">Off - plain ewa_lanczos scaling</option>
                         <option value="fsrcnnx">FSRCNNX - FSRCNNX x2 8-0-4-1</option>
                         <option value="fsrcnnx-heavy">FSRCNNX heavy - FSRCNNX x2 16-0-4-1</option>
@@ -76,7 +76,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DeblurAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="DeblurAllowed" data-config="DeblurAllowed" data-kind="bool" data-default="true" />
                         <span>Allow unblur (sharpening)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -85,7 +85,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="DeblurLevel" label="Unblur level (default)">
+                    <select is="emby-select" id="DeblurLevel" data-config="DeblurLevel" data-kind="select" data-default="off" label="Unblur level (default)">
                         <option value="off">Off</option>
                         <option value="low">Gentle - RCAS 2.0</option>
                         <option value="medium">Medium - RCAS 1.7</option>
@@ -115,7 +115,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DenoiseAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="DenoiseAllowed" data-config="DenoiseAllowed" data-kind="bool" data-default="true" />
                         <span>Allow denoise</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -124,7 +124,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="RefineLevel" label="Post-scale refinement (default)">
+                    <select is="emby-select" id="RefineLevel" data-config="RefineLevel" data-kind="select" data-default="off" label="Post-scale refinement (default)">
                         <option value="off">Off</option>
                         <option value="ssimsuperres">SSimSuperRes - adjust the scaled image to match the source when downscaled (GPU light, ~9%)</option>
                     </select>
@@ -150,7 +150,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="RefineAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="RefineAllowed" data-config="RefineAllowed" data-kind="bool" data-default="true" />
                         <span>Allow post-scale refinement</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -159,7 +159,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="ChromaLevel" label="Chroma upscaling (default)">
+                    <select is="emby-select" id="ChromaLevel" data-config="ChromaLevel" data-kind="select" data-default="off" label="Chroma upscaling (default)">
                         <option value="off">Off</option>
                         <option value="krigbilateral">KrigBilateral - reconstruct 4:2:0 chroma guided by the luma plane (GPU moderate, ~24%)</option>
                     </select>
@@ -176,7 +176,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="ChromaAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="ChromaAllowed" data-config="ChromaAllowed" data-kind="bool" data-default="true" />
                         <span>Allow chroma upscaling</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -185,7 +185,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="NeuralLevel" label="Neural super-resolution (default)">
+                    <select is="emby-select" id="NeuralLevel" data-config="NeuralLevel" data-kind="select" data-default="off" label="Neural super-resolution (default)">
                         <option value="off">Off</option>
                         <option value="realesr-anime-x2">Real-ESRGAN compact x2, anime video (advanced, far below realtime)</option>
                         <option value="realesr-anime-x4">Real-ESRGAN compact x4, anime video v3 (advanced, far below realtime)</option>
@@ -222,7 +222,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="NeuralAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="NeuralAllowed" data-config="NeuralAllowed" data-kind="bool" data-default="true" />
                         <span>Allow neural super-resolution</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -232,7 +232,7 @@
 
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="GameLevel" label="Game temporal upscaler (default)">
+                    <select is="emby-select" id="GameLevel" data-config="GameLevel" data-kind="select" data-default="off" label="Game temporal upscaler (default)">
                         <option value="off">Off</option>
                         <option value="fsr2">FSR2 (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
                         <option value="dlss">DLSS SR (degraded: synthesised motion vectors, estimated depth, no true jitter)</option>
@@ -278,7 +278,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="GameJitter" label="Game upscaler: jitter source">
+                    <select is="emby-select" id="GameJitter" data-config="GameJitter" data-kind="select" data-default="measured" label="Game upscaler: jitter source">
                         <option value="measured">Measured global sub-pixel offset (phase correlation)</option>
                         <option value="cancel">Measured, and declared present in the motion vectors</option>
                         <option value="zero">None</option>
@@ -292,7 +292,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="GameDepth" label="Game upscaler: depth source">
+                    <select is="emby-select" id="GameDepth" data-config="GameDepth" data-kind="select" data-default="model" label="Game upscaler: depth source">
                         <option value="model">Monocular estimate</option>
                         <option value="model-stable">Monocular estimate, flow-warped and smoothed</option>
                         <option value="flat">Flat plane</option>
@@ -309,7 +309,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="GameReactive" label="Game upscaler: reactive mask">
+                    <select is="emby-select" id="GameReactive" data-config="GameReactive" data-kind="select" data-default="flow" label="Game upscaler: reactive mask">
                         <option value="flow">Forward/backward flow inconsistency</option>
                         <option value="none">None</option>
                     </select>
@@ -323,7 +323,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="GameAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="GameAllowed" data-config="GameAllowed" data-kind="bool" data-default="true" />
                         <span>Allow game temporal upscalers</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -332,7 +332,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="DenoiseLevel" label="Denoise (default)">
+                    <select is="emby-select" id="DenoiseLevel" data-config="DenoiseLevel" data-kind="select" data-default="off" label="Denoise (default)">
                         <option value="off">Off</option>
                         <option value="light">Light - atadenoise (temporal, cheap)</option>
                         <option value="strong">Strong - nlmeans (spatial, slower)</option>
@@ -380,7 +380,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DeblockAllowed" />
+                        <input is="emby-checkbox" type="checkbox" id="DeblockAllowed" data-config="DeblockAllowed" data-kind="bool" data-default="true" />
                         <span>Allow deblock</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -389,7 +389,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="DeblockLevel" label="Deblock (default)">
+                    <select is="emby-select" id="DeblockLevel" data-config="DeblockLevel" data-kind="select" data-default="off" label="Deblock (default)">
                         <option value="off">Off</option>
                         <option value="light">Light - deblock, gentle</option>
                         <option value="strong">Strong - deblock, harder</option>
@@ -419,7 +419,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="Deband" />
+                        <input is="emby-checkbox" type="checkbox" id="Deband" data-config="Deband" data-kind="bool" data-default="true" />
                         <span>Deband</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -430,7 +430,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="DebandThreshold" label="Deband threshold" min="0" max="255" step="1" required />
+                    <input is="emby-input" type="number" id="DebandThreshold" data-config="DebandThreshold" data-kind="int" data-default="3" label="Deband threshold" min="0" max="255" step="1" required />
                     <div class="fieldDescription">
                         How hard debanding cuts. Higher smooths more banding, and more real gradient
                         with it. Default: 3.
@@ -438,7 +438,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="DebandGrain" label="Deband grain" min="0" max="255" step="1" required />
+                    <input is="emby-input" type="number" id="DebandGrain" data-config="DebandGrain" data-kind="int" data-default="0" label="Deband grain" min="0" max="255" step="1" required />
                     <div class="fieldDescription">
                         Grain added back after debanding. 0 on purpose: libplacebo's own default of 6
                         dithers synthetic grain over the picture, which is wrong for this content.
@@ -446,7 +446,7 @@
                 </div>
 
                 <div class="selectContainer">
-                    <select is="emby-select" id="Upscaler" label="Upscaler kernel"></select>
+                    <select is="emby-select" id="Upscaler" data-config="Upscaler" data-kind="select" data-default="ewa_lanczos" label="Upscaler kernel"></select>
                     <div class="fieldDescription">
                         libplacebo scaling kernel used underneath the shaders. Default: ewa_lanczos.
                         The list comes from the server, because a kernel name libplacebo does not know
@@ -455,12 +455,12 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MinScaleFactor" label="Minimum scale factor" step="0.01" min="1" max="8" required />
+                    <input is="emby-input" type="number" id="MinScaleFactor" data-config="MinScaleFactor" data-kind="float" data-default="1.15" label="Minimum scale factor" step="0.01" min="1" max="8" required />
                     <div class="fieldDescription">Skip unless the target height is at least this multiple of the source height.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="SrMinScaleFactor" label="Super-resolution minimum ratio" step="0.01" min="0" max="8" required />
+                    <input is="emby-input" type="number" id="SrMinScaleFactor" data-config="SrMinScaleFactor" data-kind="float" data-default="1.6" label="Super-resolution minimum ratio" step="0.01" min="0" max="8" required />
                     <div class="fieldDescription">
                         Run the super-resolution network only at or above this ratio. Below it the upscale
                         still happens, with plain scaling plus whatever unblur is selected, and the network's
@@ -478,7 +478,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxSourceHeight" label="Maximum source height (px)" min="240" max="4320" required />
+                    <input is="emby-input" type="number" id="MaxSourceHeight" data-config="MaxSourceHeight" data-kind="int" data-default="1440" label="Maximum source height (px)" min="240" max="4320" required />
                     <div class="fieldDescription">Never upscale sources taller than this.</div>
                 </div>
 
@@ -491,12 +491,12 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxConcurrent" label="Maximum concurrent upscales" min="0" max="16" required />
+                    <input is="emby-input" type="number" id="MaxConcurrent" data-config="MaxConcurrent" data-kind="int" data-default="4" label="Maximum concurrent upscales" min="0" max="16" required />
                     <div class="fieldDescription">Past this many live upscaling transcodes, new sessions use the stock path.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxConcurrentSwaps" label="Maximum concurrent live-apply swaps" min="0" max="16" required />
+                    <input is="emby-input" type="number" id="MaxConcurrentSwaps" data-config="MaxConcurrentSwaps" data-kind="int" data-default="4" label="Maximum concurrent live-apply swaps" min="0" max="16" required />
                     <div class="fieldDescription">A mid-playback setting change briefly runs a second ffmpeg process (the A/B swap) so the
                         old stream keeps serving until the new one is ready. Separate from the cap above, which it also counts against
                         while it runs. Past this many at once, a live-apply change falls back to today's tear-down-and-restart.</div>
@@ -504,7 +504,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="GpuResidentEncode" />
+                        <input is="emby-checkbox" type="checkbox" id="GpuResidentEncode" data-config="GpuResidentEncode" data-kind="bool" data-default="true" />
                         <span>Hand frames to NVENC without leaving the GPU (experimental)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -524,7 +524,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="RequireClientOptIn" />
+                        <input is="emby-checkbox" type="checkbox" id="RequireClientOptIn" data-config="RequireClientOptIn" data-kind="bool" data-default="false" />
                         <span>Only upscale when the viewer asks for it</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -539,7 +539,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="ForceTranscode" />
+                        <input is="emby-checkbox" type="checkbox" id="ForceTranscode" data-config="ForceTranscode" data-kind="bool" data-default="false" />
                         <span>Upscale direct streams too (force transcode)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -549,7 +549,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="ForceTranscodeForDirectPlay" />
+                        <input is="emby-checkbox" type="checkbox" id="ForceTranscodeForDirectPlay" data-config="ForceTranscodeForDirectPlay" data-kind="bool" data-default="false" />
                         <span>Enhance direct play too (stop clients playing files directly)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -573,7 +573,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="Encoder" label="Encoder" />
+                    <input is="emby-input" type="text" id="Encoder" data-config="Encoder" data-kind="text" data-default="hevc_nvenc" label="Encoder" />
                     <div class="fieldDescription">
                         The video encoder used for any transcode this plugin enhances, including one it forces
                         out of a stream copy. Leave blank or set to <code>auto</code> to follow whatever codec
@@ -594,7 +594,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="ShaderDirectory" label="Shader directory" />
+                    <input is="emby-input" type="text" id="ShaderDirectory" data-config="ShaderDirectory" data-kind="path" data-default="/usr/share/jellyfin-shaders" label="Shader directory" />
                     <div class="fieldDescription">
                         Where the shader files live. Default:
                         <code>/usr/share/jellyfin-shaders</code>. Point this at a directory without the
@@ -604,7 +604,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="ShaderCacheDirectory" label="Shader cache directory" />
+                    <input is="emby-input" type="text" id="ShaderCacheDirectory" data-config="ShaderCacheDirectory" data-kind="path" data-default="/var/cache/jellyfin/jellyfin-plus-shaders" label="Shader cache directory" />
                     <div class="fieldDescription">
                         Where composed shaders are cached. Default:
                         <code>/var/cache/jellyfin/jellyfin-plus-shaders</code>. It must be writable by the
@@ -613,7 +613,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="NeuralModelDirectory" label="Neural model directory" />
+                    <input is="emby-input" type="text" id="NeuralModelDirectory" data-config="NeuralModelDirectory" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/models" label="Neural model directory" />
                     <div class="fieldDescription">
                         Where the Real-ESRGAN ONNX weights live. Default:
                         <code>/usr/lib/jellyfin-ffmpeg-oidn/models</code>. The weights are not shipped
@@ -624,7 +624,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="DlssRuntimeDirectory" label="DLSS runtime directory" />
+                    <input is="emby-input" type="text" id="DlssRuntimeDirectory" data-config="DlssRuntimeDirectory" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/dlss" label="DLSS runtime directory" />
                     <div class="fieldDescription">
                         Where the NVIDIA DLSS runtime lives. Default:
                         <code>/usr/lib/jellyfin-ffmpeg-oidn/dlss</code>. It is proprietary and nothing
@@ -635,7 +635,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="DepthModelPath" label="Depth model path" />
+                    <input is="emby-input" type="text" id="DepthModelPath" data-config="DepthModelPath" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx" label="Depth model path" />
                     <div class="fieldDescription">
                         The monocular depth ONNX model the game upscalers are fed instead of a real depth
                         buffer. Default:
@@ -645,7 +645,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="RtxDlppDllPath" label="RTX DLPP DLL path" />
+                    <input is="emby-input" type="text" id="RtxDlppDllPath" data-config="RtxDlppDllPath" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll" label="RTX DLPP DLL path" />
                     <div class="fieldDescription">
                         Where <code>nvdlppx.dll</code> lives, for the <code>dlpp-1</code>..<code>dlpp-4</code>
                         neural levels. Default:
@@ -656,7 +656,7 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="RtxVsrDllPath" label="RTX VSR DLL path" />
+                    <input is="emby-input" type="text" id="RtxVsrDllPath" data-config="RtxVsrDllPath" data-kind="path" data-default="/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll" label="RTX VSR DLL path" />
                     <div class="fieldDescription">
                         Where <code>nvaivpx.dll</code> lives, for the <code>vsr-rtcuda</code> neural level - a
                         fast GPU resample, not a network. Default:
@@ -875,67 +875,60 @@
                 });
             }
 
+            // Every control carrying data-config is loaded and saved here, so a setting is markup-only:
+            // data-config is the PluginConfiguration property, data-kind one of bool/int/float/text/
+            // path/select, data-default the value shown when the stored one is missing (it equals the
+            // default in PluginConfiguration.cs). path differs from text only in that a blank stored
+            // value also shows the default; a blank Encoder is meaningful (auto), a blank path is not.
+            function configFields(page) {
+                return Array.prototype.slice.call(page.querySelectorAll('[data-config]'));
+            }
+            function applyConfig(page, config) {
+                configFields(page).forEach(function (el) {
+                    var name = el.getAttribute('data-config');
+                    var kind = el.getAttribute('data-kind');
+                    var def = el.getAttribute('data-default');
+                    var v = config[name];
+                    if (kind === 'bool') {
+                        el.checked = v == null ? def === 'true' : !!v;
+                    } else if (kind === 'select') {
+                        // A legacy SrLevel name maps the way the server does. A value the select does
+                        // not list leaves it blank; saveConfig then keeps the stored one.
+                        if (name === 'SrLevel' && SR_ALIASES[v]) { v = SR_ALIASES[v]; }
+                        if (name !== 'Upscaler') { el.value = v || def; }
+                    } else if (kind === 'path') {
+                        el.value = v || def;
+                    } else {
+                        el.value = v == null ? def : v;
+                    }
+                });
+                // The kernel list comes from the server, so that select is filled asynchronously.
+                loadUpscalers(page, config.Upscaler || page.querySelector('#Upscaler').getAttribute('data-default'));
+            }
+            function collectConfig(page, config) {
+                configFields(page).forEach(function (el) {
+                    var name = el.getAttribute('data-config');
+                    var kind = el.getAttribute('data-kind');
+                    if (kind === 'bool') {
+                        config[name] = el.checked;
+                    } else if (kind === 'select') {
+                        // Blank means the stored value is not in the list (fsrcnnx-max, a retired
+                        // name) or the list is still loading: keep what is stored.
+                        if (el.value) { config[name] = el.value; }
+                    } else if (kind === 'int' || kind === 'float') {
+                        var n = kind === 'int' ? parseInt(el.value, 10) : parseFloat(el.value);
+                        if (!isNaN(n)) { config[name] = n; }
+                    } else {
+                        config[name] = el.value;
+                    }
+                });
+            }
+
             document.querySelector('#JellyfinPlusConfigPage').addEventListener('pageshow', function () {
                 var page = this;
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                    page.querySelector('#Enabled').checked = config.Enabled;
-                    page.querySelector('#TargetHeight').value = config.TargetHeight;
-                    page.querySelector('#MaxTargetHeight').value = config.MaxTargetHeight;
-                    // The select only lists the real level names. A persisted legacy name
-                    // (light / standard / max) would otherwise leave the control blank and then
-                    // save that blank back over a good setting, so map it the same way the server
-                    // does before assigning.
-                    page.querySelector('#SrLevel').value = SR_ALIASES[config.SrLevel] || config.SrLevel || 'anime4k-m';
-                    page.querySelector('#DeblurLevel').value = config.DeblurLevel || 'off';
-                    page.querySelector('#DeblurAllowed').checked = config.DeblurAllowed !== false;
-                    page.querySelector('#RefineLevel').value = config.RefineLevel || 'off';
-                    page.querySelector('#RefineAllowed').checked = config.RefineAllowed !== false;
-                    page.querySelector('#ChromaLevel').value = config.ChromaLevel || 'off';
-                    page.querySelector('#ChromaAllowed').checked = config.ChromaAllowed !== false;
-                    page.querySelector('#NeuralLevel').value = config.NeuralLevel || 'off';
-                    page.querySelector('#NeuralAllowed').checked = config.NeuralAllowed !== false;
-                    page.querySelector('#GameLevel').value = config.GameLevel || 'off';
-                    page.querySelector('#GameJitter').value = config.GameJitter || 'measured';
-                    page.querySelector('#GameDepth').value = config.GameDepth || 'model';
-                    page.querySelector('#GameReactive').value = config.GameReactive || 'flow';
-                    page.querySelector('#GameAllowed').checked = config.GameAllowed !== false;
-                    page.querySelector('#DenoiseLevel').value = config.DenoiseLevel || 'off';
-                    page.querySelector('#DenoiseAllowed').checked = config.DenoiseAllowed !== false;
-                    page.querySelector('#DeblockLevel').value = config.DeblockLevel || 'off';
-                    page.querySelector('#DeblockAllowed').checked = config.DeblockAllowed !== false;
-                    page.querySelector('#Deband').checked = config.Deband !== false;
-                    page.querySelector('#DebandThreshold').value =
-                        config.DebandThreshold == null ? 3 : config.DebandThreshold;
-                    page.querySelector('#DebandGrain').value =
-                        config.DebandGrain == null ? 0 : config.DebandGrain;
-                    loadUpscalers(page, config.Upscaler || 'ewa_lanczos');
-                    page.querySelector('#MinScaleFactor').value = config.MinScaleFactor;
-                    page.querySelector('#SrMinScaleFactor').value =
-                        config.SrMinScaleFactor == null ? 1.6 : config.SrMinScaleFactor;
-                    page.querySelector('#MaxSourceHeight').value = config.MaxSourceHeight;
-                    page.querySelector('#MaxConcurrent').value = config.MaxConcurrent;
-                    page.querySelector('#MaxConcurrentSwaps').value =
-                        config.MaxConcurrentSwaps == null ? 4 : config.MaxConcurrentSwaps;
-                    page.querySelector('#GpuResidentEncode').checked = config.GpuResidentEncode === true;
-                    page.querySelector('#RequireClientOptIn').checked = config.RequireClientOptIn;
-                    page.querySelector('#ForceTranscode').checked = config.ForceTranscode;
-                    page.querySelector('#ForceTranscodeForDirectPlay').checked = config.ForceTranscodeForDirectPlay === true;
-                    page.querySelector('#Encoder').value = config.Encoder;
-                    page.querySelector('#ShaderDirectory').value =
-                        config.ShaderDirectory || '/usr/share/jellyfin-shaders';
-                    page.querySelector('#ShaderCacheDirectory').value =
-                        config.ShaderCacheDirectory || '/var/cache/jellyfin/jellyfin-plus-shaders';
-                    page.querySelector('#NeuralModelDirectory').value =
-                        config.NeuralModelDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/models';
-                    page.querySelector('#DlssRuntimeDirectory').value =
-                        config.DlssRuntimeDirectory || '/usr/lib/jellyfin-ffmpeg-oidn/dlss';
-                    page.querySelector('#DepthModelPath').value =
-                        config.DepthModelPath || '/usr/lib/jellyfin-ffmpeg-oidn/models/depth_anything_v2_vits.onnx';
-                    page.querySelector('#RtxDlppDllPath').value =
-                        config.RtxDlppDllPath || '/usr/lib/jellyfin-ffmpeg-oidn/rtxdlpp/dll/nvdlppx.dll';
-                    page.querySelector('#RtxVsrDllPath').value =
-                        config.RtxVsrDllPath || '/usr/lib/jellyfin-ffmpeg-oidn/rtxvsr/dll/nvaivpx.dll';
+                    applyConfig(page, config);
                     updateThresholdExample(page);
                     Dashboard.hideLoadingMsg();
                 });
@@ -958,54 +951,7 @@
                 var page = document.querySelector('#JellyfinPlusConfigPage');
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                    config.Enabled = page.querySelector('#Enabled').checked;
-                    config.TargetHeight = parseInt(page.querySelector('#TargetHeight').value, 10);
-                    config.MaxTargetHeight = parseInt(page.querySelector('#MaxTargetHeight').value, 10);
-                    // fsrcnnx-max is a real level but is not offered in the select. If the config
-                    // holds it, the select reads back empty - do not let that overwrite it.
-                    var srPicked = page.querySelector('#SrLevel').value;
-                    if (srPicked) { config.SrLevel = srPicked; }
-                    config.DeblurLevel = page.querySelector('#DeblurLevel').value;
-                    config.DeblurAllowed = page.querySelector('#DeblurAllowed').checked;
-                    config.RefineLevel = page.querySelector('#RefineLevel').value;
-                    config.RefineAllowed = page.querySelector('#RefineAllowed').checked;
-                    config.ChromaLevel = page.querySelector('#ChromaLevel').value;
-                    config.ChromaAllowed = page.querySelector('#ChromaAllowed').checked;
-                    config.NeuralLevel = page.querySelector('#NeuralLevel').value;
-                    config.NeuralAllowed = page.querySelector('#NeuralAllowed').checked;
-                    config.GameLevel = page.querySelector('#GameLevel').value;
-                    config.GameJitter = page.querySelector('#GameJitter').value;
-                    config.GameDepth = page.querySelector('#GameDepth').value;
-                    config.GameReactive = page.querySelector('#GameReactive').value;
-                    config.GameAllowed = page.querySelector('#GameAllowed').checked;
-                    config.DenoiseLevel = page.querySelector('#DenoiseLevel').value;
-                    config.DenoiseAllowed = page.querySelector('#DenoiseAllowed').checked;
-                    config.DeblockLevel = page.querySelector('#DeblockLevel').value;
-                    config.DeblockAllowed = page.querySelector('#DeblockAllowed').checked;
-                    config.Deband = page.querySelector('#Deband').checked;
-                    config.DebandThreshold = parseInt(page.querySelector('#DebandThreshold').value, 10);
-                    config.DebandGrain = parseInt(page.querySelector('#DebandGrain').value, 10);
-                    // The select is filled asynchronously, so a save during that window reads empty.
-                    // Keep the stored kernel rather than writing a blank one over it.
-                    var kernelPicked = page.querySelector('#Upscaler').value;
-                    if (kernelPicked) { config.Upscaler = kernelPicked; }
-                    config.MinScaleFactor = parseFloat(page.querySelector('#MinScaleFactor').value);
-                    config.SrMinScaleFactor = parseFloat(page.querySelector('#SrMinScaleFactor').value);
-                    config.MaxSourceHeight = parseInt(page.querySelector('#MaxSourceHeight').value, 10);
-                    config.MaxConcurrent = parseInt(page.querySelector('#MaxConcurrent').value, 10);
-                    config.MaxConcurrentSwaps = parseInt(page.querySelector('#MaxConcurrentSwaps').value, 10);
-                    config.GpuResidentEncode = page.querySelector('#GpuResidentEncode').checked;
-                    config.RequireClientOptIn = page.querySelector('#RequireClientOptIn').checked;
-                    config.ForceTranscode = page.querySelector('#ForceTranscode').checked;
-                    config.ForceTranscodeForDirectPlay = page.querySelector('#ForceTranscodeForDirectPlay').checked;
-                    config.Encoder = page.querySelector('#Encoder').value;
-                    config.ShaderDirectory = page.querySelector('#ShaderDirectory').value;
-                    config.ShaderCacheDirectory = page.querySelector('#ShaderCacheDirectory').value;
-                    config.NeuralModelDirectory = page.querySelector('#NeuralModelDirectory').value;
-                    config.DlssRuntimeDirectory = page.querySelector('#DlssRuntimeDirectory').value;
-                    config.DepthModelPath = page.querySelector('#DepthModelPath').value;
-                    config.RtxDlppDllPath = page.querySelector('#RtxDlppDllPath').value;
-                    config.RtxVsrDllPath = page.querySelector('#RtxVsrDllPath').value;
+                    collectConfig(page, config);
                     ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
                         Dashboard.processPluginConfigurationUpdateResult(result);
                         loadStatus(page);
