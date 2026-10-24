@@ -10,25 +10,26 @@
         #JellyfinPlusConfigPage .jpTable { width: 100%; text-align: left; }
         #JellyfinPlusConfigPage .jpScroll { overflow-x: auto; }
         #JellyfinPlusConfigPage .jpHidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-        /* Collapsible sections: one bordered card per section, sub-sections nested inside. */
+        /* One page, tabs on top; each tab holds one or more cards, sub-groups are plain headed blocks. */
+        #JellyfinPlusConfigPage .jpTabs { display: flex; gap: 0.25em; overflow-x: auto; margin: 1.2em 0 1em;
+            border-bottom: 1px solid rgba(128,128,128,0.3); scrollbar-width: none; }
+        #JellyfinPlusConfigPage .jpTab { flex: 0 0 auto; background: none; border: 0; border-bottom: 2px solid transparent; color: inherit;
+            font: inherit; font-weight: 500; padding: 0.7em 1em; margin-bottom: -1px; cursor: pointer; opacity: 0.65; }
+        #JellyfinPlusConfigPage .jpTab:hover { opacity: 0.9; }
+        #JellyfinPlusConfigPage .jpTab[aria-selected="true"] { opacity: 1; border-bottom-color: var(--jf-palette-primary-main, #00a4dc); }
+        #JellyfinPlusConfigPage .jpTab:focus-visible { outline: 2px solid #00a4dc; outline-offset: -2px; }
         #JellyfinPlusConfigPage .jpSec { border: 1px solid rgba(128,128,128,0.3); border-radius: 8px; margin: 0 0 1em; }
-        #JellyfinPlusConfigPage .jpSub { border-top: 1px solid rgba(128,128,128,0.22); margin: 0; }
-        #JellyfinPlusConfigPage .jpSec > summary, #JellyfinPlusConfigPage .jpSub > summary { display: flex; align-items: baseline; flex-wrap: wrap;
-            gap: 0.2em 0.8em; padding: 0.9em 2.6em 0.9em 1em; cursor: pointer; list-style: none; position: relative; }
-        #JellyfinPlusConfigPage .jpSec > summary::-webkit-details-marker, #JellyfinPlusConfigPage .jpSub > summary::-webkit-details-marker { display: none; }
-        #JellyfinPlusConfigPage .jpSec > summary::after, #JellyfinPlusConfigPage .jpSub > summary::after { content: ""; position: absolute; right: 1.2em; top: 50%;
-            width: 0.5em; height: 0.5em; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; opacity: 0.6;
-            transform: translateY(-70%) rotate(45deg); transition: transform 0.15s ease; }
-        #JellyfinPlusConfigPage details[open] > summary::after { transform: translateY(-30%) rotate(-135deg); }
-        #JellyfinPlusConfigPage .jpSec > summary .sectionTitle, #JellyfinPlusConfigPage .jpSub > summary .sectionTitle { margin: 0; }
-        #JellyfinPlusConfigPage .jpSub > summary .sectionTitle { font-size: 1.1em; }
+        #JellyfinPlusConfigPage .jpSec[hidden], #JellyfinPlusConfigPage .jpSave[hidden] { display: none; }
+        #JellyfinPlusConfigPage .jpHead { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.2em 0.8em; padding: 0.9em 1em 0.4em; }
+        #JellyfinPlusConfigPage .jpHead .sectionTitle { margin: 0; }
+        #JellyfinPlusConfigPage .jpSub > .jpHead { padding: 0.9em 0 0.3em; }
+        #JellyfinPlusConfigPage .jpSub > .jpHead .sectionTitle { font-size: 1.1em; }
         #JellyfinPlusConfigPage .jpHint { opacity: 0.6; font-size: 0.9em; }
         #JellyfinPlusConfigPage .jpBody { padding: 0 1em 1em; }
-        #JellyfinPlusConfigPage .jpSec > .jpBody > .jpSub { margin: 0 -1em; }
-        #JellyfinPlusConfigPage .jpSub > .jpBody { padding: 0 1em 1em 1.5em; }
-        #JellyfinPlusConfigPage summary:focus-visible { outline: 2px solid #00a4dc; outline-offset: -2px; }
+        #JellyfinPlusConfigPage .jpSub { border-top: 1px solid rgba(128,128,128,0.22); }
+        #JellyfinPlusConfigPage .jpSub > .jpBody { padding: 0 0 0.5em; }
         #JellyfinPlusConfigPage .jpSave { position: sticky; bottom: 0; padding: 0.8em 0; z-index: 1;
-            background: var(--jf-palette-background-default, #101010); }
+            background: var(--jf-palette-background-default, #000); }
     </style>
     <div data-role="content">
         <div class="content-primary">
@@ -49,10 +50,16 @@
                 </div>
                 </div>
 
-                <div class="jpTools"><button is="emby-button" type="button" class="emby-button" id="jpExpandAll"><span>Expand all</span></button><button is="emby-button" type="button" class="emby-button" id="jpCollapseAll"><span>Collapse all</span></button></div>
+                <div class="jpTabs" role="tablist" aria-label="Settings sections">
+                    <button type="button" class="jpTab" role="tab" id="jpTab-general" data-tab="general" aria-controls="jpSec-when jpSec-sessions" aria-selected="false">General</button>
+                    <button type="button" class="jpTab" role="tab" id="jpTab-levels" data-tab="levels" aria-controls="jpSec-levels" aria-selected="false">Levels</button>
+                    <button type="button" class="jpTab" role="tab" id="jpTab-policy" data-tab="policy" aria-controls="jpSec-policy jpSec-capacity" aria-selected="false">Policy</button>
+                    <button type="button" class="jpTab" role="tab" id="jpTab-files" data-tab="files" aria-controls="jpSec-files" aria-selected="false">Files</button>
+                    <button type="button" class="jpTab" role="tab" id="jpTab-library" data-tab="library" aria-controls="jpMaintenance jpTags" aria-selected="false">Library</button>
+                </div>
 
-                <details class="jpSec" id="jpSec-when" open>
-                    <summary><h2 class="sectionTitle">When it upscales</h2><span class="jpHint">Target size, ratios, source limit</span></summary>
+                <section class="jpSec" id="jpSec-when" role="tabpanel" aria-labelledby="jpTab-general" data-tab="general">
+                    <div class="jpHead"><h2 class="sectionTitle">When it upscales</h2><span class="jpHint">Target size, ratios, source limit</span></div>
                     <div class="jpBody">
                     <p class="fieldDescription">These five values only mean something together; the example below works them out from what is in the boxes.</p>
 
@@ -99,15 +106,15 @@
                         <div id="thresholdExample"></div>
                     </div>
                     </div>
-                </details>
+                </section>
 
-                <details class="jpSec" id="jpSec-levels" open>
-                    <summary><h2 class="sectionTitle">Default levels</h2><span class="jpHint">What runs when a player does not choose, and what players may use</span></summary>
+                <section class="jpSec" id="jpSec-levels" role="tabpanel" aria-labelledby="jpTab-levels" data-tab="levels">
+                    <div class="jpHead"><h2 class="sectionTitle">Default levels</h2><span class="jpHint">What runs when a player does not choose, and what players may use</span></div>
                     <div class="jpBody">
                         <p class="fieldDescription">Each level applies when a session does not pick its own. The Allow box is a master switch for that enhancement.</p>
 
-                        <details class="jpSub" id="jpSec-levels-upscale" open>
-                            <summary><h3 class="sectionTitle">Upscale and sharpen</h3><span class="jpHint">Super-resolution, scaling kernel, unblur</span></summary>
+                        <section class="jpSub" id="jpSec-levels-upscale">
+                            <div class="jpHead"><h3 class="sectionTitle">Upscale and sharpen</h3><span class="jpHint">Super-resolution, scaling kernel, unblur</span></div>
                             <div class="jpBody">
                         <div class="selectContainer">
                             <select is="emby-select" id="SrLevel" data-config="SrLevel" data-kind="select" data-default="fsrcnnx" label="Super-resolution shader (default)">
@@ -159,10 +166,10 @@
                         </div>
                         </div>
                             </div>
-                        </details>
+                        </section>
 
-                        <details class="jpSub" id="jpSec-levels-clean">
-                            <summary><h3 class="sectionTitle">Clean-up</h3><span class="jpHint">Denoise, deblock, deband</span></summary>
+                        <section class="jpSub" id="jpSec-levels-clean">
+                            <div class="jpHead"><h3 class="sectionTitle">Clean-up</h3><span class="jpHint">Denoise, deblock, deband</span></div>
                             <div class="jpBody">
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
@@ -236,10 +243,10 @@
                         </div>
                         </div>
                             </div>
-                        </details>
+                        </section>
 
-                        <details class="jpSub" id="jpSec-levels-detail">
-                            <summary><h3 class="sectionTitle">Detail and colour</h3><span class="jpHint">Refine, chroma</span></summary>
+                        <section class="jpSub" id="jpSec-levels-detail">
+                            <div class="jpHead"><h3 class="sectionTitle">Detail and colour</h3><span class="jpHint">Refine, chroma</span></div>
                             <div class="jpBody">
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
@@ -281,10 +288,10 @@
                         </div>
                         </div>
                             </div>
-                        </details>
+                        </section>
 
-                        <details class="jpSub" id="jpSec-levels-neural">
-                            <summary><h3 class="sectionTitle">Neural and game upscalers</h3><span class="jpHint">AI models, DLSS / FSR-style game upscalers</span></summary>
+                        <section class="jpSub" id="jpSec-levels-neural">
+                            <div class="jpHead"><h3 class="sectionTitle">Neural and game upscalers</h3><span class="jpHint">AI models, DLSS / FSR-style game upscalers</span></div>
                             <div class="jpBody">
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
@@ -363,13 +370,13 @@
                         </div>
                         </div>
                             </div>
-                        </details>
+                        </section>
 
                     </div>
-                </details>
+                </section>
 
-                <details class="jpSec" id="jpSec-policy">
-                    <summary><h2 class="sectionTitle">Transcode policy</h2><span class="jpHint">Which sessions are enhanced, and how they are encoded</span></summary>
+                <section class="jpSec" id="jpSec-policy" role="tabpanel" aria-labelledby="jpTab-policy" data-tab="policy">
+                    <div class="jpHead"><h2 class="sectionTitle">Transcode policy</h2><span class="jpHint">Which sessions are enhanced, and how they are encoded</span></div>
                     <div class="jpBody">
                     <div class="checkboxContainer checkboxContainer-withDescription">
                         <label class="emby-checkbox-label">
@@ -424,10 +431,10 @@
                     </div>
                     </div>
                     </div>
-                </details>
+                </section>
 
-                <details class="jpSec" id="jpSec-capacity">
-                    <summary><h2 class="sectionTitle">Capacity</h2><span class="jpHint">How many enhanced transcodes may run at once</span></summary>
+                <section class="jpSec" id="jpSec-capacity" role="tabpanel" aria-labelledby="jpTab-policy" data-tab="policy">
+                    <div class="jpHead"><h2 class="sectionTitle">Capacity</h2><span class="jpHint">How many enhanced transcodes may run at once</span></div>
                     <div class="jpBody">
                     <div class="inputContainer">
                         <input is="emby-input" type="number" id="MaxConcurrent" data-config="MaxConcurrent" data-kind="int" data-default="4" label="Maximum concurrent enhanced transcodes" min="0" max="16" required />
@@ -443,10 +450,10 @@
                     </div>
                     </div>
                     </div>
-                </details>
+                </section>
 
-                <details class="jpSec" id="jpSec-files">
-                    <summary><h2 class="sectionTitle">File locations</h2><span class="jpHint">Shaders, models and runtimes; defaults suit a standard install</span></summary>
+                <section class="jpSec" id="jpSec-files" role="tabpanel" aria-labelledby="jpTab-files" data-tab="files">
+                    <div class="jpHead"><h2 class="sectionTitle">File locations</h2><span class="jpHint">Shaders, models and runtimes; defaults suit a standard install</span></div>
                     <div class="jpBody">
                     <p class="fieldDescription">
                         <p class="fieldDescription">
@@ -504,7 +511,7 @@
                     </div>
                     </div>
                     </div>
-                </details>
+                </section>
 
                 <div class="jpSave">
                     <button is="emby-button" type="submit" class="raised button-submit block emby-button">
@@ -513,8 +520,8 @@
                 </div>
             </form>
 
-            <details class="jpSec" id="jpSec-sessions" open>
-                <summary><h2 class="sectionTitle">Recent sessions</h2><span class="jpHint">What the server actually did</span></summary>
+            <section class="jpSec" id="jpSec-sessions" role="tabpanel" aria-labelledby="jpTab-general" data-tab="general">
+                <div class="jpHead"><h2 class="sectionTitle">Recent sessions</h2><span class="jpHint">What the server actually did</span></div>
                 <div class="jpBody">
                 <p class="fieldDescription">What the server actually did, as it went into the ffmpeg command.</p>
                 <div class="jpScroll">
@@ -524,10 +531,10 @@
                 </table>
                 </div>
                 </div>
-            </details>
+            </section>
 
-            <details class="jpSec" id="jpMaintenance">
-                <summary><h2 class="sectionTitle">Library maintenance</h2><span class="jpHint">Run Jellyfin scheduled tasks from here</span></summary>
+            <section class="jpSec" id="jpMaintenance" role="tabpanel" aria-labelledby="jpTab-library" data-tab="library">
+                <div class="jpHead"><h2 class="sectionTitle">Library maintenance</h2><span class="jpHint">Run Jellyfin scheduled tasks from here</span></div>
                 <div class="jpBody">
                 <p class="fieldDescription">
                     Starts Jellyfin's own scheduled tasks from here instead of Dashboard, Scheduled Tasks. Nothing
@@ -535,10 +542,10 @@
                 </p>
                 <div id="jpTaskRows"></div>
                 </div>
-            </details>
+            </section>
 
-            <details class="jpSec" id="jpTags">
-                <summary><h2 class="sectionTitle">Tags</h2><span class="jpHint">Rename, merge or delete tags across the library</span></summary>
+            <section class="jpSec" id="jpTags" role="tabpanel" aria-labelledby="jpTab-library" data-tab="library">
+                <div class="jpHead"><h2 class="sectionTitle">Tags</h2><span class="jpHint">Rename, merge or delete tags across the library</span></div>
                 <div class="jpBody">
                 <p class="fieldDescription">
                     Every tag with the number of items that carry it. Tick tags, choose what to do, press Preview to see
@@ -584,37 +591,57 @@
                 </div>
                 <p class="fieldDescription" id="jpTagResult"></p>
                 </div>
-            </details>
+            </section>
 
         </div>
     </div>
 
     <script type="text/javascript">
         (function () {
-            var KEY = 'jellyfinPlus.configSections';
+            var KEY = 'jellyfinPlus.configTab';
             var page = document.querySelector('#JellyfinPlusConfigPage');
             if (!page) { return; }
-            var all = function () { return page.querySelectorAll('details.jpSec, details.jpSub'); };
-            var state = {};
-            try { state = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { state = {}; }
-            Array.prototype.forEach.call(all(), function (d) {
-                if (d.id && typeof state[d.id] === 'boolean') { d.open = state[d.id]; }
-                d.addEventListener('toggle', function () {
-                    if (!d.id) { return; }
-                    state[d.id] = d.open;
-                    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* storage full or blocked */ }
+            try { localStorage.removeItem('jellyfinPlus.configSections'); } catch (e) { /* blocked */ }
+            var tabs = page.querySelectorAll('.jpTab');
+            var panels = page.querySelectorAll('section.jpSec[data-tab]');
+            var save = page.querySelector('.jpSave');
+            var show = function (key, focus) {
+                var hit = false;
+                Array.prototype.forEach.call(tabs, function (t) {
+                    var on = t.getAttribute('data-tab') === key;
+                    hit = hit || on;
+                    t.setAttribute('aria-selected', on ? 'true' : 'false');
+                    t.tabIndex = on ? 0 : -1;
+                    if (on && focus) { t.focus(); }
+                });
+                if (!hit) { return show('general', focus); }
+                Array.prototype.forEach.call(panels, function (p) { p.hidden = p.getAttribute('data-tab') !== key; });
+                if (save) { save.hidden = key === 'library'; }
+                try { localStorage.setItem(KEY, key); } catch (e) { /* storage full or blocked */ }
+            };
+            Array.prototype.forEach.call(tabs, function (t, i) {
+                t.addEventListener('click', function () { show(t.getAttribute('data-tab')); });
+                t.addEventListener('keydown', function (e) {
+                    var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+                    if (!d) { return; }
+                    e.preventDefault();
+                    show(tabs[(i + d + tabs.length) % tabs.length].getAttribute('data-tab'), true);
                 });
             });
-            var setAll = function (open) { Array.prototype.forEach.call(all(), function (d) { d.open = open; }); };
-            var ex = page.querySelector('#jpExpandAll');
-            var co = page.querySelector('#jpCollapseAll');
-            if (ex) { ex.addEventListener('click', function () { setAll(true); }); }
-            if (co) { co.addEventListener('click', function () { setAll(false); }); }
-            page.addEventListener('invalid', function (e) {
-                for (var n = e.target; n && n !== page; n = n.parentNode) {
-                    if (n.tagName === 'DETAILS') { n.open = true; }
-                }
-            }, true);
+            var stored = null;
+            try { stored = localStorage.getItem(KEY); } catch (e) { stored = null; }
+            show(stored || 'general');
+            // A hidden invalid field would block Save with no visible reason: before the browser
+            // validates (click runs first), switch to the tab holding the first invalid field.
+            var form = page.querySelector('#JellyfinPlusConfigForm');
+            var btn = form && form.querySelector('button[type="submit"]');
+            if (btn) {
+                btn.addEventListener('click', function () {
+                    var bad = form.querySelector(':invalid:not(fieldset):not(form)');
+                    var p = bad && bad.closest('section.jpSec[data-tab]');
+                    if (p && p.hidden) { show(p.getAttribute('data-tab')); }
+                });
+            }
         })();
     </script>
     <script type="text/javascript">
