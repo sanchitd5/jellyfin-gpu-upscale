@@ -643,6 +643,10 @@ footer line under the title with the first two tags ("tag one - tag two"). Resol
 both pixel sides (1920x800 is 1080p, a vertical 1080x1920 clip is too): 4K, 1440p, 1080p, 720p, 480p,
 SD. The chips ignore pointer events; a card with no footer under the thumbnail gets no tag line. Not
 on TV layouts.
+- **Tip chip.** `CommunityRating` holds the tip value for that recording, so a card with one above 0 gets a
+  "Tip 167" chip after the category pill (`tipLabel` in `model/card-badges.js`: rounded, "6.6k" / "12k" from
+  1000; nothing at 0 or none). `CommunityRating` is in the default `/Items` DTO, so the lookup asks for no
+  extra Fields. Cards only, not list rows.
 - **Category pill.** The item's tag from the PRIMARY smart category (section 3, "Smart tag categories":
   the exclusive facet covering the most items; `primaryTagOf(itemTags, categories)` in
   `model/smart-tags.js`) is an accent pill (`--jp-accent`) at the end of the top-left chip group, clear of

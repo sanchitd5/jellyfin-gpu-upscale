@@ -1,6 +1,6 @@
 // Run: node web/src/model/card-badges.test.mjs   (no framework; exits non-zero on failure)
 import assert from 'node:assert/strict';
-import { resolutionLabel, runtimeLabel, badgeInfo, badgeType, tagsText, TAG_COUNT, ALL_TAGS_MAX } from './card-badges.js';
+import { resolutionLabel, runtimeLabel, tipLabel, badgeInfo, badgeType, tagsText, TAG_COUNT, ALL_TAGS_MAX } from './card-badges.js';
 
 var passed = 0;
 function t(name, fn) {
@@ -76,7 +76,7 @@ t('badgeInfo survives a sparse or odd dto', function () {
     assert.equal(badgeInfo(null), null);
     assert.equal(badgeInfo('x'), null);
     var i = badgeInfo({});
-    assert.deepEqual(i, { fav: false, res: '', runtime: '', tags: [], all: [], type: '' });
+    assert.deepEqual(i, { fav: false, res: '', runtime: '', tip: '', tags: [], all: [], type: '' });
     assert.deepEqual(badgeInfo({ Tags: [1, null, 'ok'] }).tags, ['ok']);
     assert.deepEqual(badgeInfo({ Tags: 'not a list' }).tags, []);
 });
@@ -89,6 +89,23 @@ t('tagsText and badgeType', function () {
     assert.equal(badgeType('Movie'), true);
     assert.equal(badgeType('Series'), false);
     assert.equal(badgeType('Person'), false);
+});
+
+t('tip label from CommunityRating: none at 0, compact from 1000', function () {
+    assert.equal(tipLabel(undefined), '');
+    assert.equal(tipLabel(null), '');
+    assert.equal(tipLabel(0), '');
+    assert.equal(tipLabel(-5), '');
+    assert.equal(tipLabel('x'), '');
+    assert.equal(tipLabel(0.3), '');
+    assert.equal(tipLabel(90), '90');
+    assert.equal(tipLabel(167.6), '168');
+    assert.equal(tipLabel(999), '999');
+    assert.equal(tipLabel(1000), '1k');
+    assert.equal(tipLabel(6550), '6.6k');
+    assert.equal(tipLabel(12400), '12k');
+    assert.equal(badgeInfo({ CommunityRating: 167 }).tip, '167');
+    assert.equal(badgeInfo({}).tip, '');
 });
 
 console.log(passed + ' passed');

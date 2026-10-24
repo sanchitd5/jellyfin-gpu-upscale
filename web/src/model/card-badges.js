@@ -61,6 +61,25 @@ export function runtimeLabel(ticks) {
     return h > 0 ? h + ':' + pad2(m) + ':' + pad2(sec) : m + ':' + pad2(sec);
 }
 
+/*
+ * CommunityRating -> the tip chip's number: "167", "6.6k", "12k". '' for none, zero, negative or not a
+ * number (here the rating is the tip value recorded for that recording, so 0 means no tips).
+ */
+export function tipLabel(rating) {
+    var v = Number(rating);
+    if (!isFinite(v) || !(v > 0)) {
+        return '';
+    }
+
+    if (v < 1000) {
+        var r = Math.round(v);
+        return r > 0 ? String(r) : '';
+    }
+
+    var k = v / 1000;
+    return (k < 10 ? String(Math.round(k * 10) / 10) : String(Math.round(k))) + 'k';
+}
+
 /* What a card keeps of an item: small on purpose, the cache holds one per card ever seen. */
 export function badgeInfo(dto) {
     if (!dto || typeof dto !== 'object') {
@@ -82,6 +101,7 @@ export function badgeInfo(dto) {
         fav: !!(dto.UserData && dto.UserData.IsFavorite),
         res: resolutionLabel(dto.Width, dto.Height),
         runtime: runtimeLabel(dto.RunTimeTicks),
+        tip: tipLabel(dto.CommunityRating),
         tags: all.slice(0, TAG_COUNT),
         all: all,
         type: dto.Type || ''

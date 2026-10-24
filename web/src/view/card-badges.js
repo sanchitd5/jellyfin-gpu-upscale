@@ -51,6 +51,7 @@ var CSS = [
         + ' color: #fff; font-size: 0.72em; font-weight: 600; line-height: 1.5; letter-spacing: 0.02em; white-space: nowrap;'
         + ' font-variant-numeric: tabular-nums; }',
     '.' + CHIPS + ' > .jpChipRes { background: rgba(0,0,0,0.82); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.55); }',
+    '.' + CHIPS + ' > .jpChipTip { background: rgba(0,0,0,0.82); color: #ffd36b; box-shadow: inset 0 0 0 1px rgba(255,211,107,0.6); }',
     '.' + TAGS + ' { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.8em; opacity: 0.75; }',
     // The category pill: the theme's accent (fallbacks for the theme switched off), clipped, never wider than the card.
     '.' + CHIPS + ' > .' + CAT + ', .' + LIST_CAT + ' { background: var(--jp-accent, #5ccfff); color: var(--jp-on-accent, #0b1a22);'
@@ -146,6 +147,8 @@ function paint(card, info) {
     if (info.res) { texts.push(['jpChipRes', info.res]); }
     if (info.runtime) { texts.push(['jpChipRuntime', info.runtime]); }
     if (cat) { texts.push([CAT, cat.label, cat.name]); }
+    // CommunityRating here is the tip value for that recording; beside the category pill.
+    if (info.tip) { texts.push(['jpChipTip', 'Tip ' + info.tip, 'Tips for this recording (community rating)']); }
     var sig = texts.map(function (t) { return t[1]; }).join('|');
     if (!texts.length) {
         if (chips) { chips.remove(); }
