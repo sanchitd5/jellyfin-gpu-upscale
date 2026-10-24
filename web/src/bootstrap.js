@@ -49,6 +49,7 @@ import { installListSort } from './controller/list-sort.js';
 import { installThemeFallback } from './controller/theme-fallback.js';
 import { installLibraryInfinite } from './view/library-infinite.js';
 import { installBottomNav } from './view/bottom-nav.js';
+import { installBrand } from './view/brand.js';
 
 /*
  * ENTRY POINT. Everything above this module is imported for its side effects (installing hooks)
@@ -70,6 +71,8 @@ function feature(name, install) {
     try {
         // First: the --jp-* tokens and tier classes must exist before any other module's CSS reads them.
         feature('mobile theme', installMobileTheme);
+        // "JellyfinPlus" in place of the Jellyfin logo / server-name wordmark (CSS only).
+        feature('brand', installBrand);
         // Before hookWebpack: it arms noteLazyLoader(), which the module wrapper calls as chunks evaluate.
         feature('image preload', installImagePreload);
         feature('theme fallback', installThemeFallback);
