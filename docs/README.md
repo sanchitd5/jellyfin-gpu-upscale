@@ -66,6 +66,7 @@ Each one covers what the level does, what it costs, and what you must obtain or 
 | [dlss-neural-rendering.md](roadmap/dlss-neural-rendering.md) | DLSS Neural Rendering: investigated, not started |
 | [optiscaler-research.md](roadmap/optiscaler-research.md) | OptiScaler background |
 | [plex.md](roadmap/plex.md) | Plex support |
+| [plugin-conversion.md](roadmap/plugin-conversion.md) | Becoming a standard plugin: inventory of every Harmony patch and out-of-plugin mechanism with a REPLACEABLE / PARTIAL / NEEDS-PATCH verdict, target architecture, phased migration |
 
 ## tasks/ — working briefs and their logs
 
