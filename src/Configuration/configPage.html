@@ -122,7 +122,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DeblurAllowed" data-config="DeblurAllowed" data-kind="bool" data-default="true" />
+                        <input is="emby-checkbox" type="checkbox" id="DeblurAllowed" data-config="DeblurAllowed" data-gates="DeblurLevel" data-kind="bool" data-default="true" />
                         <span>Allow unblur (sharpening)</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -161,11 +161,107 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DenoiseAllowed" data-config="DenoiseAllowed" data-kind="bool" data-default="true" />
+                        <input is="emby-checkbox" type="checkbox" id="DenoiseAllowed" data-config="DenoiseAllowed" data-gates="DenoiseLevel" data-kind="bool" data-default="true" />
                         <span>Allow denoise</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
                         Master switch. When off, no playback session can turn denoise on.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="DenoiseLevel" data-config="DenoiseLevel" data-kind="select" data-default="off" label="Denoise (default)">
+                        <option value="off">Off</option>
+                        <option value="light">Light - atadenoise (temporal, cheap)</option>
+                        <option value="strong">Strong - nlmeans (spatial, slower)</option>
+                        <option value="max">Max - nlmeans s=2.0 (slowest)</option>
+                        <option value="oidn">OIDN - Intel Open Image Denoise (advanced, slowest)</option>
+                        <option value="optix">OptiX - NVIDIA AI denoiser, spatial (advanced)</option>
+                        <option value="optix-temporal">OptiX temporal - NVIDIA AI denoiser + motion vectors (advanced)</option>
+                    </select>
+                    <div class="fieldDescription">
+                        Runs before the upscale, so the network is not asked to reconstruct noise into detail.
+                        Light is <code>atadenoise</code> (temporal, CPU); Strong and Max are
+                        <code>nlmeans_vulkan</code>, which recovered 46% and 53% of the structural damage
+                        noise had done to a visibly noisy source.
+                        <br /><br />
+                        <strong>OIDN is advanced, and slow.</strong> Intel Open Image Denoise, run through a
+                        separate patched ffmpeg build that only sessions choosing this level ever touch -
+                        no other playback goes near it. On a genuinely grainy high-bitrate source it is by
+                        far the best denoiser measured here (74-86% of the fidelity lost to noise recovered,
+                        against 34-53% for nlmeans and 4-6% for atadenoise, with no over-smoothing). On this
+                        library\'s normal material it measures as a no-op: within 0.01 dB of doing nothing.
+                        It is not in the quality ladder for that reason.
+                        <br /><br />
+                        <strong>OptiX is advanced too.</strong> Both OptiX levels run through the same
+                        patched ffmpeg build as OIDN. Plain <code>optix</code> is spatial, like OIDN and
+                        like everything here except <code>atadenoise</code>; on a grainy source it cut
+                        flicker 66% against OIDN's 61%, at about 1.4x OIDN's speed.
+                        <code>optix-temporal</code> is the only level that uses motion between frames: it
+                        feeds the denoiser the previous denoised frame plus a motion field computed on
+                        this GPU's optical-flow engine. Measured, it cut flicker 60% - less than the
+                        spatial models, because the noise being removed also corrupts the motion estimate
+                        it depends on. It is offered and costed honestly rather than promoted. Neither
+                        OptiX level is in the quality ladder.
+                        <br /><br />
+                        <strong>hqdn3d used to be "Light" and has been retired.</strong> It recovered 0.00 dB
+                        and 12% of the structural damage - it traded noise for blur one for one. Do not put it
+                        back for being cheap.
+                        <br /><br />
+                        Off by default: denoise costs roughly 60% of throughput (still about 2.5x realtime at
+                        4K), and on a clean source there is nothing to recover. Worth turning on for a noisy
+                        source you are also sharpening: RCAS on a visibly noisy source with no denoise measured
+                        a net loss (-0.14 dB, -0.0007 SSIM), because a sharpener amplifies noise as readily as
+                        detail.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="DeblockAllowed" data-config="DeblockAllowed" data-gates="DeblockLevel" data-kind="bool" data-default="true" />
+                        <span>Allow deblock</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn deblock on.
+                    </div>
+                </div>
+
+                <div class="selectContainer">
+                    <select is="emby-select" id="DeblockLevel" data-config="DeblockLevel" data-kind="select" data-default="off" label="Deblock (default)">
+                        <option value="off">Off</option>
+                        <option value="light">Light - deblock, gentle</option>
+                        <option value="strong">Strong - deblock, harder</option>
+                        <option value="fspp">fspp - libpostproc, also removes ringing</option>
+                        <option value="pp7">pp7 - libpostproc, strongest and most expensive</option>
+                    </select>
+                    <div class="fieldDescription">
+                        <strong>Not the same job as denoise above.</strong> Denoise removes noise in the
+                        picture. Deblock removes the SOURCE's own compression damage: the DCT block edges
+                        a low-bitrate encode leaves behind, and the mosquito ringing around hard edges.
+                        It runs at source resolution, before any super-resolution pass.
+                        <br /><br />
+                        It matters because every network here was trained on clean downsampled images. A
+                        block edge is not something those networks were ever shown, so they treat it as
+                        real detail and reconstruct it - the artefact comes out of the upscale larger and
+                        sharper than it went in.
+                        <br /><br />
+                        <code>light</code> and <code>strong</code> are libavfilter's <code>deblock</code>
+                        filter and address blocking only. <code>fspp</code> and <code>pp7</code> come from
+                        libpostproc and also remove ringing, at more CPU cost. All four are single-threaded
+                        CPU passes at source resolution, so they cost more on a large source than on a
+                        small one.
+                        <br /><br />
+                        Off by default, because no strength has been measured on this content yet.
+                    </div>
+                </div>
+
+                <div class="checkboxContainer checkboxContainer-withDescription">
+                    <label class="emby-checkbox-label">
+                        <input is="emby-checkbox" type="checkbox" id="RefineAllowed" data-config="RefineAllowed" data-gates="RefineLevel" data-kind="bool" data-default="true" />
+                        <span>Allow post-scale refinement</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Master switch. When off, no playback session can turn the refinement pass on.
                     </div>
                 </div>
 
@@ -196,11 +292,11 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="RefineAllowed" data-config="RefineAllowed" data-kind="bool" data-default="true" />
-                        <span>Allow post-scale refinement</span>
+                        <input is="emby-checkbox" type="checkbox" id="ChromaAllowed" data-config="ChromaAllowed" data-gates="ChromaLevel" data-kind="bool" data-default="true" />
+                        <span>Allow chroma upscaling</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn the refinement pass on.
+                        Master switch. When off, no playback session can turn the chroma pass on.
                     </div>
                 </div>
 
@@ -222,11 +318,11 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="ChromaAllowed" data-config="ChromaAllowed" data-kind="bool" data-default="true" />
-                        <span>Allow chroma upscaling</span>
+                        <input is="emby-checkbox" type="checkbox" id="NeuralAllowed" data-config="NeuralAllowed" data-gates="NeuralLevel" data-kind="bool" data-default="true" />
+                        <span>Allow neural super-resolution</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn the chroma pass on.
+                        Master switch. When off, no playback session can turn a network on.
                     </div>
                 </div>
 
@@ -268,11 +364,11 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="NeuralAllowed" data-config="NeuralAllowed" data-kind="bool" data-default="true" />
-                        <span>Allow neural super-resolution</span>
+                        <input is="emby-checkbox" type="checkbox" id="GameAllowed" data-config="GameAllowed" data-gates="GameLevel GameJitter GameDepth GameReactive" data-kind="bool" data-default="true" />
+                        <span>Allow game temporal upscalers</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn a network on.
+                        Master switch. When off, no playback session can turn one on.
                     </div>
                 </div>
 
@@ -368,103 +464,7 @@
 
                 <div class="checkboxContainer checkboxContainer-withDescription">
                     <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="GameAllowed" data-config="GameAllowed" data-kind="bool" data-default="true" />
-                        <span>Allow game temporal upscalers</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn one on.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="DenoiseLevel" data-config="DenoiseLevel" data-kind="select" data-default="off" label="Denoise (default)">
-                        <option value="off">Off</option>
-                        <option value="light">Light - atadenoise (temporal, cheap)</option>
-                        <option value="strong">Strong - nlmeans (spatial, slower)</option>
-                        <option value="max">Max - nlmeans s=2.0 (slowest)</option>
-                        <option value="oidn">OIDN - Intel Open Image Denoise (advanced, slowest)</option>
-                        <option value="optix">OptiX - NVIDIA AI denoiser, spatial (advanced)</option>
-                        <option value="optix-temporal">OptiX temporal - NVIDIA AI denoiser + motion vectors (advanced)</option>
-                    </select>
-                    <div class="fieldDescription">
-                        Runs before the upscale, so the network is not asked to reconstruct noise into detail.
-                        Light is <code>atadenoise</code> (temporal, CPU); Strong and Max are
-                        <code>nlmeans_vulkan</code>, which recovered 46% and 53% of the structural damage
-                        noise had done to a visibly noisy source.
-                        <br /><br />
-                        <strong>OIDN is advanced, and slow.</strong> Intel Open Image Denoise, run through a
-                        separate patched ffmpeg build that only sessions choosing this level ever touch -
-                        no other playback goes near it. On a genuinely grainy high-bitrate source it is by
-                        far the best denoiser measured here (74-86% of the fidelity lost to noise recovered,
-                        against 34-53% for nlmeans and 4-6% for atadenoise, with no over-smoothing). On this
-                        library\'s normal material it measures as a no-op: within 0.01 dB of doing nothing.
-                        It is not in the quality ladder for that reason.
-                        <br /><br />
-                        <strong>OptiX is advanced too.</strong> Both OptiX levels run through the same
-                        patched ffmpeg build as OIDN. Plain <code>optix</code> is spatial, like OIDN and
-                        like everything here except <code>atadenoise</code>; on a grainy source it cut
-                        flicker 66% against OIDN's 61%, at about 1.4x OIDN's speed.
-                        <code>optix-temporal</code> is the only level that uses motion between frames: it
-                        feeds the denoiser the previous denoised frame plus a motion field computed on
-                        this GPU's optical-flow engine. Measured, it cut flicker 60% - less than the
-                        spatial models, because the noise being removed also corrupts the motion estimate
-                        it depends on. It is offered and costed honestly rather than promoted. Neither
-                        OptiX level is in the quality ladder.
-                        <br /><br />
-                        <strong>hqdn3d used to be "Light" and has been retired.</strong> It recovered 0.00 dB
-                        and 12% of the structural damage - it traded noise for blur one for one. Do not put it
-                        back for being cheap.
-                        <br /><br />
-                        Off by default: denoise costs roughly 60% of throughput (still about 2.5x realtime at
-                        4K), and on a clean source there is nothing to recover. Worth turning on for a noisy
-                        source you are also sharpening: RCAS on a visibly noisy source with no denoise measured
-                        a net loss (-0.14 dB, -0.0007 SSIM), because a sharpener amplifies noise as readily as
-                        detail.
-                    </div>
-                </div>
-
-                <div class="checkboxContainer checkboxContainer-withDescription">
-                    <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="DeblockAllowed" data-config="DeblockAllowed" data-kind="bool" data-default="true" />
-                        <span>Allow deblock</span>
-                    </label>
-                    <div class="fieldDescription checkboxFieldDescription">
-                        Master switch. When off, no playback session can turn deblock on.
-                    </div>
-                </div>
-
-                <div class="selectContainer">
-                    <select is="emby-select" id="DeblockLevel" data-config="DeblockLevel" data-kind="select" data-default="off" label="Deblock (default)">
-                        <option value="off">Off</option>
-                        <option value="light">Light - deblock, gentle</option>
-                        <option value="strong">Strong - deblock, harder</option>
-                        <option value="fspp">fspp - libpostproc, also removes ringing</option>
-                        <option value="pp7">pp7 - libpostproc, strongest and most expensive</option>
-                    </select>
-                    <div class="fieldDescription">
-                        <strong>Not the same job as denoise above.</strong> Denoise removes noise in the
-                        picture. Deblock removes the SOURCE's own compression damage: the DCT block edges
-                        a low-bitrate encode leaves behind, and the mosquito ringing around hard edges.
-                        It runs at source resolution, before any super-resolution pass.
-                        <br /><br />
-                        It matters because every network here was trained on clean downsampled images. A
-                        block edge is not something those networks were ever shown, so they treat it as
-                        real detail and reconstruct it - the artefact comes out of the upscale larger and
-                        sharper than it went in.
-                        <br /><br />
-                        <code>light</code> and <code>strong</code> are libavfilter's <code>deblock</code>
-                        filter and address blocking only. <code>fspp</code> and <code>pp7</code> come from
-                        libpostproc and also remove ringing, at more CPU cost. All four are single-threaded
-                        CPU passes at source resolution, so they cost more on a large source than on a
-                        small one.
-                        <br /><br />
-                        Off by default, because no strength has been measured on this content yet.
-                    </div>
-                </div>
-
-                <div class="checkboxContainer checkboxContainer-withDescription">
-                    <label class="emby-checkbox-label">
-                        <input is="emby-checkbox" type="checkbox" id="Deband" data-config="Deband" data-kind="bool" data-default="true" />
+                        <input is="emby-checkbox" type="checkbox" id="Deband" data-config="Deband" data-gates="DebandThreshold DebandGrain" data-kind="bool" data-default="true" />
                         <span>Deband</span>
                     </label>
                     <div class="fieldDescription checkboxFieldDescription">
@@ -943,11 +943,24 @@
                 });
             }
 
+            // A box with data-gates="A B" switches the controls with those ids off while it is
+            // unticked. Display only: the server already treats an unticked Allow as off, and a
+            // disabled control still saves its value.
+            function syncGates(page) {
+                Array.prototype.forEach.call(page.querySelectorAll('[data-gates]'), function (master) {
+                    master.getAttribute('data-gates').split(' ').forEach(function (id) {
+                        var dep = page.querySelector('#' + id);
+                        if (dep) { dep.disabled = !master.checked; }
+                    });
+                });
+            }
+
             document.querySelector('#JellyfinPlusConfigPage').addEventListener('pageshow', function () {
                 var page = this;
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
                     applyConfig(page, config);
+                    syncGates(page);
                     updateThresholdExample(page);
                     Dashboard.hideLoadingMsg();
                 });
@@ -955,6 +968,9 @@
                 // once rather than stacked up.
                 if (!exampleWired) {
                     exampleWired = true;
+                    Array.prototype.forEach.call(page.querySelectorAll('[data-gates]'), function (m) {
+                        m.addEventListener('change', function () { syncGates(page); });
+                    });
                     ['#TargetHeight', '#MaxTargetHeight', '#MinScaleFactor', '#SrMinScaleFactor', '#MaxSourceHeight']
                         .forEach(function (id) {
                             page.querySelector(id).addEventListener('input', function () {
